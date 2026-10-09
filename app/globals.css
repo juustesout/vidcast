@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --studio-bg: #070b10;
+  --studio-panel: rgba(13, 19, 27, 0.82);
+  --studio-panel-border: rgba(159, 180, 212, 0.16);
+  --studio-accent: #a9c5ff;
+  --studio-accent-strong: #f2d17b;
+}
+
+html,
+body {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(78, 110, 156, 0.18), transparent 34%),
+    radial-gradient(circle at top right, rgba(242, 209, 123, 0.12), transparent 28%),
+    linear-gradient(180deg, #091018 0%, #05070b 100%);
+}
+
+body {
+  margin: 0;
+  color: #e8eef7;
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: rgba(169, 197, 255, 0.35);
+  color: #fff;
+}
+
+.studio-panel {
+  background: var(--studio-panel);
+  border: 1px solid var(--studio-panel-border);
+  backdrop-filter: blur(16px);
+}
+
+.studio-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(159, 180, 212, 0.45) transparent;
+}
+
+.studio-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.studio-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(159, 180, 212, 0.35);
+  border-radius: 999px;
+}
+
+.studio-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
