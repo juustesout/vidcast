@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { assertRunPolicyPreflight, resolveRunPolicy } from '@/lib/production/run-policy';
+import { assertRunPolicyPreflight, resolveManualGenerationProvider, resolveRunPolicy, RunPolicyError } from '@/lib/production/run-policy';
 import type { Project } from '@/lib/types/render';
 
 function createProjectWithRunningVideoJob(provider: 'openai' | 'local' = 'openai'): Project {
@@ -102,5 +102,61 @@ describe('run policy', () => {
 
     vi.stubEnv('OPENAI_API_KEY', '');
     expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/OPENAI_API_KEY/);
+  });
+});
+
+describe('manual generation provider policy', () => {
+  const mockServer = { allowRealProviders: false, defaultMode: 'mock' as const };
+  const realServer = { allowRealProviders: true, defaultMode: 'real' as const };
+
+  it('defaults to fake/local providers in mock mode', () => {
+    expect(resolveManualGenerationProvider('image', undefined, { serverConfig: mockServer })).toEqual({
+      mode: 'mock',
+      provider: 'fake'
+    });
+    expect(resolveManualGenerationProvider('video', undefined, { serverConfig: mockServer })).toEqual({
+      mode: 'mock',
+      provider: 'local'
+    });
+    expect(resolveManualGenerationProvider('narration', undefined, { serverConfig: mockServer })).toEqual({
+      mode: 'mock',
+      provider: 'fake'
+    });
+  });
+
+  it('rejects explicit paid providers in mock mode before any request shape is built', () => {
+    expect(() => resolveManualGenerationProvider('image', 'openai', { serverConfig: mockServer })).toThrow(RunPolicyError);
+    expect(() => resolveManualGenerationProvider('video', 'openai', { serverConfig: mockServer })).toThrow(/mock mode/i);
+    expect(() => resolveManualGenerationProvider('narration', 'elevenlabs', { serverConfig: mockServer })).toThrow(/mock mode/i);
+  });
+
+  it('honors a locked mock mode override even when the server default is real', () => {
+    expect(resolveManualGenerationProvider('image', undefined, { serverConfig: realServer, mode: 'mock' }).provider).toBe('fake');
+  });
+
+  it('rejects fake providers when the server is locked to real mode', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+    expect(() => resolveManualGenerationProvider('image', 'fake', { serverConfig: realServer })).toThrow(RunPolicyError);
+  });
+
+  it('resolves real providers only when credentials exist', () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    expect(() => resolveManualGenerationProvider('image', 'openai', { serverConfig: realServer })).toThrow(/OPENAI_API_KEY/);
+
+    vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+    expect(resolveManualGenerationProvider('image', 'openai', { serverConfig: realServer })).toEqual({
+      mode: 'real',
+      provider: 'openai'
+    });
+  });
+
+  it('rejects unsupported providers instead of silently falling back', () => {
+    expect(() => resolveManualGenerationProvider('image', 'gemini', { serverConfig: mockServer })).toThrow(/Unsupported/i);
+  });
+
+  it('normalizes alias providers per modality', () => {
+    expect(resolveManualGenerationProvider('image', 'local', { serverConfig: mockServer }).provider).toBe('fake');
+    expect(resolveManualGenerationProvider('video', 'fake', { serverConfig: mockServer }).provider).toBe('local');
+    expect(resolveManualGenerationProvider('narration', 'local', { serverConfig: mockServer }).provider).toBe('fake');
   });
 });

@@ -1,3 +1,5 @@
+import { resolveProviderDefaults, resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
+
 import { FakeVideoGenerationProvider } from './fake-provider';
 import { OpenAiVideoGenerationProvider } from './openai-provider';
 import { VideoGenerationProviderError, type VideoGenerationProvider } from './provider';
@@ -27,8 +29,9 @@ export function createVideoGenerationRegistry(): VideoGenerationRegistry {
 }
 
 export function getVideoGenerationConfigurationStatus(): { openaiConfigured: boolean; defaultProvider: string } {
+  const { defaultMode } = resolveRunPolicyServerConfig();
   return {
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
-    defaultProvider: 'openai'
+    defaultProvider: resolveProviderDefaults(defaultMode).video
   };
 }

@@ -1,3 +1,5 @@
+import { resolveProviderDefaults, resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
+
 import { ElevenLabsTextToSpeechProvider } from './elevenlabs-provider';
 import { FakeTextToSpeechProvider } from './fake-provider';
 import { TextToSpeechProviderError, type TextToSpeechProvider } from './provider';
@@ -27,9 +29,9 @@ export function createTextToSpeechRegistry(): TextToSpeechRegistry {
 }
 
 export function getTextToSpeechConfigurationStatus(): { elevenlabsConfigured: boolean; defaultProvider: string } {
-  const defaultProvider = process.env.TTS_DEFAULT_PROVIDER || (process.env.ELEVENLABS_API_KEY ? 'elevenlabs' : 'fake');
+  const { defaultMode } = resolveRunPolicyServerConfig();
   return {
     elevenlabsConfigured: Boolean(process.env.ELEVENLABS_API_KEY),
-    defaultProvider
+    defaultProvider: resolveProviderDefaults(defaultMode).narration
   };
 }

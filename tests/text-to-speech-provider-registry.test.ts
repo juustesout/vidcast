@@ -16,9 +16,9 @@ describe('Text-to-speech provider registry', () => {
     expect(() => registry.getProvider('unknown')).toThrow(TextToSpeechProviderError);
   });
 
-  it('reports configuration status', () => {
+  it('reports configuration status with policy default provider', () => {
     const status = getTextToSpeechConfigurationStatus();
     expect(typeof status.elevenlabsConfigured).toBe('boolean');
-    expect(typeof status.defaultProvider).toBe('string');
+    expect(status.defaultProvider).toBe('fake');
   });
 });

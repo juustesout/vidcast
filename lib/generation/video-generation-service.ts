@@ -3,6 +3,8 @@ import path from 'node:path';
 import { createVideoGenerationRegistry } from '@/lib/ai/video-generation/registry';
 import { VideoGenerationProviderError, type VideoReferenceInput } from '@/lib/ai/video-generation/provider';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
+import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
 import type { GenerationAttempt, GenerationProvider, GenerationRecord, GenerationStatus } from '@/lib/types/generation';
@@ -132,6 +134,28 @@ function sanitizeProviderError(error: unknown): { message: string; errorCode: Ge
   };
 }
 
+function mapRunPolicyError(error: RunPolicyError): SceneVideoGenerationError {
+  const codeByPolicyCode: Record<RunPolicyError['code'], string> = {
+    POLICY_DENIED: 'generation.policy.denied',
+    INVALID_POLICY: 'generation.policy.invalid',
+    PROVIDER_NOT_ALLOWED: 'generation.provider.notAllowed',
+    PROVIDER_NOT_CONFIGURED: 'generation.provider.notConfigured'
+  };
+
+  return new SceneVideoGenerationError(error.message, error.status, codeByPolicyCode[error.code]);
+}
+
+function resolveVideoProvider(requestedProvider: string | undefined, mode: RunMode | undefined): string {
+  try {
+    return resolveManualGenerationProvider('video', requestedProvider, { mode }).provider;
+  } catch (error) {
+    if (error instanceof RunPolicyError) {
+      throw mapRunPolicyError(error);
+    }
+    throw error;
+  }
+}
+
 function getReferenceById(project: Project, referenceId: string): ReferenceImage {
   const reference = project.references.find((entry) => entry.id === referenceId);
   if (!reference) {
@@ -202,7 +226,7 @@ function activeStatus(status: GenerationStatus): boolean {
 export async function submitSceneVideoGeneration(
   projectId: string,
   sceneId: string,
-  options: { regenerate?: boolean; provider?: string } = {},
+  options: { regenerate?: boolean; provider?: string; mode?: RunMode } = {},
   dependencies: VideoGenerationServiceDependencies = defaultDependencies
 ): Promise<SceneVideoGenerationSubmissionResult> {
   const key = sceneLockKey(projectId, sceneId);
@@ -238,7 +262,7 @@ export async function submitSceneVideoGeneration(
 
     assertGenerationTransition(current.status, 'queued', regenerate);
 
-    const providerKey = options.provider || (current.provider && current.provider !== 'other' ? current.provider : (process.env.VIDEO_GENERATION_DEFAULT_PROVIDER || 'openai'));
+    const providerKey = resolveVideoProvider(options.provider, options.mode);
     const provider = dependencies.registry.getProvider(providerKey);
     const referenceIds = current.referenceIds && current.referenceIds.length > 0 ? current.referenceIds : scene.referenceIds;
     const references = await resolveReferenceInputs(project, referenceIds, dependencies.media);
@@ -364,7 +388,8 @@ export async function submitSceneVideoGeneration(
 export async function refreshVideoGenerationAttempt(
   projectId: string,
   attemptId: string,
-  dependencies: VideoGenerationServiceDependencies = defaultDependencies
+  dependencies: VideoGenerationServiceDependencies = defaultDependencies,
+  options: { mode?: RunMode } = {}
 ): Promise<SceneVideoGenerationJobResult> {
   const key = attemptLockKey(projectId, attemptId);
   if (activeAttemptPollLocks.has(key)) {
@@ -423,7 +448,7 @@ export async function refreshVideoGenerationAttempt(
       throw new SceneVideoGenerationError('Active generation attempt is missing provider job id.', 500, 'generation.attempt.missingJobId');
     }
 
-    const providerKey = attempt.provider && attempt.provider !== 'other' ? attempt.provider : (process.env.VIDEO_GENERATION_DEFAULT_PROVIDER || 'openai');
+    const providerKey = resolveVideoProvider(attempt.provider && attempt.provider !== 'other' ? attempt.provider : undefined, options.mode);
     const provider = dependencies.registry.getProvider(providerKey);
 
     let providerStatus;

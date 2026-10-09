@@ -86,7 +86,7 @@ export function resolveRunPolicyServerConfig(): RunPolicyServerConfig {
   };
 }
 
-function resolveProviderDefaults(mode: RunMode): RunProviderSelection {
+export function resolveProviderDefaults(mode: RunMode): RunProviderSelection {
   if (mode === 'real') {
     return {
       image: 'openai',
@@ -304,5 +304,105 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
 
   return {
     requiredActionTypes
+  };
+}
+
+export type GenerationModality = 'image' | 'video' | 'narration';
+
+export interface GenerationProviderResolution {
+  mode: RunMode;
+  provider: string;
+}
+
+function normalizeRequestedProvider(
+  kind: GenerationModality,
+  requested: string | undefined
+): ImageRunProvider | VideoRunProvider | NarrationRunProvider | undefined {
+  if (!requested) {
+    return undefined;
+  }
+
+  const value = requested.trim().toLowerCase();
+  if (!value) {
+    return undefined;
+  }
+
+  if (kind === 'image') {
+    if (value === 'openai') {
+      return 'openai';
+    }
+    if (value === 'fake' || value === 'local') {
+      return 'fake';
+    }
+  } else if (kind === 'video') {
+    if (value === 'openai') {
+      return 'openai';
+    }
+    if (value === 'local' || value === 'fake') {
+      return 'local';
+    }
+  } else {
+    if (value === 'elevenlabs') {
+      return 'elevenlabs';
+    }
+    if (value === 'fake' || value === 'local') {
+      return 'fake';
+    }
+  }
+
+  throw new RunPolicyError(`Unsupported ${kind} generation provider.`, 'INVALID_POLICY', 400, {
+    provider: requested,
+    field: `providers.${kind}`
+  });
+}
+
+function assertRealProviderCredentials(kind: GenerationModality, provider: string): void {
+  if (kind === 'narration' && provider === 'elevenlabs') {
+    requireEnvVar('ELEVENLABS_API_KEY', 'Real narration generation requires ELEVENLABS_API_KEY.');
+  }
+
+  if ((kind === 'image' || kind === 'video') && provider === 'openai') {
+    requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
+  }
+}
+
+/**
+ * Resolves the executable provider for a single manual/interactive generation call.
+ *
+ * The server configuration is always the authority for mock vs. real mode. A caller
+ * may only request a provider, never a mode. In mock mode real providers are rejected
+ * before any paid request is constructed; in real mode the matching credentials must
+ * be present. There is no silent fallback between fake and real providers.
+ */
+export function resolveManualGenerationProvider(
+  kind: GenerationModality,
+  requestedProvider: string | undefined,
+  options: { serverConfig?: RunPolicyServerConfig; mode?: RunMode } = {}
+): GenerationProviderResolution {
+  const serverConfig = options.serverConfig ?? resolveRunPolicyServerConfig();
+  const mode = options.mode ?? serverConfig.defaultMode;
+  const normalized = normalizeRequestedProvider(kind, requestedProvider);
+
+  let providers: Partial<RunProviderSelection> | undefined;
+  if (normalized) {
+    if (kind === 'image') {
+      providers = { image: normalized as ImageRunProvider };
+    } else if (kind === 'video') {
+      providers = { video: normalized as VideoRunProvider };
+    } else {
+      providers = { narration: normalized as NarrationRunProvider };
+    }
+  }
+
+  const policy = resolveRunPolicy({ mode, providers }, serverConfig);
+  const provider = policy.providers[kind];
+
+  if (policy.mode === 'real') {
+    assertRealProviderCredentials(kind, provider);
+  }
+
+  return {
+    mode: policy.mode,
+    provider
   };
 }

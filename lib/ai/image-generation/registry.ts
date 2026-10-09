@@ -1,3 +1,5 @@
+import { resolveProviderDefaults, resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
+
 import { FakeImageGenerationProvider } from './fake-provider';
 import { OpenAiImageGenerationProvider } from './openai-provider';
 import { ImageGenerationProviderError, type ImageGenerationProvider } from './provider';
@@ -27,8 +29,9 @@ export function createImageGenerationRegistry(): ImageGenerationRegistry {
 }
 
 export function getImageGenerationConfigurationStatus(): { openaiConfigured: boolean; defaultProvider: string } {
+  const { defaultMode } = resolveRunPolicyServerConfig();
   return {
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
-    defaultProvider: 'openai'
+    defaultProvider: resolveProviderDefaults(defaultMode).image
   };
 }

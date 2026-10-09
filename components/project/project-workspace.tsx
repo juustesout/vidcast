@@ -57,7 +57,7 @@ function defaultScene(order: number): Scene {
         id: createId('generation'),
         kind: 'image',
         status: 'planned',
-        provider: 'openai',
+        provider: 'local',
         prompt: '',
         referenceIds: [],
         aspectRatio: '16:9',
@@ -90,7 +90,7 @@ function ensureVisualForMode(scene: Scene, mode: VisualMode): VisualSpec {
           id: createId('generation'),
           kind: 'image',
           status: 'planned',
-          provider: 'openai',
+          provider: 'local',
           prompt: '',
           referenceIds: scene.referenceIds,
           aspectRatio: '16:9',
@@ -104,7 +104,7 @@ function ensureVisualForMode(scene: Scene, mode: VisualMode): VisualSpec {
           id: createId('generation'),
           kind: 'video',
           status: 'planned',
-          provider: 'openai',
+          provider: 'local',
           prompt: '',
           referenceIds: scene.referenceIds,
           aspectRatio: '16:9',
@@ -1702,7 +1702,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                     <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Generation settings</p>
                     <SelectField
                       label="Provider"
-                      value={selectedScene.visual.generation.provider ?? 'openai'}
+                      value={selectedScene.visual.generation.provider ?? 'local'}
                       onChange={(value) =>
                         updateScene(selectedScene.id, (scene) => {
                           if (!scene.visual || (scene.visual.kind !== 'generated_image' && scene.visual.kind !== 'generated_video')) {

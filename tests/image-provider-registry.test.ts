@@ -19,6 +19,6 @@ describe('Image provider registry', () => {
   it('reports provider configuration status', () => {
     const status = getImageGenerationConfigurationStatus();
     expect(typeof status.openaiConfigured).toBe('boolean');
-    expect(status.defaultProvider).toBe('openai');
+    expect(status.defaultProvider).toBe('fake');
   });
 });

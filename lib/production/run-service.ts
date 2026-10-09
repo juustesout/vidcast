@@ -11,7 +11,7 @@ import { deriveProductionPlan } from './production-planner';
 import { createProductionRunnerError, runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent } from './production-runner';
 import { assertRunPolicyPreflight, resolveRunPolicy, resolveRunPolicyServerConfig, type RunPolicyRequest, type RunPolicyServerConfig } from './run-policy';
 import { InMemoryRunRegistry } from './run-registry';
-import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, RunProviderSelection } from './run-types';
+import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, RunMode, RunProviderSelection } from './run-types';
 
 export interface StartProductionRunRequest {
   projectId: string;
@@ -387,7 +387,7 @@ export class HeadlessProductionRunService {
           }
 
           actionExecutionCount += 1;
-          return this.executeAction(run.projectId, action, run.acceptedConfig.policy.providers);
+          return this.executeAction(run.projectId, action, run.acceptedConfig.policy.providers, run.acceptedConfig.policy.mode);
         },
         refreshProject: async () => {
           const refreshed = await this.dependencies.store.getProject(run.projectId);
@@ -447,7 +447,8 @@ export class HeadlessProductionRunService {
   private async executeAction(
     projectId: string,
     action: ProductionPlannedAction,
-    providers: RunProviderSelection
+    providers: RunProviderSelection,
+    mode: RunMode
   ): Promise<ProductionActionExecutionOutcome | void> {
     if (!action.execute) {
       return;
@@ -466,7 +467,8 @@ export class HeadlessProductionRunService {
         const regenerate = Boolean(action.payload?.regenerate);
         const result = await this.dependencies.generateImage(projectId, action.sceneId, {
           regenerate,
-          provider: providers.image
+          provider: providers.image,
+          mode
         });
 
         return {
@@ -502,7 +504,8 @@ export class HeadlessProductionRunService {
         const regenerate = Boolean(action.payload?.regenerate);
         const result = await this.dependencies.submitVideo(projectId, action.sceneId, {
           regenerate,
-          provider: providers.video
+          provider: providers.video,
+          mode
         });
 
         return {
@@ -537,7 +540,7 @@ export class HeadlessProductionRunService {
 
       const endpoint = `/api/projects/${projectId}/generation-jobs/${attemptId}`;
       try {
-        const result = await this.dependencies.pollVideo(projectId, attemptId);
+        const result = await this.dependencies.pollVideo(projectId, attemptId, undefined, { mode });
         return {
           message: `Video poll returned ${result.status}.`,
           endpoint,
@@ -569,11 +572,12 @@ export class HeadlessProductionRunService {
       }
 
       const endpoint = `/api/projects/${projectId}/scenes/${action.sceneId}/generate-narration`;
-      const mode = String(action.payload?.mode ?? 'generate');
+      const narrationMode = String(action.payload?.mode ?? 'generate');
       try {
         const result = await this.dependencies.generateNarration(projectId, action.sceneId, {
-          regenerate: mode === 'regenerate' || mode === 'retry',
-          provider: providers.narration
+          regenerate: narrationMode === 'regenerate' || narrationMode === 'retry',
+          provider: providers.narration,
+          mode
         });
 
         return {

@@ -1,5 +1,7 @@
 import { createTextToSpeechRegistry } from '@/lib/ai/text-to-speech/registry';
 import { TextToSpeechProviderError, type TextToSpeechFormat } from '@/lib/ai/text-to-speech/provider';
+import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
@@ -14,10 +16,6 @@ function lockKey(projectId: string, sceneId: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function resolveDefaultProvider(): string {
-  return process.env.TTS_DEFAULT_PROVIDER || (process.env.ELEVENLABS_API_KEY ? 'elevenlabs' : 'fake');
 }
 
 function resolveDefaultVoiceId(): string {
@@ -117,6 +115,27 @@ function mapProviderError(error: TextToSpeechProviderError): SceneNarrationGener
   return new SceneNarrationGenerationError(error.message, 502, 'narration.provider.failed');
 }
 
+function mapRunPolicyError(error: RunPolicyError): SceneNarrationGenerationError {
+  if (error.code === 'PROVIDER_NOT_CONFIGURED') {
+    return new SceneNarrationGenerationError(error.message, error.status, 'narration.provider.notConfigured');
+  }
+  if (error.code === 'INVALID_POLICY') {
+    return new SceneNarrationGenerationError(error.message, error.status, 'narration.invalid');
+  }
+  return new SceneNarrationGenerationError(error.message, error.status, 'narration.provider.unsupported');
+}
+
+function resolveNarrationProvider(requestedProvider: string | undefined, mode: RunMode | undefined): string {
+  try {
+    return resolveManualGenerationProvider('narration', requestedProvider, { mode }).provider;
+  } catch (error) {
+    if (error instanceof RunPolicyError) {
+      throw mapRunPolicyError(error);
+    }
+    throw error;
+  }
+}
+
 export async function generateSceneNarration(
   projectId: string,
   sceneId: string,
@@ -127,6 +146,7 @@ export async function generateSceneNarration(
     format?: TextToSpeechFormat;
     provider?: string;
     regenerate?: boolean;
+    mode?: RunMode;
     settings?: {
       stability?: number;
       similarityBoost?: number;
@@ -164,7 +184,7 @@ export async function generateSceneNarration(
 
     const format = options.format ?? existingNarration.format ?? resolveDefaultFormat();
     const model = options.model ?? existingNarration.model ?? resolveDefaultModel();
-    const providerId = options.provider ?? resolveDefaultProvider();
+    const providerId = resolveNarrationProvider(options.provider, options.mode);
     const regenerate = Boolean(options.regenerate);
 
     if (!regenerate && existingNarration.status === 'generated' && existingNarration.audioAssetId) {

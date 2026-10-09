@@ -3,6 +3,8 @@ import path from 'node:path';
 import { createImageGenerationRegistry } from '@/lib/ai/image-generation/registry';
 import { ImageGenerationProviderError, type ImageGenerationRequest, type ReferenceInput } from '@/lib/ai/image-generation/provider';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
+import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
 import type { GenerationAttempt, GenerationProvider, GenerationRecord } from '@/lib/types/generation';
@@ -122,10 +124,32 @@ function sanitizeProviderError(error: unknown): string {
   return 'Image generation failed.';
 }
 
+function mapRunPolicyError(error: RunPolicyError): SceneImageGenerationError {
+  const codeByPolicyCode: Record<RunPolicyError['code'], string> = {
+    POLICY_DENIED: 'generation.policy.denied',
+    INVALID_POLICY: 'generation.policy.invalid',
+    PROVIDER_NOT_ALLOWED: 'generation.provider.notAllowed',
+    PROVIDER_NOT_CONFIGURED: 'generation.provider.notConfigured'
+  };
+
+  return new SceneImageGenerationError(error.message, error.status, codeByPolicyCode[error.code]);
+}
+
+function resolveImageProvider(options: { provider?: string; mode?: RunMode }): string {
+  try {
+    return resolveManualGenerationProvider('image', options.provider, { mode: options.mode }).provider;
+  } catch (error) {
+    if (error instanceof RunPolicyError) {
+      throw mapRunPolicyError(error);
+    }
+    throw error;
+  }
+}
+
 export async function generateSceneImage(
   projectId: string,
   sceneId: string,
-  options: { regenerate?: boolean; provider?: string } = {},
+  options: { regenerate?: boolean; provider?: string; mode?: RunMode } = {},
   dependencies: ImageGenerationServiceDependencies = defaultDependencies
 ): Promise<SceneImageGenerationExecutionResult> {
   const key = lockKey(projectId, sceneId);
@@ -161,7 +185,7 @@ export async function generateSceneImage(
 
     assertGenerationTransition(current.status, 'queued', regenerate);
 
-    const providerId = options.provider || current.provider || 'openai';
+    const providerId = resolveImageProvider(options);
     const provider = dependencies.registry.getProvider(providerId);
     const referenceIds = current.referenceIds && current.referenceIds.length > 0 ? current.referenceIds : scene.referenceIds;
     const referenceImages = await resolveReferenceInputs(project, referenceIds, dependencies.media);
