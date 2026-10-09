@@ -1,7 +1,8 @@
 import { notFound } from 'next/navigation';
 
-import { projectStore } from '@/lib/storage/project-store';
 import { ProjectWorkspace } from '@/components/project/project-workspace';
+import { getProjectForIdentity } from '@/lib/security/page-access';
+import { getServerIdentity } from '@/lib/security/server-identity';
 
 interface ProjectPageProps {
   params: Promise<{ id: string }>;
@@ -9,7 +10,13 @@ interface ProjectPageProps {
 
 export default async function ProjectPage({ params }: ProjectPageProps) {
   const { id } = await params;
-  const project = await projectStore.getProject(id);
+  const identity = await getServerIdentity();
+
+  if (!identity) {
+    notFound();
+  }
+
+  const project = await getProjectForIdentity(identity, id);
 
   if (!project) {
     notFound();

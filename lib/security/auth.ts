@@ -1,6 +1,10 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-export const SESSION_COOKIE_NAME = 'explainer_session';
+import { SESSION_COOKIE_NAME } from './constants';
+import { getServiceToken, getSessionSecret } from './config';
+
+export { SESSION_COOKIE_NAME };
+
 const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface RequestIdentity {
@@ -25,10 +29,6 @@ function base64UrlDecode(value: string): string | null {
   } catch {
     return null;
   }
-}
-
-function getSessionSecret(): string {
-  return process.env.EXPLAINER_SESSION_SECRET?.trim() || 'explainer-local-dev-session-secret';
 }
 
 function signPayload(payload: string): string {
@@ -68,7 +68,11 @@ function parseAuthorizationHeader(value: string | null): { scheme: string; token
   };
 }
 
-export function createUserSessionCookie(subject = `user_${randomUUID()}`, nowMs = Date.now()): string {
+export function generateUserSubject(): string {
+  return `user_${randomUUID()}`;
+}
+
+export function createUserSessionCookie(subject = generateUserSubject(), nowMs = Date.now()): string {
   const ttlMs = Number.isFinite(Number(process.env.EXPLAINER_SESSION_TTL_MS))
     ? Math.max(60_000, Number(process.env.EXPLAINER_SESSION_TTL_MS))
     : DEFAULT_SESSION_TTL_MS;
@@ -127,9 +131,14 @@ function parseSessionCookieValue(value: string | undefined, nowMs = Date.now()):
   };
 }
 
-export function getRequestIdentity(request: Request): RequestIdentity | null {
-  const serviceToken = process.env.EXPLAINER_API_TOKEN?.trim();
-  const authorization = parseAuthorizationHeader(request.headers.get('authorization'));
+/**
+ * Resolves the request identity from raw header values. The service token is
+ * only accepted from the `Authorization: Bearer` header; browser subjects can
+ * never be supplied directly and only come from a server-signed session cookie.
+ */
+export function getIdentityFromHeaders(cookieHeader: string | null, authorizationHeader: string | null): RequestIdentity | null {
+  const serviceToken = getServiceToken();
+  const authorization = parseAuthorizationHeader(authorizationHeader);
   if (serviceToken && authorization && authorization.scheme === 'bearer' && authorization.token === serviceToken) {
     return {
       kind: 'service',
@@ -138,6 +147,10 @@ export function getRequestIdentity(request: Request): RequestIdentity | null {
     };
   }
 
-  const cookies = parseCookieHeader(request.headers.get('cookie'));
+  const cookies = parseCookieHeader(cookieHeader);
   return parseSessionCookieValue(cookies.get(SESSION_COOKIE_NAME));
+}
+
+export function getRequestIdentity(request: Request): RequestIdentity | null {
+  return getIdentityFromHeaders(request.headers.get('cookie'), request.headers.get('authorization'));
 }

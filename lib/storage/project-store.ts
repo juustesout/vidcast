@@ -588,6 +588,7 @@ export interface ProjectStore {
   getProject(id: string): Promise<Project | null>;
   createProject(input?: CreateProjectInput, ownerId?: string): Promise<Project>;
   updateProject(project: Project): Promise<Project>;
+  claimUnownedProjects(ownerId: string): Promise<number>;
   deleteProject(id: string): Promise<void>;
   importAsset(projectId: string, file: File): Promise<Asset>;
   importReference(projectId: string, file: File, name: string, description: string, tags: string[]): Promise<ReferenceImage>;
@@ -636,6 +637,32 @@ class JsonProjectStore implements ProjectStore {
 
   async updateProject(project: Project): Promise<Project> {
     return writeProject(project);
+  }
+
+  async claimUnownedProjects(ownerId: string): Promise<number> {
+    const trimmedOwnerId = ownerId.trim();
+    if (!trimmedOwnerId) {
+      return 0;
+    }
+
+    await ensureSeedProject();
+
+    const entries = await fs.readdir(getProjectsRoot(), { withFileTypes: true });
+    let claimed = 0;
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const project = await readProjectFile(entry.name);
+      if (project && !project.ownerId?.trim()) {
+        await writeProjectFile({ ...project, ownerId: trimmedOwnerId });
+        claimed += 1;
+      }
+    }
+
+    return claimed;
   }
 
   async deleteProject(id: string): Promise<void> {

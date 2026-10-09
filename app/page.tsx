@@ -1,11 +1,13 @@
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
 
-import { projectStore } from '@/lib/storage/project-store';
+import { createProjectAction } from '@/app/actions';
+import { listProjectsForIdentity } from '@/lib/security/page-access';
+import { getServerIdentity } from '@/lib/security/server-identity';
 import { formatSeconds } from '@/lib/utils/duration';
 
 export default async function HomePage() {
-  const projects = await projectStore.listProjects();
+  const identity = await getServerIdentity();
+  const projects = identity ? await listProjectsForIdentity(identity) : [];
 
   return (
     <main className="min-h-screen px-6 py-8 text-slate-100 lg:px-10">
@@ -36,21 +38,21 @@ export default async function HomePage() {
                 <p className="font-mono text-xs uppercase tracking-[0.3em] text-slate-400">Projects</p>
                 <h2 className="mt-2 text-2xl font-semibold text-white">Open a project</h2>
               </div>
-              <form
-                action={async () => {
-                  'use server';
-                  const project = await projectStore.createProject();
-                  redirect(`/projects/${project.id}`);
-                }}
-              >
-                <button type="submit" className="rounded-full border border-slate-500/40 bg-slate-900/60 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-300/60 hover:bg-slate-800">
-                  New project
-                </button>
-              </form>
+              {identity ? (
+                <form action={createProjectAction}>
+                  <button type="submit" className="rounded-full border border-slate-500/40 bg-slate-900/60 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-300/60 hover:bg-slate-800">
+                    New project
+                  </button>
+                </form>
+              ) : (
+                <span className="rounded-full border border-slate-700 bg-slate-950/60 px-4 py-2 text-xs text-slate-400">Initializing local session…</span>
+              )}
             </div>
 
             <div className="grid gap-4">
-              {projects.length === 0 ? (
+              {!identity ? (
+                <SessionPendingState />
+              ) : projects.length === 0 ? (
                 <EmptyState />
               ) : (
                 projects.map((project) => (
@@ -121,6 +123,14 @@ function EmptyState() {
   return (
     <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-950/30 p-8 text-center text-slate-400">
       No projects yet. A sample project will be seeded automatically on first storage access.
+    </div>
+  );
+}
+
+function SessionPendingState() {
+  return (
+    <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-950/30 p-8 text-center text-slate-400">
+      Establishing a local session. Project data appears once your identity is ready.
     </div>
   );
 }

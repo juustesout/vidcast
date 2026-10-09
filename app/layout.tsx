@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
 import { Inter, IBM_Plex_Mono, Fraunces } from 'next/font/google';
 
+import { SessionBootstrap } from '@/components/session/session-bootstrap';
+import { getServerIdentity } from '@/lib/security/server-identity';
+
 import './globals.css';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-body' });
@@ -12,10 +15,15 @@ export const metadata: Metadata = {
   description: 'Local-first explainer video compiler foundation.'
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const identity = await getServerIdentity();
+
   return (
     <html lang="en" className={`${inter.variable} ${ibmPlexMono.variable} ${fraunces.variable}`}>
-      <body>{children}</body>
+      <body>
+        <SessionBootstrap authenticated={Boolean(identity)} />
+        {children}
+      </body>
     </html>
   );
 }

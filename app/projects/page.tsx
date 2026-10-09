@@ -1,9 +1,16 @@
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 
-import { projectStore } from '@/lib/storage/project-store';
+import { listProjectsForIdentity } from '@/lib/security/page-access';
+import { getServerIdentity } from '@/lib/security/server-identity';
 
 export default async function ProjectsPage() {
-  const projects = await projectStore.listProjects();
+  const identity = await getServerIdentity();
+  if (!identity) {
+    redirect('/');
+  }
+
+  const projects = await listProjectsForIdentity(identity);
 
   return (
     <main className="min-h-screen px-6 py-8 text-slate-100 lg:px-10">

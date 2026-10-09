@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ProjectSummary } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
@@ -551,6 +551,59 @@ describe('HTTP API client behavior', () => {
     const service = createReadOnlyToolService(client);
     const result = await service.getProductionPlan({ projectId: 'project-1' });
 
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('API_ERROR');
+    }
+  });
+});
+
+describe('read-only HTTP client service token forwarding', () => {
+  const previousToken = process.env.EXPLAINER_API_TOKEN;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterAll(() => {
+    if (previousToken === undefined) {
+      delete process.env.EXPLAINER_API_TOKEN;
+    } else {
+      process.env.EXPLAINER_API_TOKEN = previousToken;
+    }
+  });
+
+  it('forwards EXPLAINER_API_TOKEN as a bearer Authorization header', async () => {
+    process.env.EXPLAINER_API_TOKEN = 'service-token-123';
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ projects: [] }), { status: 200 }));
+
+    const client = new HttpAppApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: fetchMock as unknown as typeof fetch
+    });
+
+    await client.listProjects();
+
+    const init = fetchMock.mock.calls[0][1];
+    const headers = new Headers(init?.headers);
+    expect(headers.get('authorization')).toBe('Bearer service-token-123');
+  });
+
+  it('sends no Authorization header when no token is configured, staying fail-closed', async () => {
+    delete process.env.EXPLAINER_API_TOKEN;
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ message: 'Authentication required.' }), { status: 401 }));
+
+    const client = new HttpAppApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: fetchMock as unknown as typeof fetch
+    });
+
+    const service = createReadOnlyToolService(client);
+    const result = await service.listProjects({});
+
+    const init = fetchMock.mock.calls[0][1];
+    const headers = new Headers(init?.headers);
+    expect(headers.get('authorization')).toBeNull();
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe('API_ERROR');

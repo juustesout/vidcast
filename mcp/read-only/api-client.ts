@@ -61,10 +61,20 @@ async function parseJsonResponse(response: Response): Promise<unknown> {
 export class HttpAppApiClient implements AppApiClient {
   private readonly baseUrl: string;
   private readonly fetchFn: typeof fetch;
+  private readonly apiToken: string | null;
 
   constructor(options: HttpAppApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? process.env.EXPLAINER_API_BASE_URL ?? 'http://127.0.0.1:5555').replace(/\/$/, '');
     this.fetchFn = options.fetchFn ?? fetch;
+    this.apiToken = process.env.EXPLAINER_API_TOKEN?.trim() || null;
+  }
+
+  private withAuthHeaders(headers: HeadersInit | undefined): Headers {
+    const normalized = new Headers(headers);
+    if (this.apiToken && !normalized.has('authorization')) {
+      normalized.set('authorization', `Bearer ${this.apiToken}`);
+    }
+    return normalized;
   }
 
   private async request(path: string): Promise<unknown> {
@@ -74,9 +84,9 @@ export class HttpAppApiClient implements AppApiClient {
     try {
       response = await this.fetchFn(url, {
         method: 'GET',
-        headers: {
+        headers: this.withAuthHeaders({
           accept: 'application/json'
-        }
+        })
       });
     } catch {
       throw new ReadOnlyMcpToolError('API_UNAVAILABLE', 'Explainer app API is not reachable.', { endpoint: path });
