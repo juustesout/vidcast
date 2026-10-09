@@ -34,6 +34,8 @@ const EVENT_LABELS: Record<ProductionRunnerEvent['code'], string> = {
   composition_started: 'COMPOSE',
   composition_completed: 'COMPOSE',
   composition_failed: 'COMPOSE',
+  run_recovered: 'RUN',
+  run_superseded: 'RUN',
   run_completed: 'RUN',
   run_stopped_unresolved: 'RUN',
   run_failed: 'RUN'

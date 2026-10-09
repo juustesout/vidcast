@@ -27,6 +27,8 @@ export type ProductionRunnerEventCode =
   | 'composition_started'
   | 'composition_completed'
   | 'composition_failed'
+  | 'run_recovered'
+  | 'run_superseded'
   | 'run_completed'
   | 'run_stopped_unresolved'
   | 'run_failed';
@@ -106,6 +108,10 @@ export interface RunProductionBatchInput {
   executeAction: (action: ProductionPlannedAction) => Promise<ProductionActionExecutionOutcome | void>;
   refreshProject: () => Promise<Project>;
   skippedActionIds?: string[];
+  // Action ids already known to be failed before the batch starts (for example
+  // interrupted work restored during recovery). They are treated as failed and
+  // never executed.
+  initialFailedActionIds?: string[];
   config?: Partial<ProductionRunnerConfig>;
   onProgress?: (progress: ProductionRunnerProgress) => void;
   onEvent?: (event: ProductionRunnerEvent) => void;
@@ -251,7 +257,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
   const config = mergeConfig(input.config);
   const skippedActionIds = new Set(input.skippedActionIds ?? []);
   const completedActionIds = new Set<string>();
-  const failedActionIds = new Set<string>();
+  const failedActionIds = new Set<string>(input.initialFailedActionIds ?? []);
   const runningActionIds = new Set<string>();
   const events: ProductionRunnerEvent[] = [];
   const emittedObservationKeys = new Set<string>();

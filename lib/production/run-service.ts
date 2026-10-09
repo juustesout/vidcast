@@ -10,7 +10,9 @@ import type { ProductionActionType, ProductionPlannedAction } from './production
 import { deriveProductionPlan } from './production-planner';
 import { createProductionRunnerError, runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent } from './production-runner';
 import { assertRunPolicyPreflight, resolveRunPolicy, resolveRunPolicyServerConfig, type RunPolicyRequest, type RunPolicyServerConfig } from './run-policy';
+import { reconcileInterruptedGenerations } from './run-recovery';
 import { InMemoryRunRegistry } from './run-registry';
+import { FileRunStore, type PersistedRun, type RunStore } from './run-store';
 import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, RunMode, RunProviderSelection } from './run-types';
 
 export interface StartProductionRunRequest {
@@ -75,7 +77,7 @@ export class RunServiceError extends Error {
 }
 
 interface ServiceDependencies {
-  store: Pick<ProjectStore, 'getProject'>;
+  store: Pick<ProjectStore, 'getProject'> & Partial<Pick<ProjectStore, 'updateProject'>>;
   runBatch: typeof runProductionBatch;
   derivePlan: typeof deriveProductionPlan;
   generateImage: typeof generateSceneImage;
@@ -200,21 +202,45 @@ function statusFromCompositionCode(code: CompositionServiceError['code']): numbe
   return 500;
 }
 
+export interface RunServiceOptions {
+  // Optional durable store. When provided, run state is persisted and can be
+  // recovered after a process restart.
+  runStore?: RunStore;
+  // When true and a store is provided, recovery runs once on construction.
+  autoRecover?: boolean;
+}
+
 export class HeadlessProductionRunService {
   private readonly config: RunServiceConfig;
   private readonly dependencies: ServiceDependencies;
   private readonly registry: InMemoryRunRegistry;
+  private readonly runStore?: RunStore;
   private readonly queue: string[] = [];
   private activeWorkers = 0;
   private dispatchLoopScheduled = false;
+  private readonly persistDebounceMs = 150;
+  private readonly persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly persistQueue = new Map<string, Promise<void>>();
+  private readonly recoveredRunIds = new Set<string>();
 
-  constructor(config: RunServiceConfig = buildDefaultConfig(), dependencies: Partial<ServiceDependencies> = {}) {
+  constructor(
+    config: RunServiceConfig = buildDefaultConfig(),
+    dependencies: Partial<ServiceDependencies> = {},
+    options: RunServiceOptions = {}
+  ) {
     this.config = config;
     this.dependencies = {
       ...defaultDependencies,
       ...dependencies
     };
-    this.registry = new InMemoryRunRegistry(this.config.registry);
+    this.runStore = options.runStore;
+    this.registry = new InMemoryRunRegistry(this.config.registry, {
+      onChange: (runId) => this.handleRegistryChange(runId)
+    });
+
+    if (options.autoRecover && this.runStore) {
+      void this.recoverRuns().catch(() => {});
+    }
   }
 
   async startOrReuseRun(input: StartProductionRunRequest): Promise<StartProductionRunResponse> {
@@ -292,6 +318,201 @@ export class HeadlessProductionRunService {
   // Exposed for tests to emulate process lifecycle boundaries.
   clearStateForTests(): void {
     this.queue.splice(0, this.queue.length);
+    this.recoveredRunIds.clear();
+  }
+
+  // Rehydrates persisted runs and resumes any that were non-terminal when the
+  // process stopped. Idempotent: repeated calls do not re-import or re-enqueue.
+  async recoverRuns(): Promise<HeadlessRunSnapshot[]> {
+    if (!this.runStore) {
+      return [];
+    }
+
+    let entries: PersistedRun[];
+    try {
+      entries = await this.runStore.listAll();
+    } catch {
+      return [];
+    }
+
+    for (const entry of entries) {
+      this.registry.importRun(entry);
+    }
+
+    const recovered: HeadlessRunSnapshot[] = [];
+    const handledProjects = new Set<string>();
+
+    for (const entry of entries) {
+      if (entry.status !== 'queued' && entry.status !== 'running') {
+        continue;
+      }
+      if (this.recoveredRunIds.has(entry.runId)) {
+        continue;
+      }
+      this.recoveredRunIds.add(entry.runId);
+
+      if (handledProjects.has(entry.projectId)) {
+        this.registry.appendEvent(entry.runId, {
+          timestamp: this.dependencies.now(),
+          iteration: 0,
+          code: 'run_superseded',
+          status: 'stopped',
+          message: 'Superseded by an earlier recovered run for the same project.'
+        });
+        this.registry.updateRunStatus(entry.runId, 'failed', { finishedAt: this.dependencies.now() });
+        await this.flushRun(entry.runId);
+        continue;
+      }
+
+      handledProjects.add(entry.projectId);
+      const snapshot = await this.recoverRun(entry);
+      if (snapshot) {
+        recovered.push(snapshot);
+      }
+    }
+
+    return recovered;
+  }
+
+  // Persists any pending run writes. Useful for tests and orderly shutdown.
+  async flushPersists(): Promise<void> {
+    const runIds = new Set<string>([...this.persistTimers.keys(), ...this.persistQueue.keys()]);
+    await Promise.all(Array.from(runIds, (runId) => this.flushRun(runId)));
+  }
+
+  private handleRegistryChange(runId: string): void {
+    if (!this.runStore) {
+      return;
+    }
+
+    const snapshot = this.registry.getRunUnsafe(runId);
+    if (!snapshot) {
+      return;
+    }
+
+    if (snapshot.status !== 'queued' && snapshot.status !== 'running') {
+      void this.flushRun(runId);
+      return;
+    }
+
+    this.schedulePersist(runId);
+  }
+
+  private schedulePersist(runId: string): void {
+    if (!this.runStore || this.persistTimers.has(runId)) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.persistTimers.delete(runId);
+      void this.flushRun(runId);
+    }, this.persistDebounceMs);
+    (timer as { unref?: () => void }).unref?.();
+    this.persistTimers.set(runId, timer);
+  }
+
+  private flushRun(runId: string): Promise<void> {
+    if (!this.runStore) {
+      return Promise.resolve();
+    }
+
+    const timer = this.persistTimers.get(runId);
+    if (timer) {
+      clearTimeout(timer);
+      this.persistTimers.delete(runId);
+    }
+
+    const previous = this.persistQueue.get(runId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(async () => {
+        const entry = this.registry.exportRun(runId);
+        if (!entry || !this.runStore) {
+          return;
+        }
+        try {
+          await this.runStore.save(entry);
+        } catch {
+          // Persistence failures are non-fatal; the in-memory run continues.
+        }
+      });
+    const guarded = next.catch(() => {});
+    this.persistQueue.set(runId, guarded);
+    void guarded.finally(() => {
+      if (this.persistQueue.get(runId) === guarded) {
+        this.persistQueue.delete(runId);
+      }
+    });
+    return guarded;
+  }
+
+  private async recoverRun(entry: PersistedRun): Promise<HeadlessRunSnapshot | null> {
+    const runId = entry.runId;
+    const at = this.dependencies.now();
+
+    const project = await this.dependencies.store.getProject(entry.projectId);
+    if (!project) {
+      this.registry.appendEvent(runId, {
+        timestamp: at,
+        iteration: 0,
+        code: 'run_failed',
+        status: 'failed',
+        message: `Production run failed on recovery: project ${entry.projectId} no longer exists.`
+      });
+      this.registry.updateRunStatus(runId, 'failed', { finishedAt: at });
+      await this.flushRun(runId);
+      return this.registry.getRunUnsafe(runId);
+    }
+
+    const reconciliation = reconcileInterruptedGenerations(project, entry.acceptedConfig.policy.mode);
+
+    if (reconciliation.updatedProject && this.dependencies.store.updateProject) {
+      try {
+        await this.dependencies.store.updateProject(reconciliation.updatedProject);
+      } catch (error) {
+        this.registry.appendEvent(runId, {
+          timestamp: at,
+          iteration: 0,
+          code: 'run_recovered',
+          status: 'info',
+          message: `Failed to reconcile interrupted scene state: ${error instanceof Error ? error.message : 'unknown error'}.`
+        });
+      }
+    }
+
+    for (const note of reconciliation.notes) {
+      this.registry.appendEvent(runId, {
+        timestamp: at,
+        iteration: 0,
+        code: 'run_recovered',
+        status: 'info',
+        actionType: note.actionType,
+        sceneId: note.sceneId,
+        message: note.message
+      });
+    }
+
+    if (reconciliation.suppressedActionIds.length > 0) {
+      const current = this.registry.getRunUnsafe(runId);
+      const failed = new Set(current?.failedActionIds ?? []);
+      for (const actionId of reconciliation.suppressedActionIds) {
+        failed.add(actionId);
+      }
+      this.registry.updateProgress(runId, { failedActionIds: Array.from(failed) });
+    }
+
+    this.registry.appendEvent(runId, {
+      timestamp: at,
+      iteration: 0,
+      code: 'run_recovered',
+      status: 'info',
+      message: 'Recovered run after process restart; resuming from persisted state.'
+    });
+    this.registry.updateRunStatus(runId, 'queued');
+    this.queue.push(runId);
+    this.scheduleDispatchLoop();
+    await this.flushRun(runId);
+    return this.registry.getRunUnsafe(runId);
   }
 
   private notFoundRunError(runId: string): RunServiceError {
@@ -368,6 +589,7 @@ export class HeadlessProductionRunService {
           maxIterations: run.acceptedConfig.limits.maxIterations,
           limits: run.acceptedConfig.limits.perActionConcurrency
         },
+        initialFailedActionIds: run.failedActionIds,
         executeAction: async (action) => {
           if (actionExecutionCount >= run.acceptedConfig.limits.maxActionExecutions) {
             throw createProductionRunnerError('Run action limit reached.', {
@@ -657,4 +879,21 @@ export class HeadlessProductionRunService {
   }
 }
 
-export const headlessProductionRunService = new HeadlessProductionRunService();
+function autoRecoverEnabled(): boolean {
+  if (process.env.NODE_ENV === 'test') {
+    return false;
+  }
+  if (process.env.NEXT_PHASE === 'phase-production-build') {
+    return false;
+  }
+  return true;
+}
+
+export const headlessProductionRunService = new HeadlessProductionRunService(
+  buildDefaultConfig(),
+  {},
+  {
+    runStore: new FileRunStore(),
+    autoRecover: autoRecoverEnabled()
+  }
+);

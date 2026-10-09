@@ -8,10 +8,18 @@ interface RegistryConfig {
   maxLogPageLimit: number;
 }
 
-interface StoredRun extends HeadlessRunSnapshot {
+export interface RunRegistryEntry extends HeadlessRunSnapshot {
   events: ProductionRunnerEvent[];
   eventOffset: number;
 }
+
+export interface RunRegistryOptions {
+  // Invoked after any mutation of a run so callers can persist it. Never
+  // invoked for imported runs (rehydration) to avoid write-on-load.
+  onChange?: (runId: string) => void;
+}
+
+type StoredRun = RunRegistryEntry;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -58,13 +66,19 @@ export class InMemoryRunRegistry {
   private readonly runs = new Map<string, StoredRun>();
   private readonly activeByProject = new Map<string, string>();
   private readonly config: RegistryConfig;
+  private readonly onChange?: (runId: string) => void;
 
-  constructor(config: RegistryConfig) {
+  constructor(config: RegistryConfig, options: RunRegistryOptions = {}) {
     this.config = {
       maxEventsPerRun: Math.max(100, config.maxEventsPerRun),
       retentionMs: Math.max(60_000, config.retentionMs),
       maxLogPageLimit: Math.max(10, config.maxLogPageLimit)
     };
+    this.onChange = options.onChange;
+  }
+
+  private notify(runId: string): void {
+    this.onChange?.(runId);
   }
 
   sweepExpired(referenceTime = Date.now()): void {
@@ -103,6 +117,7 @@ export class InMemoryRunRegistry {
     this.runs.set(input.runId, stored);
     this.activeByProject.set(input.projectId, input.runId);
 
+    this.notify(input.runId);
     return this.snapshot(stored);
   }
 
@@ -115,6 +130,70 @@ export class InMemoryRunRegistry {
   getRunUnsafe(runId: string): HeadlessRunSnapshot | null {
     const stored = this.runs.get(runId);
     return stored ? this.snapshot(stored) : null;
+  }
+
+  // Full durable representation, used for persistence.
+  exportRun(runId: string): RunRegistryEntry | null {
+    const run = this.runs.get(runId);
+    if (!run) {
+      return null;
+    }
+    return {
+      ...this.snapshot(run),
+      events: run.events.map((event) => ({ ...event, error: event.error ? { ...event.error } : undefined })),
+      eventOffset: run.eventOffset
+    };
+  }
+
+  // Rehydrates a run from persisted data without emitting change notifications.
+  // If the run already exists this is a no-op. A non-terminal run becomes the
+  // project's active run only when it does not already have one.
+  importRun(entry: RunRegistryEntry): HeadlessRunSnapshot {
+    const existing = this.runs.get(entry.runId);
+    if (existing) {
+      return this.snapshot(existing);
+    }
+
+    const stored: StoredRun = {
+      runId: entry.runId,
+      projectId: entry.projectId,
+      status: entry.status,
+      createdAt: entry.createdAt,
+      startedAt: entry.startedAt,
+      finishedAt: entry.finishedAt,
+      summary: { ...defaultSummary(), ...entry.summary },
+      completedActionIds: [...entry.completedActionIds],
+      failedActionIds: [...entry.failedActionIds],
+      unresolvedActions: [...entry.unresolvedActions],
+      acceptedConfig: {
+        policy: {
+          mode: entry.acceptedConfig.policy.mode,
+          allowRealProviders: entry.acceptedConfig.policy.allowRealProviders,
+          providers: { ...entry.acceptedConfig.policy.providers }
+        },
+        limits: {
+          maxIterations: entry.acceptedConfig.limits.maxIterations,
+          maxActionExecutions: entry.acceptedConfig.limits.maxActionExecutions,
+          maxVideoPolls: entry.acceptedConfig.limits.maxVideoPolls,
+          perActionConcurrency: { ...entry.acceptedConfig.limits.perActionConcurrency }
+        }
+      },
+      events: entry.events.map((event) => ({ ...event, error: event.error ? { ...event.error } : undefined })),
+      eventOffset: entry.eventOffset
+    };
+
+    this.runs.set(stored.runId, stored);
+
+    if (stored.status === 'queued' || stored.status === 'running') {
+      const currentActiveId = this.activeByProject.get(stored.projectId);
+      const currentActive = currentActiveId ? this.runs.get(currentActiveId) : undefined;
+      const hasActive = Boolean(currentActive && (currentActive.status === 'queued' || currentActive.status === 'running'));
+      if (!hasActive) {
+        this.activeByProject.set(stored.projectId, stored.runId);
+      }
+    }
+
+    return this.snapshot(stored);
   }
 
   getActiveRunByProject(projectId: string): HeadlessRunSnapshot | null {
@@ -153,6 +232,7 @@ export class InMemoryRunRegistry {
       this.activeByProject.delete(run.projectId);
     }
 
+    this.notify(runId);
     return this.snapshot(run);
   }
 
@@ -189,6 +269,7 @@ export class InMemoryRunRegistry {
       run.unresolvedActions = [...patch.unresolvedActions];
     }
 
+    this.notify(runId);
     return this.snapshot(run);
   }
 
@@ -206,6 +287,7 @@ export class InMemoryRunRegistry {
       run.eventOffset += overflow;
     }
 
+    this.notify(runId);
     return true;
   }
 

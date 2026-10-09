@@ -31,3 +31,11 @@ export function getProjectRendersRoot(projectId: string): string {
 export function getProjectPreviewsRoot(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'previews');
 }
+
+export function getProjectRunsRoot(projectId: string): string {
+  return path.join(getProjectRoot(projectId), 'runs');
+}
+
+export function getRunJsonPath(projectId: string, runId: string): string {
+  return path.join(getProjectRunsRoot(projectId), `${runId}.json`);
+}
