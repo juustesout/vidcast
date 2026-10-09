@@ -290,6 +290,15 @@ export function validateProject(project: Project): RenderValidationResult {
     }
   }
 
+  if (project.music?.assetId) {
+    const musicAsset = project.assets.find((asset) => asset.id === project.music?.assetId);
+    if (!musicAsset) {
+      pushIssue(errors, 'error', 'project.music.asset.missing', 'music.assetId', `Background music asset ${project.music.assetId} does not exist.`);
+    } else if (musicAsset.type !== 'music' && musicAsset.type !== 'audio') {
+      pushIssue(errors, 'error', 'project.music.asset.invalidType', 'music.assetId', `Background music asset ${musicAsset.id} is not a music or audio asset.`);
+    }
+  }
+
   return {
     valid: errors.length === 0,
     errors,

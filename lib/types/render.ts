@@ -45,6 +45,45 @@ export interface ProjectNarration {
   segments: import('./scene').NarrationSegment[];
 }
 
+export type ProjectMusicStatus = 'planned' | 'generating' | 'generated' | 'failed';
+
+export interface ProjectMusicGenerationAttempt {
+  id: string;
+  status: ProjectMusicStatus;
+  provider: string;
+  model?: string;
+  prompt?: string;
+  instrumental?: boolean;
+  musicLengthMs?: number;
+  providerRequestId?: string;
+  mimeType?: string;
+  duration?: number;
+  audioAssetId?: string;
+  createdAt: string;
+  completedAt?: string;
+  error?: string;
+}
+
+export interface ProjectMusicSpec {
+  // Optional project-wide background music track.
+  // Selecting a track only stores a reference; the underlying asset stays a
+  // normal project asset and is never implicitly deleted when replaced/cleared.
+  assetId?: string;
+  prompt?: string;
+  provider?: string;
+  model?: string;
+  status?: ProjectMusicStatus;
+  instrumental?: boolean;
+  musicLengthMs?: number;
+  format?: string;
+  seed?: number;
+  duration?: number;
+  lastAttemptId?: string;
+  error?: string;
+  attempts?: ProjectMusicGenerationAttempt[];
+  updatedAt?: string;
+}
+
 export interface Project {
   id: string;
   ownerId?: string;
@@ -61,6 +100,7 @@ export interface Project {
   assets: Asset[];
   references: ReferenceImage[];
   renderSettings: RenderSettings;
+  music?: ProjectMusicSpec;
   compositions?: CompositionArtifact[];
 }
 
@@ -138,6 +178,12 @@ export interface CompositionItem {
   narrationAudioDuration?: number;
 }
 
+export interface CompositionMusic {
+  // Absolute path to the selected background music asset on disk.
+  path: string;
+  duration?: number;
+}
+
 export interface CompositionPlan {
   projectId: string;
   items: CompositionItem[];
@@ -147,6 +193,7 @@ export interface CompositionPlan {
   totalDuration: number;
   transition: CompositionTransition;
   audio?: AudioMixSettings;
+  music?: CompositionMusic;
 }
 
 export interface CompositionArtifact {
@@ -158,6 +205,13 @@ export interface CompositionArtifact {
   inputFingerprint?: {
     version: 'p10.1';
     audioMix?: AudioMixSettings;
+    music?: {
+      assetId: string;
+      musicVolume: number;
+      fadeInSeconds: number;
+      fadeOutSeconds: number;
+      musicSignature: string;
+    };
     scenes: Array<{
       sceneId: string;
       renderId: string;

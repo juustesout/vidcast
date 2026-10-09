@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { deriveGenerationTasks } from '../lib/projects/generation-tasks';
 import { normalizeProject } from '../lib/projects/normalize-project';
-import { getAssetUsage, getReferenceUsage } from '../lib/projects/usage';
+import { getAssetUsage, getReferenceUsage, PROJECT_MUSIC_USAGE_ID } from '../lib/projects/usage';
 import { resolveRenderPlan } from '../lib/render/scene-resolver';
 import type { Project } from '../lib/types/render';
 import { validateProject } from '../lib/validation/project-validation';
@@ -196,6 +196,20 @@ describe('P2 usage derivation and task derivation', () => {
     const project = buildProject();
     expect(getAssetUsage(project, 'asset-image-1')).toEqual(['scene-1']);
     expect(getReferenceUsage(project, 'ref-main')).toEqual(['scene-2']);
+  });
+
+  it('marks the selected background music asset as used so it cannot be deleted', () => {
+    const project = buildProject();
+    project.assets.push({
+      ...project.assets[0],
+      id: 'asset-music-1',
+      type: 'music',
+      filename: 'music-1.wav',
+      mimeType: 'audio/wav'
+    });
+    project.music = { assetId: 'asset-music-1', status: 'generated' };
+
+    expect(getAssetUsage(project, 'asset-music-1')).toEqual([PROJECT_MUSIC_USAGE_ID]);
   });
 
   it('derives generation tasks from scene model', () => {

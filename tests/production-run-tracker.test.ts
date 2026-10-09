@@ -28,7 +28,8 @@ function makeRun(status: HeadlessRunSnapshot['status'] = 'running', runId = 'run
         providers: {
           image: 'fake',
           video: 'local',
-          narration: 'fake'
+          narration: 'fake',
+          music: 'fake'
         }
       },
       limits: {

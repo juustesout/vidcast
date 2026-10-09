@@ -152,8 +152,37 @@ export function reconcileInterruptedGenerations(project: Project, mode: RunMode)
     return nextScene;
   });
 
+  let updatedProject: Project | null = changed ? { ...project, scenes } : null;
+
+  // Project-level background music is not a production-run action, but an
+  // interrupted generation must not leave the project permanently stuck in
+  // `generating` (which would block all future music generation).
+  if (project.music?.status === 'generating') {
+    const base = updatedProject ?? project;
+    const lastAttemptId = project.music.lastAttemptId;
+    const attempts = (project.music.attempts ?? []).map((attempt) =>
+      attempt.id === lastAttemptId && attempt.status === 'generating'
+        ? { ...attempt, status: 'failed' as const, error: attempt.error ?? 'Interrupted by process restart.' }
+        : attempt
+    );
+
+    if (hasUsableAsset(project, project.music.assetId)) {
+      notes.push({ message: 'Restored interrupted background music generation from an existing asset.' });
+      updatedProject = {
+        ...base,
+        music: { ...project.music, status: 'generated' as const, error: undefined, attempts }
+      };
+    } else {
+      notes.push({ message: 'Interrupted background music generation has no recoverable asset; marked as failed.' });
+      updatedProject = {
+        ...base,
+        music: { ...project.music, status: 'failed' as const, error: 'Interrupted by process restart.', attempts }
+      };
+    }
+  }
+
   return {
-    updatedProject: changed ? { ...project, scenes } : null,
+    updatedProject,
     suppressedActionIds,
     notes
   };

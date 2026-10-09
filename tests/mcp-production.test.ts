@@ -28,7 +28,8 @@ function makeRun(runId = 'run-1') {
         providers: {
           image: 'fake' as const,
           video: 'local' as const,
-          narration: 'fake' as const
+          narration: 'fake' as const,
+          music: 'fake' as const
         }
       },
       limits: {

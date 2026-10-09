@@ -159,4 +159,38 @@ describe('manual generation provider policy', () => {
     expect(resolveManualGenerationProvider('video', 'fake', { serverConfig: mockServer }).provider).toBe('local');
     expect(resolveManualGenerationProvider('narration', 'local', { serverConfig: mockServer }).provider).toBe('fake');
   });
+
+  it('defaults music to the fake provider in mock mode', () => {
+    expect(resolveManualGenerationProvider('music', undefined, { serverConfig: mockServer })).toEqual({
+      mode: 'mock',
+      provider: 'fake'
+    });
+    expect(resolveManualGenerationProvider('music', 'local', { serverConfig: mockServer }).provider).toBe('fake');
+  });
+
+  it('rejects real music providers in mock mode before any request is built', () => {
+    expect(() => resolveManualGenerationProvider('music', 'elevenlabs', { serverConfig: mockServer })).toThrow(/mock mode/i);
+  });
+
+  it('requires ELEVENLABS_API_KEY for real music generation', () => {
+    vi.stubEnv('ELEVENLABS_API_KEY', '');
+    expect(() => resolveManualGenerationProvider('music', 'elevenlabs', { serverConfig: realServer })).toThrow(/ELEVENLABS_API_KEY/);
+
+    vi.stubEnv('ELEVENLABS_API_KEY', 'xi-test');
+    expect(resolveManualGenerationProvider('music', 'elevenlabs', { serverConfig: realServer })).toEqual({
+      mode: 'real',
+      provider: 'elevenlabs'
+    });
+  });
+
+  it('includes music when resolving the full run policy', () => {
+    const policy = resolveRunPolicy(
+      { mode: 'mock' },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+    expect(policy.providers.music).toBe('fake');
+    expect(() =>
+      resolveRunPolicy({ mode: 'mock', providers: { music: 'elevenlabs' } }, { allowRealProviders: true, defaultMode: 'mock' })
+    ).toThrow(/mock mode/i);
+  });
 });

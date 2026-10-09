@@ -8,6 +8,13 @@ import type { CompositionArtifact, CompositionPlan, CompositionResult, Compositi
 import { createId } from '@/lib/utils/ids';
 import { createCompositionPaths, ensureCompositionDirectories } from './composition-artifacts';
 import { normalizeAudioMix } from './audio-mix';
+import {
+  MUSIC_FADE_IN_SECONDS,
+  MUSIC_FADE_OUT_SECONDS,
+  deriveMusicSignature,
+  isMusicAsset,
+  resolveSelectedMusicAsset
+} from './music-mix';
 import { COMPOSER_VERSION, LocalFFmpegVideoCompositor, VideoCompositionError } from './video-compositor';
 import { sceneRenderService } from './scene-render-service';
 import { deriveCompositionReadiness } from './render-status';
@@ -120,6 +127,34 @@ async function resolveNarrationAudioPath(project: Project, scene: Project['scene
   };
 }
 
+// A missing or invalid selected track must never fail an otherwise valid
+// render: the composition degrades to no background music. The project
+// validation report surfaces the broken reference separately.
+async function resolveProjectMusic(project: Project): Promise<CompositionPlan['music']> {
+  const selectedAssetId = project.music?.assetId;
+  if (!selectedAssetId) {
+    return undefined;
+  }
+
+  const asset = project.assets.find((entry) => entry.id === selectedAssetId);
+  if (!asset || !isMusicAsset(asset) || !asset.localPath) {
+    return undefined;
+  }
+
+  const relativePath = asRelativeProjectPath(asset.localPath);
+  try {
+    return {
+      path: await assertAssetFile(project, relativePath),
+      duration: asset.duration
+    };
+  } catch (error) {
+    if (error instanceof CompositionServiceError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 export async function resolveCompositionPlan(project: Project, transition: CompositionTransition): Promise<CompositionPlan> {
   const orderedScenes = project.scenes.slice().sort((left, right) => left.order - right.order);
 
@@ -154,6 +189,8 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
     });
   }
 
+  const music = await resolveProjectMusic(project);
+
   return {
     projectId: project.id,
     items,
@@ -162,11 +199,15 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
     fps: project.renderSettings.fps,
     totalDuration: items.reduce((sum, item) => sum + item.duration, 0),
     transition,
-    audio: normalizeAudioMix(project.renderSettings.audio)
+    audio: normalizeAudioMix(project.renderSettings.audio),
+    music
   };
 }
 
 function buildCompositionArtifact(projectId: string, compositionId: string, relativeOutputPath: string, plan: CompositionPlan, project: Project, filesize: number, duration: number): CompositionArtifact {
+  const audioMix = normalizeAudioMix(plan.audio);
+  const selectedMusic = resolveSelectedMusicAsset(project);
+
   return {
     compositionId,
     projectId,
@@ -175,7 +216,16 @@ function buildCompositionArtifact(projectId: string, compositionId: string, rela
     sceneIds: plan.items.map((item) => item.sceneId),
     inputFingerprint: {
       version: 'p10.1',
-      audioMix: normalizeAudioMix(plan.audio),
+      audioMix,
+      music: plan.music && selectedMusic
+        ? {
+            assetId: selectedMusic.id,
+            musicVolume: audioMix.musicVolume,
+            fadeInSeconds: MUSIC_FADE_IN_SECONDS,
+            fadeOutSeconds: MUSIC_FADE_OUT_SECONDS,
+            musicSignature: deriveMusicSignature(project)
+          }
+        : undefined,
       scenes: plan.items.map((item) => {
         const scene = project.scenes.find((entry) => entry.id === item.sceneId);
         const freshness = scene ? deriveNarrationFreshness(project, scene) : undefined;

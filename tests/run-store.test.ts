@@ -21,7 +21,7 @@ function createPersistedRun(overrides: Partial<PersistedRun> = {}): PersistedRun
       policy: {
         mode: 'mock',
         allowRealProviders: false,
-        providers: { image: 'fake', video: 'local', narration: 'fake' }
+        providers: { image: 'fake', video: 'local', narration: 'fake', music: 'fake' }
       },
       limits: {
         maxIterations: 10,

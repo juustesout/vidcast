@@ -425,4 +425,79 @@ describe('composition plan resolver', () => {
 
     await expect(resolveCompositionPlan(project, { type: 'none' })).rejects.toMatchObject({ code: 'INCOMPATIBLE_RENDER' });
   });
+
+  it('leaves the plan without music when no track is selected', async () => {
+    const project = createProject('project-composition-plan-test');
+    attachCompletedRenders(project);
+    await writeRenderFile(project.id, 'renders/scene-1.mp4');
+    await writeRenderFile(project.id, 'renders/scene-2.mp4');
+
+    const plan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(plan.music).toBeUndefined();
+  });
+
+  it('resolves the selected background music asset into the plan', async () => {
+    const project = createProject('project-composition-plan-test');
+    project.assets.push({
+      id: 'music-1',
+      type: 'music',
+      status: 'available',
+      provenance: 'generated',
+      filename: 'music-1.wav',
+      localPath: 'assets/music-1.wav',
+      mimeType: 'audio/wav',
+      duration: 60,
+      filesize: 64,
+      metadata: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    project.music = { assetId: 'music-1', status: 'generated' };
+
+    attachCompletedRenders(project);
+    await writeRenderFile(project.id, 'renders/scene-1.mp4');
+    await writeRenderFile(project.id, 'renders/scene-2.mp4');
+    await writeAssetFile(project.id, 'assets/music-1.wav');
+
+    const plan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(plan.music?.path).toContain('assets');
+    expect(plan.music?.duration).toBe(60);
+  });
+
+  it('skips music without failing when the selected music asset does not exist', async () => {
+    const project = createProject('project-composition-plan-test');
+    project.music = { assetId: 'missing-music', status: 'generated' };
+    attachCompletedRenders(project);
+    await writeRenderFile(project.id, 'renders/scene-1.mp4');
+    await writeRenderFile(project.id, 'renders/scene-2.mp4');
+
+    const plan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(plan.music).toBeUndefined();
+    expect(plan.items).toHaveLength(2);
+  });
+
+  it('skips music without failing when the selected asset file is missing on disk', async () => {
+    const project = createProject('project-composition-plan-test');
+    project.assets.push({
+      id: 'music-missing-file',
+      type: 'music',
+      status: 'available',
+      provenance: 'generated',
+      filename: 'gone.wav',
+      localPath: 'assets/gone.wav',
+      mimeType: 'audio/wav',
+      duration: 60,
+      filesize: 10,
+      metadata: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    project.music = { assetId: 'music-missing-file', status: 'generated' };
+    attachCompletedRenders(project);
+    await writeRenderFile(project.id, 'renders/scene-1.mp4');
+    await writeRenderFile(project.id, 'renders/scene-2.mp4');
+
+    const plan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(plan.music).toBeUndefined();
+  });
 });

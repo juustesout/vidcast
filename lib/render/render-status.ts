@@ -3,6 +3,7 @@ import type { Scene, SceneRenderArtifact } from '@/lib/types/scene';
 import { DEFAULT_RENDER_SETTINGS } from '@/lib/constants';
 import { createSceneRenderFingerprint } from './render-fingerprint';
 import { audioMixesEqual, normalizeAudioMix } from './audio-mix';
+import { MUSIC_FADE_IN_SECONDS, MUSIC_FADE_OUT_SECONDS, deriveMusicSignature, resolveSelectedMusicAsset } from './music-mix';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
 
 export type SceneRenderLifecycleStatus = 'not_rendered' | 'rendering' | 'rendered' | 'render_failed' | 'stale';
@@ -173,6 +174,40 @@ export function deriveCompositionReadiness(project: Project, renderPlan: RenderP
   };
 }
 
+type MusicFingerprint = NonNullable<NonNullable<CompositionArtifact['inputFingerprint']>['music']>;
+
+function currentMusicFingerprint(project: Project): MusicFingerprint | undefined {
+  const asset = resolveSelectedMusicAsset(project);
+  if (!asset) {
+    return undefined;
+  }
+
+  return {
+    assetId: asset.id,
+    musicVolume: normalizeAudioMix(project.renderSettings.audio).musicVolume,
+    fadeInSeconds: MUSIC_FADE_IN_SECONDS,
+    fadeOutSeconds: MUSIC_FADE_OUT_SECONDS,
+    musicSignature: deriveMusicSignature(project)
+  };
+}
+
+function musicFingerprintsEqual(a: MusicFingerprint | undefined, b: MusicFingerprint | undefined): boolean {
+  if (!a && !b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+
+  return (
+    a.assetId === b.assetId &&
+    a.musicVolume === b.musicVolume &&
+    a.fadeInSeconds === b.fadeInSeconds &&
+    a.fadeOutSeconds === b.fadeOutSeconds &&
+    a.musicSignature === b.musicSignature
+  );
+}
+
 export function deriveCompositionArtifactStatus(project: Project, renderPlan: RenderPlan): CompositionArtifactStatus {
   const artifact = (project.compositions ?? [])[0];
   if (!artifact) {
@@ -214,6 +249,11 @@ export function deriveCompositionArtifactStatus(project: Project, renderPlan: Re
     : undefined;
   if (recordedAudioMix && !audioMixesEqual(recordedAudioMix, expectedAudioMix)) {
     reasons.push('Audio mix settings changed since the final composition was created.');
+  }
+
+  const recordedMusic = artifact.inputFingerprint?.music;
+  if (!musicFingerprintsEqual(recordedMusic, currentMusicFingerprint(project))) {
+    reasons.push('Background music changed since the final composition was created.');
   }
 
   if (reasons.length > 0) {

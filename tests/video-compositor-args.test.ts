@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildComposeArgs, buildNormalizeArgs } from '@/lib/render/video-compositor';
+import { buildComposeArgs, buildMusicMixArgs, buildNormalizeArgs } from '@/lib/render/video-compositor';
 import type { CompositionPlan } from '@/lib/types/render';
 
 const plan: CompositionPlan = {
@@ -62,5 +62,41 @@ describe('video compositor args', () => {
     expect(args.join(' ')).toContain('libx264');
     expect(args.join(' ')).toContain('yuv420p');
     expect(args.join(' ')).toContain('-c:a aac');
+  });
+
+  it('builds music mix args with looped music, volume, fades and amix without re-encoding video', () => {
+    const musicPlan: CompositionPlan = {
+      ...plan,
+      totalDuration: 30,
+      music: { path: '/tmp/music.wav', duration: 60 }
+    };
+
+    const args = buildMusicMixArgs('/tmp/concat.mp4', '/tmp/music.wav', '/tmp/final.mp4', musicPlan);
+    const joined = args.join(' ');
+
+    expect(args).toContain('-stream_loop');
+    expect(joined).toContain('-i /tmp/music.wav');
+    expect(joined).toContain('volume=0.350');
+    expect(joined).toContain('atrim=0:30.000');
+    expect(joined).toContain('afade=t=in:st=0:d=1.000');
+    expect(joined).toContain('afade=t=out:st=28.000:d=2.000');
+    expect(joined).toContain('amix=inputs=2');
+    expect(joined).toContain('-map 0:v:0');
+    expect(joined).toContain('-map [aout]');
+    expect(joined).toContain('-c:v copy');
+  });
+
+  it('applies the configured music volume and skips fades for very short outputs', () => {
+    const shortPlan: CompositionPlan = {
+      ...plan,
+      totalDuration: 1,
+      audio: { narrationVolume: 1, musicVolume: 0.2, effectsVolume: 0.2 },
+      music: { path: '/tmp/music.wav' }
+    };
+
+    const joined = buildMusicMixArgs('/tmp/concat.mp4', '/tmp/music.wav', '/tmp/final.mp4', shortPlan).join(' ');
+    expect(joined).toContain('volume=0.200');
+    expect(joined).toContain('atrim=0:1.000');
+    expect(joined).not.toContain('afade=t=out');
   });
 });

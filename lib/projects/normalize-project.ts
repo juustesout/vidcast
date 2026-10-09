@@ -3,7 +3,7 @@ import { normalizeExplainer } from '@/lib/projects/explainer-normalization';
 import { normalizeAudioMix } from '@/lib/render/audio-mix';
 import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
-import type { Project } from '@/lib/types/render';
+import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, TransitionPreset, VisualSpec } from '@/lib/types/scene';
 
@@ -314,6 +314,58 @@ function normalizeReference(reference: ReferenceImage): ReferenceImage {
   };
 }
 
+function normalizeMusicStatus(status: unknown): ProjectMusicStatus {
+  if (status === 'planned' || status === 'generating' || status === 'generated' || status === 'failed') {
+    return status;
+  }
+  return 'planned';
+}
+
+function normalizeProjectMusic(music: ProjectMusicSpec | null | undefined): ProjectMusicSpec | undefined {
+  if (!music || typeof music !== 'object') {
+    return undefined;
+  }
+
+  const attempts: ProjectMusicGenerationAttempt[] = (music.attempts ?? []).map((attempt, index) => ({
+    id: attempt.id ?? `music_attempt_${index + 1}`,
+    status: normalizeMusicStatus(attempt.status),
+    provider: attempt.provider ?? 'unknown',
+    model: attempt.model,
+    prompt: attempt.prompt,
+    instrumental: attempt.instrumental,
+    musicLengthMs: attempt.musicLengthMs,
+    providerRequestId: attempt.providerRequestId,
+    mimeType: attempt.mimeType,
+    duration: attempt.duration,
+    audioAssetId: attempt.audioAssetId,
+    createdAt: attempt.createdAt ?? nowIso(),
+    completedAt: attempt.completedAt,
+    error: attempt.error
+  }));
+
+  const hasContent = Boolean(music.assetId || music.prompt || music.lastAttemptId || attempts.length);
+  if (!hasContent) {
+    return undefined;
+  }
+
+  return {
+    assetId: music.assetId,
+    prompt: music.prompt,
+    provider: music.provider,
+    model: music.model,
+    status: music.status ? normalizeMusicStatus(music.status) : music.assetId ? 'generated' : 'planned',
+    instrumental: music.instrumental,
+    musicLengthMs: typeof music.musicLengthMs === 'number' ? music.musicLengthMs : undefined,
+    format: music.format,
+    seed: typeof music.seed === 'number' ? music.seed : undefined,
+    duration: typeof music.duration === 'number' ? music.duration : undefined,
+    lastAttemptId: music.lastAttemptId,
+    error: music.error,
+    attempts: attempts.length > 0 ? attempts : undefined,
+    updatedAt: music.updatedAt
+  };
+}
+
 export function normalizeProject(project: Project): Project {
   const normalizedProject: Project = {
     ...project,
@@ -324,6 +376,7 @@ export function normalizeProject(project: Project): Project {
     scenes: (project.scenes ?? []).map((scene, index) => normalizeScene(scene as LegacyScene, project, index)),
     assets: (project.assets ?? []).map(normalizeAsset),
     references: (project.references ?? []).map(normalizeReference),
+    music: normalizeProjectMusic(project.music),
     compositions: project.compositions ?? [],
     renderSettings: {
       aspectRatio: project.renderSettings?.aspectRatio ?? project.aspectRatio ?? DEFAULT_RENDER_SETTINGS.aspectRatio,

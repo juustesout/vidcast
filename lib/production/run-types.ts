@@ -6,11 +6,13 @@ export type RunMode = 'mock' | 'real';
 export type ImageRunProvider = 'fake' | 'openai';
 export type VideoRunProvider = 'local' | 'openai';
 export type NarrationRunProvider = 'fake' | 'elevenlabs';
+export type MusicRunProvider = 'fake' | 'elevenlabs';
 
 export interface RunProviderSelection {
   image: ImageRunProvider;
   video: VideoRunProvider;
   narration: NarrationRunProvider;
+  music: MusicRunProvider;
 }
 
 export interface RunPolicySnapshot {

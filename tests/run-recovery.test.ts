@@ -116,7 +116,7 @@ function createPersistedRun(overrides: Partial<PersistedRun> = {}): PersistedRun
       policy: {
         mode: 'mock',
         allowRealProviders: false,
-        providers: { image: 'fake', video: 'local', narration: 'fake' }
+        providers: { image: 'fake', video: 'local', narration: 'fake', music: 'fake' }
       },
       limits: {
         maxIterations: 5,
@@ -257,6 +257,31 @@ describe('reconcileInterruptedGenerations', () => {
 
     expect(result.updatedProject).toBeNull();
     expect(result.suppressedActionIds).toEqual([]);
+  });
+
+  it('fails an interrupted background music generation without a usable asset', () => {
+    const base = project('p', [imageScene(1, 'generated')]);
+    base.music = {
+      status: 'generating',
+      lastAttemptId: 'music-attempt-1',
+      attempts: [{ id: 'music-attempt-1', status: 'generating', provider: 'fake', createdAt: '2026-01-01T00:00:00.000Z' }]
+    };
+
+    const result = reconcileInterruptedGenerations(base, 'real');
+
+    expect(result.updatedProject?.music).toMatchObject({ status: 'failed' });
+    expect(result.updatedProject?.music?.attempts?.[0].status).toBe('failed');
+    expect(result.suppressedActionIds).toEqual([]);
+  });
+
+  it('restores an interrupted background music generation when a usable asset exists', () => {
+    const assets = [{ id: 'asset-music-1', status: 'available' }] as unknown as Project['assets'];
+    const base = project('p', [imageScene(1, 'generated')], assets);
+    base.music = { status: 'generating', assetId: 'asset-music-1', lastAttemptId: 'music-attempt-1' };
+
+    const result = reconcileInterruptedGenerations(base, 'real');
+
+    expect(result.updatedProject?.music).toMatchObject({ status: 'generated' });
   });
 });
 

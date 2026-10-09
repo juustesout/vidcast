@@ -5,6 +5,7 @@ import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
 import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia } from './ffprobe';
 import { formatVolumeFilter } from './audio-mix';
+import { resolveMusicFade } from './music-mix';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p7';
@@ -137,6 +138,62 @@ async function normalizeInput(
   await runProcess(runtime.ffmpegPath, args, { timeoutMs: 120_000 });
 }
 
+export function buildMusicMixArgs(
+  concatVideoPath: string,
+  musicPath: string,
+  outputPath: string,
+  plan: CompositionPlan
+): string[] {
+  const total = formatDurationValue(plan.totalDuration);
+  const fade = resolveMusicFade(plan.totalDuration);
+  const musicVolume = formatVolumeFilter(plan.audio?.musicVolume);
+
+  const musicFilters = [`volume=${musicVolume}`, `atrim=0:${total}`];
+  if (fade.inSeconds > 0) {
+    musicFilters.push(`afade=t=in:st=0:d=${formatDurationValue(fade.inSeconds)}`);
+  }
+  if (fade.outSeconds > 0) {
+    musicFilters.push(`afade=t=out:st=${formatDurationValue(fade.outStartSeconds)}:d=${formatDurationValue(fade.outSeconds)}`);
+  }
+
+  const filterComplex = [
+    `[1:a]${musicFilters.join(',')}[music]`,
+    '[0:a][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]'
+  ].join(';');
+
+  return [
+    '-y',
+    '-i',
+    concatVideoPath,
+    '-stream_loop',
+    '-1',
+    '-i',
+    musicPath,
+    '-filter_complex',
+    filterComplex,
+    '-map',
+    '0:v:0',
+    '-map',
+    '[aout]',
+    '-t',
+    total,
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '192k',
+    '-movflags',
+    '+faststart',
+    outputPath
+  ];
+}
+
+async function mixMusic(concatVideoPath: string, musicPath: string, outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<void> {
+  const args = buildMusicMixArgs(concatVideoPath, musicPath, outputPath, plan);
+  await runProcess(runtime.ffmpegPath, args, { timeoutMs: 180_000 });
+}
+
 async function composeConcat(normalizedPaths: string[], outputPath: string, plan: CompositionPlan, tempDir: string, runtime: FFmpegRuntime): Promise<void> {
   const listPath = path.join(tempDir, 'concat-list.txt');
   const listContent = normalizedPaths.map((entry) => `file '${entry.replace(/'/g, "'\\''")}'`).join('\n');
@@ -201,7 +258,13 @@ export class LocalFFmpegVideoCompositor {
         normalizedPaths.push(normalizedPath);
       }
 
-      await composeConcat(normalizedPaths, options.outputPath, plan, options.tempDir, this.runtime);
+      const concatOutputPath = plan.music ? path.join(options.tempDir, 'concatenated.mp4') : options.outputPath;
+      await composeConcat(normalizedPaths, concatOutputPath, plan, options.tempDir, this.runtime);
+
+      if (plan.music) {
+        await mixMusic(concatOutputPath, plan.music.path, options.outputPath, plan, this.runtime);
+      }
+
       return await validateOutput(options.outputPath, plan, this.runtime);
     } catch (error) {
       if (error instanceof VideoCompositionError) {

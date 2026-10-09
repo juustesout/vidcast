@@ -158,6 +158,24 @@ export interface GeneratedAudioInput {
   };
 }
 
+export interface GeneratedMusicInput {
+  projectId: string;
+  attemptId: string;
+  mimeType: string;
+  data: Buffer;
+  generation: {
+    generationId: string;
+    provider: string;
+    model?: string;
+    prompt: string;
+    providerRequestId?: string;
+  };
+  musicLengthMs?: number;
+  seed?: number;
+  instrumental?: boolean;
+  outputFormat?: string;
+}
+
 export class MediaStore {
   async saveAsset(projectId: string, file: File): Promise<ImportedAssetResult> {
     assertAllowedExtension(file.name, ALLOWED_ASSET_EXTENSIONS);
@@ -359,6 +377,58 @@ export class MediaStore {
         providerRequestId: input.generation.providerRequestId,
         voiceId: input.generation.voiceId
       },
+      generation: {
+        generationId: input.generation.generationId,
+        provider: input.generation.provider,
+        model: input.generation.model,
+        prompt: input.generation.prompt,
+        referenceIds: []
+      },
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  async saveGeneratedMusic(input: GeneratedMusicInput): Promise<Asset> {
+    const now = nowIso();
+    const assetId = createId('asset');
+    const extension = input.mimeType.includes('wav') ? 'wav' : input.mimeType.includes('mp4') || input.mimeType.includes('m4a') ? 'm4a' : 'mp3';
+    const suggestedFilename = `music-${input.attemptId}.${extension}`;
+    const writeResult = await writeUniqueFile(getProjectAssetsRoot(input.projectId), 'assets', suggestedFilename, input.data);
+    const metadata = await mediaMetadataReader.read(input.data, writeResult.storedFilename, input.mimeType, 'music');
+
+    const assetMetadata: Asset['metadata'] = {
+      mimeType: metadata.mimeType || input.mimeType,
+      filesize: metadata.filesize,
+      generationAttemptId: input.attemptId,
+      generationId: input.generation.generationId,
+      providerRequestId: input.generation.providerRequestId
+    };
+    if (input.outputFormat) {
+      assetMetadata.outputFormat = input.outputFormat;
+    }
+    if (typeof input.musicLengthMs === 'number') {
+      assetMetadata.musicLengthMs = input.musicLengthMs;
+    }
+    if (typeof input.seed === 'number') {
+      assetMetadata.seed = input.seed;
+    }
+    if (typeof input.instrumental === 'boolean') {
+      assetMetadata.instrumental = input.instrumental;
+    }
+
+    return {
+      id: assetId,
+      type: 'music',
+      status: 'available',
+      provenance: 'generated',
+      filename: writeResult.storedFilename,
+      originalFilename: writeResult.storedFilename,
+      localPath: writeResult.localPath,
+      mimeType: metadata.mimeType || input.mimeType,
+      duration: metadata.duration,
+      filesize: metadata.filesize,
+      metadata: assetMetadata,
       generation: {
         generationId: input.generation.generationId,
         provider: input.generation.provider,

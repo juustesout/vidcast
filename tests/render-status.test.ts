@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus } from '@/lib/render/render-status';
 import { createSceneRenderFingerprint } from '@/lib/render/render-fingerprint';
+import { deriveMusicSignature } from '@/lib/render/music-mix';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
+import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 
 function createProject(): Project {
@@ -81,6 +83,76 @@ function attachCurrentRender(project: Project, sceneId: string): Project {
     }
   ];
   return project;
+}
+
+function createMusicAsset(id: string): Asset {
+  return {
+    id,
+    type: 'music',
+    status: 'available',
+    provenance: 'generated',
+    filename: `${id}.wav`,
+    localPath: `assets/${id}.wav`,
+    mimeType: 'audio/wav',
+    duration: 60,
+    filesize: 100,
+    metadata: {},
+    generation: {
+      generationId: `attempt-${id}`,
+      provider: 'fake',
+      model: 'music_v1',
+      prompt: 'calm',
+      referenceIds: []
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function attachComposition(
+  project: Project,
+  music?: { assetId: string; musicVolume: number; fadeInSeconds: number; fadeOutSeconds: number; musicSignature: string }
+): Project {
+  project.compositions = [{
+    compositionId: 'composition-1',
+    projectId: project.id,
+    outputPath: 'renders/compositions/final-composition-1.mp4',
+    createdAt: new Date().toISOString(),
+    sceneIds: ['scene-1', 'scene-2'],
+    inputFingerprint: {
+      version: 'p10.1',
+      audioMix: { narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 },
+      music,
+      scenes: [
+        { sceneId: 'scene-1', renderId: 'render-scene-1', narrationSignature: 'text:hello|voice:|model:|format:|asset:' },
+        { sceneId: 'scene-2', renderId: 'render-scene-2', narrationSignature: 'text:world|voice:|model:|format:|asset:' }
+      ]
+    },
+    duration: 4,
+    width: 1280,
+    height: 720,
+    fps: 30,
+    renderer: 'ffmpeg',
+    version: 'p10.1-test',
+    filesize: 100,
+    mimeType: 'video/mp4',
+    transition: { type: 'none' }
+  }];
+  return project;
+}
+
+function musicFingerprint(project: Project) {
+  const asset = project.assets.find((entry) => entry.id === project.music?.assetId);
+  if (!asset) {
+    throw new Error('test setup: music asset missing');
+  }
+  return {
+    assetId: asset.id,
+    musicVolume: 0.35,
+    fadeInSeconds: 1,
+    fadeOutSeconds: 2,
+    musicSignature: deriveMusicSignature(project)
+  };
 }
 
 describe('render status helpers', () => {
@@ -361,5 +433,83 @@ describe('render status helpers', () => {
 
     expect(status.status).toBe('stale');
     expect(status.reasons.some((reason) => reason.includes('Audio mix'))).toBe(true);
+  });
+
+  it('marks composition stale when background music is added after composition creation', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+    attachComposition(project);
+
+    let renderPlan = resolveRenderPlan(project);
+    expect(deriveCompositionArtifactStatus(project, renderPlan).status).toBe('current');
+
+    const asset = createMusicAsset('music-1');
+    project.assets.push(asset);
+    project.music = { assetId: asset.id, status: 'generated' };
+    renderPlan = resolveRenderPlan(project);
+    const status = deriveCompositionArtifactStatus(project, renderPlan);
+
+    expect(status.status).toBe('stale');
+    expect(status.reasons.some((reason) => reason.includes('Background music'))).toBe(true);
+  });
+
+  it('keeps composition current when the recorded music fingerprint matches', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+    const asset = createMusicAsset('music-1');
+    project.assets.push(asset);
+    project.music = { assetId: asset.id, status: 'generated' };
+    attachComposition(project, musicFingerprint(project));
+
+    const renderPlan = resolveRenderPlan(project);
+    expect(deriveCompositionArtifactStatus(project, renderPlan).status).toBe('current');
+  });
+
+  it('marks composition stale when the music volume changes after composition creation', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+    const asset = createMusicAsset('music-1');
+    project.assets.push(asset);
+    project.music = { assetId: asset.id, status: 'generated' };
+    attachComposition(project, musicFingerprint(project));
+
+    let renderPlan = resolveRenderPlan(project);
+    expect(deriveCompositionArtifactStatus(project, renderPlan).status).toBe('current');
+
+    project.renderSettings.audio = { narrationVolume: 1, musicVolume: 0.6, effectsVolume: 0.2 };
+    renderPlan = resolveRenderPlan(project);
+    const status = deriveCompositionArtifactStatus(project, renderPlan);
+
+    expect(status.status).toBe('stale');
+    expect(status.reasons.some((reason) => reason.includes('Background music'))).toBe(true);
+  });
+
+  it('marks composition stale when the selected track is replaced', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+    const first = createMusicAsset('music-1');
+    project.assets.push(first);
+    project.music = { assetId: first.id, status: 'generated' };
+    attachComposition(project, musicFingerprint(project));
+
+    const second = createMusicAsset('music-2');
+    project.assets.push(second);
+    project.music = { assetId: second.id, status: 'generated' };
+    const renderPlan = resolveRenderPlan(project);
+    const status = deriveCompositionArtifactStatus(project, renderPlan);
+
+    expect(status.status).toBe('stale');
+    expect(status.reasons.some((reason) => reason.includes('Background music'))).toBe(true);
+  });
+
+  it('marks composition stale when background music is removed', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+    const asset = createMusicAsset('music-1');
+    project.assets.push(asset);
+    project.music = { assetId: asset.id, status: 'generated' };
+    attachComposition(project, musicFingerprint(project));
+
+    project.music = undefined;
+    const renderPlan = resolveRenderPlan(project);
+    const status = deriveCompositionArtifactStatus(project, renderPlan);
+
+    expect(status.status).toBe('stale');
+    expect(status.reasons.some((reason) => reason.includes('Background music'))).toBe(true);
   });
 });

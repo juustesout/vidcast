@@ -4,6 +4,7 @@ import type { ProductionActionType, ProductionPlannedAction } from './production
 import { deriveProductionPlan } from './production-planner';
 import type {
   ImageRunProvider,
+  MusicRunProvider,
   NarrationRunProvider,
   RunMode,
   RunPolicySnapshot,
@@ -91,14 +92,16 @@ export function resolveProviderDefaults(mode: RunMode): RunProviderSelection {
     return {
       image: 'openai',
       video: 'openai',
-      narration: 'elevenlabs'
+      narration: 'elevenlabs',
+      music: 'elevenlabs'
     };
   }
 
   return {
     image: 'fake',
     video: 'local',
-    narration: 'fake'
+    narration: 'fake',
+    music: 'fake'
   };
 }
 
@@ -132,6 +135,16 @@ function parseNarrationProvider(value: string | undefined): NarrationRunProvider
   return undefined;
 }
 
+function parseMusicProvider(value: string | undefined): MusicRunProvider | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === 'fake' || value === 'elevenlabs') {
+    return value;
+  }
+  return undefined;
+}
+
 function isRealProvider(provider: string): boolean {
   return provider === 'openai' || provider === 'elevenlabs';
 }
@@ -152,6 +165,7 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
   const imageProvider = parseImageProvider(request?.providers?.image);
   const videoProvider = parseVideoProvider(request?.providers?.video);
   const narrationProvider = parseNarrationProvider(request?.providers?.narration);
+  const musicProvider = parseMusicProvider(request?.providers?.music);
 
   if (request?.providers?.image && !imageProvider) {
     throw new RunPolicyError('Unsupported image provider in policy request.', 'INVALID_POLICY', 400, {
@@ -174,14 +188,22 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
     });
   }
 
+  if (request?.providers?.music && !musicProvider) {
+    throw new RunPolicyError('Unsupported music provider in policy request.', 'INVALID_POLICY', 400, {
+      provider: request.providers.music,
+      field: 'providers.music'
+    });
+  }
+
   const providers: RunProviderSelection = {
     image: imageProvider ?? defaults.image,
     video: videoProvider ?? defaults.video,
-    narration: narrationProvider ?? defaults.narration
+    narration: narrationProvider ?? defaults.narration,
+    music: musicProvider ?? defaults.music
   };
 
   if (requestedMode === 'mock') {
-    if (providers.image !== 'fake' || providers.video !== 'local' || providers.narration !== 'fake') {
+    if (providers.image !== 'fake' || providers.video !== 'local' || providers.narration !== 'fake' || providers.music !== 'fake') {
       throw new RunPolicyError(
         'Mock mode only allows fake/local providers.',
         'PROVIDER_NOT_ALLOWED',
@@ -196,7 +218,12 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
       throw new RunPolicyError('Real provider mode is disabled on this server.', 'POLICY_DENIED', 403);
     }
 
-    if (!isRealProvider(providers.image) || !isRealProvider(providers.video) || !isRealProvider(providers.narration)) {
+    if (
+      !isRealProvider(providers.image) ||
+      !isRealProvider(providers.video) ||
+      !isRealProvider(providers.narration) ||
+      !isRealProvider(providers.music)
+    ) {
       throw new RunPolicyError(
         'Real mode requires explicitly configured real providers.',
         'PROVIDER_NOT_ALLOWED',
@@ -307,7 +334,7 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
   };
 }
 
-export type GenerationModality = 'image' | 'video' | 'narration';
+export type GenerationModality = 'image' | 'video' | 'narration' | 'music';
 
 export interface GenerationProviderResolution {
   mode: RunMode;
@@ -317,7 +344,7 @@ export interface GenerationProviderResolution {
 function normalizeRequestedProvider(
   kind: GenerationModality,
   requested: string | undefined
-): ImageRunProvider | VideoRunProvider | NarrationRunProvider | undefined {
+): ImageRunProvider | VideoRunProvider | NarrationRunProvider | MusicRunProvider | undefined {
   if (!requested) {
     return undefined;
   }
@@ -341,6 +368,13 @@ function normalizeRequestedProvider(
     if (value === 'local' || value === 'fake') {
       return 'local';
     }
+  } else if (kind === 'music') {
+    if (value === 'elevenlabs') {
+      return 'elevenlabs';
+    }
+    if (value === 'fake' || value === 'local') {
+      return 'fake';
+    }
   } else {
     if (value === 'elevenlabs') {
       return 'elevenlabs';
@@ -357,8 +391,8 @@ function normalizeRequestedProvider(
 }
 
 function assertRealProviderCredentials(kind: GenerationModality, provider: string): void {
-  if (kind === 'narration' && provider === 'elevenlabs') {
-    requireEnvVar('ELEVENLABS_API_KEY', 'Real narration generation requires ELEVENLABS_API_KEY.');
+  if ((kind === 'narration' || kind === 'music') && provider === 'elevenlabs') {
+    requireEnvVar('ELEVENLABS_API_KEY', `Real ${kind} generation requires ELEVENLABS_API_KEY.`);
   }
 
   if ((kind === 'image' || kind === 'video') && provider === 'openai') {
@@ -389,6 +423,8 @@ export function resolveManualGenerationProvider(
       providers = { image: normalized as ImageRunProvider };
     } else if (kind === 'video') {
       providers = { video: normalized as VideoRunProvider };
+    } else if (kind === 'music') {
+      providers = { music: normalized as MusicRunProvider };
     } else {
       providers = { narration: normalized as NarrationRunProvider };
     }

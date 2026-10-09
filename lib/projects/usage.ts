@@ -1,7 +1,12 @@
 import type { Project } from '@/lib/types/render';
 
+// Sentinel usage marker for project-level (non-scene) references such as the
+// selected background music track. Kept non-scene so the UI's scene lookup
+// inherently ignores it while deletion protection still sees a usage.
+export const PROJECT_MUSIC_USAGE_ID = 'project:music';
+
 export function getAssetUsage(project: Project, assetId: string): string[] {
-  return project.scenes
+  const sceneUsage = project.scenes
     .filter((scene) => {
       const visual = scene.visual;
       if (!visual) {
@@ -19,6 +24,12 @@ export function getAssetUsage(project: Project, assetId: string): string[] {
       return false;
     })
     .map((scene) => scene.id);
+
+  if (project.music?.assetId === assetId) {
+    sceneUsage.push(PROJECT_MUSIC_USAGE_ID);
+  }
+
+  return sceneUsage;
 }
 
 export function getReferenceUsage(project: Project, referenceId: string): string[] {
