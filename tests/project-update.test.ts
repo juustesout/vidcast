@@ -124,4 +124,18 @@ describe('applyProjectUpdate', () => {
     const result = applyProjectUpdate(existing, incoming);
     expect(result.project.scenes[0].narration?.text).toBe('scene narration stays production-side');
   });
+
+  it('normalizes audio mix volumes into the allowed range', () => {
+    const existing = baseProject();
+    const incoming = {
+      ...existing,
+      renderSettings: {
+        ...existing.renderSettings,
+        audio: { narrationVolume: -2, musicVolume: 10, effectsVolume: Number.NaN }
+      }
+    };
+
+    const result = applyProjectUpdate(existing, incoming);
+    expect(result.project.renderSettings.audio).toEqual({ narrationVolume: 0, musicVolume: 4, effectsVolume: 0.2 });
+  });
 });

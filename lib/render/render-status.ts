@@ -1,6 +1,7 @@
 import type { CompositionArtifact, Project, RenderPlan } from '@/lib/types/render';
 import type { Scene, SceneRenderArtifact } from '@/lib/types/scene';
 import { createSceneRenderFingerprint } from './render-fingerprint';
+import { audioMixesEqual, normalizeAudioMix } from './audio-mix';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
 
 export type SceneRenderLifecycleStatus = 'not_rendered' | 'rendering' | 'rendered' | 'render_failed' | 'stale';
@@ -201,6 +202,11 @@ export function deriveCompositionArtifactStatus(project: Project, renderPlan: Re
         reasons.push(`Scene ${scene.order} narration changed since the final composition was created.`);
       }
     }
+  }
+
+  const recordedAudioMix = artifact.inputFingerprint?.audioMix;
+  if (recordedAudioMix && !audioMixesEqual(recordedAudioMix, normalizeAudioMix(project.renderSettings.audio))) {
+    reasons.push('Audio mix settings changed since the final composition was created.');
   }
 
   if (reasons.length > 0) {

@@ -1,6 +1,7 @@
 import type { Project, RenderIssue, RenderPlan, RenderPlanScene, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
 import type { Asset } from '@/lib/types/asset';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
+import { normalizeAudioMix } from './audio-mix';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -186,6 +187,7 @@ export function resolveRenderPlan(project: Project): RenderPlan {
     scenes,
     narration: project.narration,
     issues,
-    seed: project.renderSettings.seed
+    seed: project.renderSettings.seed,
+    audio: normalizeAudioMix(project.renderSettings.audio)
   };
 }

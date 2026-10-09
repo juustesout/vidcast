@@ -7,6 +7,7 @@ import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
 import type { CompositionArtifact, CompositionPlan, CompositionResult, CompositionTransition, Project } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
 import { createCompositionPaths, ensureCompositionDirectories } from './composition-artifacts';
+import { normalizeAudioMix } from './audio-mix';
 import { COMPOSER_VERSION, LocalFFmpegVideoCompositor, VideoCompositionError } from './video-compositor';
 import { sceneRenderService } from './scene-render-service';
 import { deriveCompositionReadiness } from './render-status';
@@ -160,7 +161,8 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
     height: project.renderSettings.height,
     fps: project.renderSettings.fps,
     totalDuration: items.reduce((sum, item) => sum + item.duration, 0),
-    transition
+    transition,
+    audio: normalizeAudioMix(project.renderSettings.audio)
   };
 }
 
@@ -173,6 +175,7 @@ function buildCompositionArtifact(projectId: string, compositionId: string, rela
     sceneIds: plan.items.map((item) => item.sceneId),
     inputFingerprint: {
       version: 'p10.1',
+      audioMix: normalizeAudioMix(plan.audio),
       scenes: plan.items.map((item) => {
         const scene = project.scenes.find((entry) => entry.id === item.sceneId);
         const freshness = scene ? deriveNarrationFreshness(project, scene) : undefined;

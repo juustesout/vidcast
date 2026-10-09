@@ -5,6 +5,12 @@ import type { ReferenceImage } from './reference';
 
 export type AspectRatio = '16:9' | '1:1' | '9:16';
 
+export interface AudioMixSettings {
+  narrationVolume: number;
+  musicVolume: number;
+  effectsVolume: number;
+}
+
 export interface RenderSettings {
   aspectRatio: AspectRatio;
   fps: number;
@@ -14,11 +20,7 @@ export interface RenderSettings {
     type: 'color';
     value: string;
   };
-  audio: {
-    narrationVolume: number;
-    musicVolume: number;
-    effectsVolume: number;
-  };
+  audio: AudioMixSettings;
   seed?: number;
   subtitlesEnabled: boolean;
 }
@@ -144,6 +146,7 @@ export interface CompositionPlan {
   fps: number;
   totalDuration: number;
   transition: CompositionTransition;
+  audio?: AudioMixSettings;
 }
 
 export interface CompositionArtifact {
@@ -154,6 +157,7 @@ export interface CompositionArtifact {
   sceneIds: string[];
   inputFingerprint?: {
     version: 'p10.1';
+    audioMix?: AudioMixSettings;
     scenes: Array<{
       sceneId: string;
       renderId: string;
@@ -192,6 +196,7 @@ export interface RenderPlan {
   narration: ProjectNarration;
   issues: RenderIssue[];
   seed?: number;
+  audio?: AudioMixSettings;
 }
 
 export interface VideoPlan extends RenderPlan {

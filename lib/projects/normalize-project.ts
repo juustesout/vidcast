@@ -1,5 +1,6 @@
 import { DEFAULT_RENDER_SETTINGS } from '@/lib/constants';
 import { normalizeExplainer } from '@/lib/projects/explainer-normalization';
+import { normalizeAudioMix } from '@/lib/render/audio-mix';
 import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
@@ -330,11 +331,15 @@ export function normalizeProject(project: Project): Project {
       width: project.renderSettings?.width ?? DEFAULT_RENDER_SETTINGS.width,
       height: project.renderSettings?.height ?? DEFAULT_RENDER_SETTINGS.height,
       background: project.renderSettings?.background ?? DEFAULT_RENDER_SETTINGS.background,
-      audio: project.renderSettings?.audio ?? {
-        narrationVolume: (project.renderSettings as Partial<typeof DEFAULT_RENDER_SETTINGS> & { narrationVolume?: number })?.narrationVolume ?? DEFAULT_RENDER_SETTINGS.audio.narrationVolume,
-        musicVolume: (project.renderSettings as Partial<typeof DEFAULT_RENDER_SETTINGS> & { musicVolume?: number })?.musicVolume ?? DEFAULT_RENDER_SETTINGS.audio.musicVolume,
-        effectsVolume: DEFAULT_RENDER_SETTINGS.audio.effectsVolume
-      },
+      audio: normalizeAudioMix({
+        narrationVolume:
+          project.renderSettings?.audio?.narrationVolume ??
+          (project.renderSettings as Partial<typeof DEFAULT_RENDER_SETTINGS> & { narrationVolume?: number })?.narrationVolume,
+        musicVolume:
+          project.renderSettings?.audio?.musicVolume ??
+          (project.renderSettings as Partial<typeof DEFAULT_RENDER_SETTINGS> & { musicVolume?: number })?.musicVolume,
+        effectsVolume: project.renderSettings?.audio?.effectsVolume
+      }),
       subtitlesEnabled: project.renderSettings?.subtitlesEnabled ?? DEFAULT_RENDER_SETTINGS.subtitlesEnabled,
       seed: project.renderSettings?.seed
     }

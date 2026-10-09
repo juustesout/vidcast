@@ -269,4 +269,51 @@ describe('render status helpers', () => {
     expect(compositionStatus.status).toBe('stale');
     expect(compositionStatus.reasons.some((reason) => reason.includes('narration'))).toBe(true);
   });
+
+  it('marks composition stale when audio mix settings change after composition creation', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+
+    project.compositions = [{
+      compositionId: 'composition-1',
+      projectId: project.id,
+      outputPath: 'renders/compositions/final-composition-1.mp4',
+      createdAt: new Date().toISOString(),
+      sceneIds: ['scene-1', 'scene-2'],
+      inputFingerprint: {
+        version: 'p10.1',
+        audioMix: { narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 },
+        scenes: [
+          {
+            sceneId: 'scene-1',
+            renderId: 'render-scene-1',
+            narrationSignature: 'text:hello|voice:|model:|format:|asset:'
+          },
+          {
+            sceneId: 'scene-2',
+            renderId: 'render-scene-2',
+            narrationSignature: 'text:world|voice:|model:|format:|asset:'
+          }
+        ]
+      },
+      duration: 4,
+      width: 1280,
+      height: 720,
+      fps: 30,
+      renderer: 'ffmpeg',
+      version: 'p10.1-test',
+      filesize: 100,
+      mimeType: 'video/mp4',
+      transition: { type: 'none' }
+    }];
+
+    let renderPlan = resolveRenderPlan(project);
+    expect(deriveCompositionArtifactStatus(project, renderPlan).status).toBe('current');
+
+    project.renderSettings.audio = { narrationVolume: 0.4, musicVolume: 0.35, effectsVolume: 0.2 };
+    renderPlan = resolveRenderPlan(project);
+    const compositionStatus = deriveCompositionArtifactStatus(project, renderPlan);
+
+    expect(compositionStatus.status).toBe('stale');
+    expect(compositionStatus.reasons.some((reason) => reason.includes('Audio mix'))).toBe(true);
+  });
 });

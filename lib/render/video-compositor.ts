@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
 import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia } from './ffprobe';
+import { formatVolumeFilter } from './audio-mix';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p7';
@@ -48,15 +49,26 @@ export function buildNormalizeArgs(
   ];
 
   let audioFilterInput = '1:a';
+  let applyNarrationVolume = false;
   if (options.narrationAudioPath) {
     baseArgs.push('-i', options.narrationAudioPath);
+    applyNarrationVolume = true;
   } else if (!options.inputHasAudio) {
     baseArgs.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
   } else {
     audioFilterInput = '0:a';
   }
 
-  const filterComplex = `[${audioFilterInput}]atrim=0:${duration},apad=pad_dur=${duration},aresample=48000[aout]`;
+  const audioFilters = [
+    `atrim=0:${duration}`,
+    `apad=pad_dur=${duration}`,
+    'aresample=48000'
+  ];
+  if (applyNarrationVolume) {
+    audioFilters.push(`volume=${formatVolumeFilter(plan.audio?.narrationVolume)}`);
+  }
+
+  const filterComplex = `[${audioFilterInput}]${audioFilters.join(',')}[aout]`;
 
   return [
     ...baseArgs,

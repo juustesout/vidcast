@@ -72,6 +72,39 @@ async function writeAssetFile(projectId: string, relativePath: string): Promise<
   await fs.writeFile(full, 'ok', 'utf8');
 }
 
+function attachCompletedRenders(project: Project): void {
+  project.scenes[0].renders = [
+    {
+      renderId: 'render-2',
+      outputPath: 'renders/scene-2.mp4',
+      createdAt: new Date().toISOString(),
+      width: 1280,
+      height: 720,
+      fps: 30,
+      duration: 2,
+      filesize: 100,
+      mimeType: 'video/mp4',
+      renderer: 'ffmpeg',
+      status: 'completed'
+    }
+  ];
+  project.scenes[1].renders = [
+    {
+      renderId: 'render-1',
+      outputPath: 'renders/scene-1.mp4',
+      createdAt: new Date().toISOString(),
+      width: 1280,
+      height: 720,
+      fps: 30,
+      duration: 1,
+      filesize: 100,
+      mimeType: 'video/mp4',
+      renderer: 'ffmpeg',
+      status: 'completed'
+    }
+  ];
+}
+
 afterEach(async () => {
   await fs.rm(getProjectRoot('project-composition-plan-test'), { recursive: true, force: true });
 });
@@ -121,6 +154,24 @@ describe('composition plan resolver', () => {
     expect(plan.height).toBe(720);
     expect(plan.fps).toBe(30);
     expect(plan.totalDuration).toBe(3);
+    expect(plan.audio).toEqual({ narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 });
+  });
+
+  it('normalizes audio mix volumes carried onto the composition plan', async () => {
+    const project = createProject('project-composition-plan-test');
+    project.renderSettings.audio = {
+      narrationVolume: -5,
+      musicVolume: 12,
+      effectsVolume: Number.NaN
+    };
+
+    attachCompletedRenders(project);
+
+    await writeRenderFile(project.id, 'renders/scene-1.mp4');
+    await writeRenderFile(project.id, 'renders/scene-2.mp4');
+
+    const plan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(plan.audio).toEqual({ narrationVolume: 0, musicVolume: 4, effectsVolume: 0.2 });
   });
 
   it('fails when a scene render is missing', async () => {
