@@ -1,5 +1,6 @@
 import type { CompositionArtifact, Project, RenderPlan } from '@/lib/types/render';
 import type { Scene, SceneRenderArtifact } from '@/lib/types/scene';
+import { DEFAULT_RENDER_SETTINGS } from '@/lib/constants';
 import { createSceneRenderFingerprint } from './render-fingerprint';
 import { audioMixesEqual, normalizeAudioMix } from './audio-mix';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
@@ -204,8 +205,14 @@ export function deriveCompositionArtifactStatus(project: Project, renderPlan: Re
     }
   }
 
-  const recordedAudioMix = artifact.inputFingerprint?.audioMix;
-  if (recordedAudioMix && !audioMixesEqual(recordedAudioMix, normalizeAudioMix(project.renderSettings.audio))) {
+  // Legacy compositions predate per-artifact audio-mix recording. Before P15.1 the
+  // compositor applied no volume filters (narration at unity), so a missing mix on an
+  // artifact that has an input fingerprint is treated as the project default.
+  const expectedAudioMix = normalizeAudioMix(project.renderSettings.audio);
+  const recordedAudioMix = artifact.inputFingerprint
+    ? artifact.inputFingerprint.audioMix ?? DEFAULT_RENDER_SETTINGS.audio
+    : undefined;
+  if (recordedAudioMix && !audioMixesEqual(recordedAudioMix, expectedAudioMix)) {
     reasons.push('Audio mix settings changed since the final composition was created.');
   }
 

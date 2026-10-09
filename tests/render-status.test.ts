@@ -316,4 +316,50 @@ describe('render status helpers', () => {
     expect(compositionStatus.status).toBe('stale');
     expect(compositionStatus.reasons.some((reason) => reason.includes('Audio mix'))).toBe(true);
   });
+
+  it('treats legacy compositions without audioMix as default and marks them stale on mix change', () => {
+    const project = attachCurrentRender(attachCurrentRender(createProject(), 'scene-1'), 'scene-2');
+
+    project.compositions = [{
+      compositionId: 'composition-legacy',
+      projectId: project.id,
+      outputPath: 'renders/compositions/final-legacy.mp4',
+      createdAt: new Date().toISOString(),
+      sceneIds: ['scene-1', 'scene-2'],
+      inputFingerprint: {
+        version: 'p10.1',
+        scenes: [
+          {
+            sceneId: 'scene-1',
+            renderId: 'render-scene-1',
+            narrationSignature: 'text:hello|voice:|model:|format:|asset:'
+          },
+          {
+            sceneId: 'scene-2',
+            renderId: 'render-scene-2',
+            narrationSignature: 'text:world|voice:|model:|format:|asset:'
+          }
+        ]
+      },
+      duration: 4,
+      width: 1280,
+      height: 720,
+      fps: 30,
+      renderer: 'ffmpeg',
+      version: 'p10.1-test',
+      filesize: 100,
+      mimeType: 'video/mp4',
+      transition: { type: 'none' }
+    }];
+
+    let renderPlan = resolveRenderPlan(project);
+    expect(deriveCompositionArtifactStatus(project, renderPlan).status).toBe('current');
+
+    project.renderSettings.audio = { narrationVolume: 0.5, musicVolume: 0.35, effectsVolume: 0.2 };
+    renderPlan = resolveRenderPlan(project);
+    const status = deriveCompositionArtifactStatus(project, renderPlan);
+
+    expect(status.status).toBe('stale');
+    expect(status.reasons.some((reason) => reason.includes('Audio mix'))).toBe(true);
+  });
 });
