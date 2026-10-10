@@ -168,7 +168,11 @@ export async function generateProjectMusic(
     const instrumental = options.instrumental ?? existingMusic.instrumental ?? true;
     const model = options.model ?? existingMusic.model ?? resolveDefaultModel();
     const seed = options.seed ?? existingMusic.seed;
-    const outputFormat = options.outputFormat ?? existingMusic.format;
+    // Only an explicitly requested output format is forwarded to the provider.
+    // `existingMusic.format` is the stored *asset* format (e.g. "wav"/"mp3") and
+    // must never be reused as a provider codec code, or a later real-provider
+    // regeneration would send an unsupported value (e.g. "wav").
+    const outputFormat = options.outputFormat;
     const providerId = resolveMusicProvider(options.provider, options.mode);
     const regenerate = Boolean(options.regenerate);
 

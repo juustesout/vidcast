@@ -61,6 +61,18 @@ describe('ElevenLabs music provider adapter', () => {
     expect(result.duration).toBeCloseTo(4, 2);
   });
 
+  it('maps a legacy short output format (e.g. a stored "wav") to the supported MP3 default', async () => {
+    const fetchMock = vi.fn(async () => audioResponse(Buffer.from('ID3fake-mp3-bytes')));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new ElevenLabsMusicProvider({ apiKey: 'test-key' });
+    const result = await provider.generate({ prompt: 'calm', durationMs: 30000, outputFormat: 'wav' });
+
+    expect(result.format).toBe('mp3');
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`https://api.elevenlabs.io/v1/music?output_format=${DEFAULT_ELEVENLABS_MUSIC_OUTPUT_FORMAT}`);
+  });
+
   it('fails with a configuration error before any request when the key is missing', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

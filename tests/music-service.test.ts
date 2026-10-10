@@ -65,6 +65,7 @@ function createDependencies(
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
   const deletedAssets: string[] = [];
+  const generatedRequests: Array<{ durationMs: number; model?: string; outputFormat?: string }> = [];
   let createdCount = 0;
 
   const store: Pick<ProjectStore, 'getProject' | 'updateProject'> = {
@@ -108,7 +109,8 @@ function createDependencies(
     getProvider() {
       return {
         providerId: 'fake',
-        async generate(request: { durationMs: number; model?: string }) {
+        async generate(request: { durationMs: number; model?: string; outputFormat?: string }) {
+          generatedRequests.push(request);
           if (behavior.providerError) {
             throw behavior.providerError;
           }
@@ -129,7 +131,7 @@ function createDependencies(
     }
   };
 
-  return { state, store, media, registry, createdCount: () => createdCount, deletedAssets };
+  return { state, store, media, registry, createdCount: () => createdCount, deletedAssets, generatedRequests };
 }
 
 describe('project music generation service', () => {
@@ -188,6 +190,23 @@ describe('project music generation service', () => {
     expect(result.assetId).not.toBe(existing.id);
     expect(deps.state.project.assets.map((asset) => asset.id)).toContain('asset-existing');
     expect(deps.state.project.music?.assetId).toBe(result.assetId);
+  });
+
+  it('does not forward a stale stored asset format (e.g. "wav") as the provider output format', async () => {
+    const existing = createAsset('asset-existing');
+    const project = createProject({
+      assets: [existing],
+      music: { assetId: existing.id, status: 'generated', prompt: 'old', format: 'wav' }
+    });
+    const deps = createDependencies(project);
+
+    await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(deps.generatedRequests.at(-1)?.outputFormat).toBeUndefined();
   });
 
   it('marks the attempt failed and preserves the previous asset on provider failure', async () => {

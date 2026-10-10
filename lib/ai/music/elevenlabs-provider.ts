@@ -44,7 +44,9 @@ const DEFAULT_TIMEOUT_MS = 300000;
 
 function resolveOutputFormat(value?: string): string {
   const candidate = (value || process.env.ELEVENLABS_MUSIC_OUTPUT_FORMAT || DEFAULT_ELEVENLABS_MUSIC_OUTPUT_FORMAT).trim().toLowerCase();
-  if (candidate === 'mp3' || candidate === 'auto') {
+  // Accept short/legacy container names (e.g. a stored asset format such as
+  // "wav") and map them to the supported MP3 default instead of failing.
+  if (candidate === 'mp3' || candidate === 'm4a' || candidate === 'wav' || candidate === 'auto' || candidate === 'pcm' || candidate === 'opus') {
     return DEFAULT_ELEVENLABS_MUSIC_OUTPUT_FORMAT;
   }
   if (ALLOWED_MP3_OUTPUT_FORMATS.has(candidate)) {
