@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
+import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { ProductionWorkflow } from '@/components/project/production-workflow';
 import { ServerRunPanel } from '@/components/project/server-run-panel';
 import { ScenePreview } from '@/components/preview/scene-preview';
@@ -1943,7 +1944,9 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       ) : null}
 
       {activeTab === 'assets' ? (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-6">
+          <BackgroundMusicPanel project={draft} onRefresh={refreshProject} />
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="studio-panel rounded-[28px] p-4 shadow-panel">
             <div className="flex flex-wrap items-center gap-2 border-b border-slate-700/70 pb-4">
               <button type="button" onClick={() => libraryAssetFileInput.current?.click()} className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-semibold text-slate-950">Import asset</button>
@@ -2039,6 +2042,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
               <EmptyPanel message="Select an asset to inspect metadata and usage." />
             )}
           </aside>
+          </div>
         </div>
       ) : null}
 
