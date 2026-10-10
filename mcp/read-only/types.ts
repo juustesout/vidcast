@@ -1,4 +1,5 @@
 import type { Project } from '@/lib/types/render';
+import type { CompositionArtifact } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 import type { ProjectSummary } from '@/lib/storage/project-store';
 import type { ProjectValidationReport } from '@/lib/validation/project-validation-report';
@@ -61,6 +62,42 @@ export interface GetValidationReportResponse {
 export interface GetProductionPlanResponse {
   projectId: string;
   report: ProductionPlanReport;
+}
+
+export interface CompositionInfo {
+  compositionId: string;
+  createdAt: string;
+  duration: number;
+  width: number;
+  height: number;
+  fps: number;
+  sceneCount: number;
+  filesize: number;
+  // Relative API path the agent can fetch to download the rendered MP4. The
+  // tool never returns MP4 bytes; the caller performs an authenticated GET.
+  downloadPath: string;
+}
+
+export interface GetProjectCompositionsResponse {
+  projectId: string;
+  // True when at least one composition artifact exists and can be downloaded.
+  available: boolean;
+  latest: CompositionInfo | null;
+  compositions: CompositionInfo[];
+}
+
+export function toCompositionInfo(projectId: string, artifact: CompositionArtifact): CompositionInfo {
+  return {
+    compositionId: artifact.compositionId,
+    createdAt: artifact.createdAt,
+    duration: artifact.duration,
+    width: artifact.width,
+    height: artifact.height,
+    fps: artifact.fps,
+    sceneCount: artifact.sceneIds.length,
+    filesize: artifact.filesize,
+    downloadPath: `/api/projects/${encodeURIComponent(projectId)}/compositions/${encodeURIComponent(artifact.compositionId)}/file`
+  };
 }
 
 export function toProjectSummary(project: ProjectSummary): ReadOnlyMcpProjectSummary {

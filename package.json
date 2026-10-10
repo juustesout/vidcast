@@ -10,7 +10,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:mcp": "vitest run tests/mcp-read-only.test.ts tests/mcp-production.test.ts tests/mcp-stdio-transport.integration.test.ts tests/mcp-credential-failclosed-stdio.integration.test.ts",
+    "test:mcp": "vitest run tests/mcp-read-only.test.ts tests/mcp-production.test.ts tests/mcp-authoring.test.ts tests/mcp-compositions.test.ts tests/mcp-stdio-transport.integration.test.ts tests/mcp-credential-failclosed-stdio.integration.test.ts",
     "test:mcp:readonly": "vitest run tests/mcp-read-only.test.ts",
     "mcp:readonly": "tsx mcp/read-only/server.ts",
     "mcp:local": "tsx mcp/read-only/server.ts"

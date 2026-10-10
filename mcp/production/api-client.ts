@@ -83,7 +83,10 @@ async function parseJson(response: Response): Promise<unknown> {
   }
 }
 
-function mapStatusToCode(status: number, payload: unknown): 'NOT_FOUND' | 'POLICY_DENIED' | 'PROVIDER_NOT_CONFIGURED' | 'CONFLICT' | 'INVALID_ARGUMENT' | 'API_ERROR' {
+function mapStatusToCode(
+  status: number,
+  payload: unknown
+): 'NOT_FOUND' | 'POLICY_DENIED' | 'PROVIDER_NOT_CONFIGURED' | 'CONFLICT' | 'INVALID_ARGUMENT' | 'UNAUTHENTICATED' | 'FORBIDDEN' | 'RATE_LIMITED' | 'FFMPEG_UNAVAILABLE' | 'API_ERROR' {
   const explicit = parseCode(payload);
   if (explicit === 'NOT_FOUND') {
     return 'NOT_FOUND';
@@ -100,18 +103,39 @@ function mapStatusToCode(status: number, payload: unknown): 'NOT_FOUND' | 'POLIC
   if (explicit === 'INVALID_ARGUMENT') {
     return 'INVALID_ARGUMENT';
   }
+  if (explicit === 'UNAUTHENTICATED') {
+    return 'UNAUTHENTICATED';
+  }
+  if (explicit === 'FORBIDDEN') {
+    return 'FORBIDDEN';
+  }
+  if (explicit === 'RATE_LIMITED') {
+    return 'RATE_LIMITED';
+  }
+  if (explicit === 'FFMPEG_UNAVAILABLE') {
+    return 'FFMPEG_UNAVAILABLE';
+  }
 
+  if (status === 401) {
+    return 'UNAUTHENTICATED';
+  }
+  if (status === 403) {
+    return 'FORBIDDEN';
+  }
   if (status === 404) {
     return 'NOT_FOUND';
   }
   if (status === 400) {
     return 'INVALID_ARGUMENT';
   }
-  if (status === 403) {
-    return 'POLICY_DENIED';
-  }
   if (status === 409) {
     return 'CONFLICT';
+  }
+  if (status === 429) {
+    return 'RATE_LIMITED';
+  }
+  if (status === 503) {
+    return 'FFMPEG_UNAVAILABLE';
   }
 
   return 'API_ERROR';

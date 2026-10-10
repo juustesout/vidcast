@@ -5,6 +5,7 @@ import type { AppApiClient } from './api-client';
 import { HttpAppApiClient } from './api-client';
 import { ReadOnlyMcpToolError, toFailure, toSuccess } from './errors';
 import type {
+  GetProjectCompositionsResponse,
   GetProjectResponse,
   GetProductionPlanResponse,
   GetSceneResponse,
@@ -12,7 +13,7 @@ import type {
   ListProjectsResponse,
   ReadOnlyMcpResult
 } from './types';
-import { toProjectSummary } from './types';
+import { toCompositionInfo, toProjectSummary } from './types';
 
 const projectIdSchema = z.string().trim().min(1).max(200);
 const sceneIdSchema = z.string().trim().min(1).max(200);
@@ -30,6 +31,10 @@ export const getValidationReportInputSchema = z.object({
 });
 export const getProductionPlanInputSchema = z.object({
   projectId: projectIdSchema
+});
+export const getProjectCompositionsInputSchema = z.object({
+  projectId: projectIdSchema,
+  compositionId: z.string().trim().min(1).max(200).optional()
 });
 
 export const READ_ONLY_TOOL_DEFINITIONS = [
@@ -82,6 +87,17 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
       readOnlyHint: true,
       openWorldHint: false
     }
+  },
+  {
+    name: 'get_project_compositions',
+    description:
+      'Read available final-video composition metadata for a project (from GET /api/projects/{id}). Returns compositionId, dimensions, duration, sceneCount and an authenticated downloadPath per composition (latest first) plus an `available` flag. It never returns MP4 bytes; fetch the MP4 yourself via downloadPath with the same bearer token. Optional compositionId filters to one composition and raises NOT_FOUND when it is absent.',
+    inputSchema: getProjectCompositionsInputSchema,
+    annotations: {
+      title: 'Get Project Compositions',
+      readOnlyHint: true,
+      openWorldHint: false
+    }
   }
 ] as const;
 
@@ -91,6 +107,7 @@ export interface ReadOnlyToolService {
   getScene(args: unknown): Promise<ReadOnlyMcpResult<GetSceneResponse>>;
   getValidationReport(args: unknown): Promise<ReadOnlyMcpResult<GetValidationReportResponse>>;
   getProductionPlan(args: unknown): Promise<ReadOnlyMcpResult<GetProductionPlanResponse>>;
+  getProjectCompositions(args: unknown): Promise<ReadOnlyMcpResult<GetProjectCompositionsResponse>>;
 }
 
 export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppApiClient()): ReadOnlyToolService {
@@ -159,6 +176,33 @@ export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppA
         return toSuccess({
           projectId: parsed.projectId,
           report
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async getProjectCompositions(args: unknown) {
+      try {
+        const parsed = getProjectCompositionsInputSchema.parse(args ?? {});
+        const project = await apiClient.getProject(parsed.projectId);
+        const all = (project.compositions ?? [])
+          .map((artifact) => toCompositionInfo(project.id, artifact))
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+        const selected = parsed.compositionId ? all.filter((entry) => entry.compositionId === parsed.compositionId) : all;
+
+        if (parsed.compositionId && selected.length === 0) {
+          throw new ReadOnlyMcpToolError('NOT_FOUND', 'Composition not found.', {
+            projectId: parsed.projectId,
+            compositionId: parsed.compositionId
+          });
+        }
+
+        return toSuccess({
+          projectId: project.id,
+          available: all.length > 0,
+          latest: all[0] ?? null,
+          compositions: selected
         });
       } catch (error) {
         return toFailure(fromValidationError(error));
@@ -254,5 +298,15 @@ export function registerReadOnlyTools(server: McpServer, service: ReadOnlyToolSe
       annotations: READ_ONLY_TOOL_DEFINITIONS[4].annotations
     },
     async (args) => asToolResponse(await service.getProductionPlan(args))
+  );
+
+  server.registerTool(
+    'get_project_compositions',
+    {
+      description: READ_ONLY_TOOL_DEFINITIONS[5].description,
+      inputSchema: READ_ONLY_TOOL_DEFINITIONS[5].inputSchema,
+      annotations: READ_ONLY_TOOL_DEFINITIONS[5].annotations
+    },
+    async (args) => asToolResponse(await service.getProjectCompositions(args))
   );
 }

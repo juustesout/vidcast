@@ -77,7 +77,24 @@ beforeAll(async () => {
             ],
             assets: [],
             references: [],
-            compositions: [],
+            compositions: [
+              {
+                compositionId: 'comp-stdio-1',
+                projectId: mockRun.projectId,
+                outputPath: 'renders/composition-stdio-1.mp4',
+                createdAt: new Date().toISOString(),
+                sceneIds: ['scene-1'],
+                duration: 3,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                renderer: 'ffmpeg',
+                version: 'p10.1',
+                filesize: 1000,
+                mimeType: 'video/mp4',
+                transition: { type: 'none' }
+              }
+            ],
             renderSettings: {
               aspectRatio: '16:9',
               fps: 30,
@@ -248,6 +265,71 @@ beforeAll(async () => {
       return;
     }
 
+    if (method === 'POST' && url === '/api/projects') {
+      const now = new Date().toISOString();
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          project: {
+            id: 'project-created-1',
+            title: 'Created via MCP',
+            description: 'stub',
+            durationTarget: 30,
+            aspectRatio: '16:9',
+            fps: 30,
+            createdAt: now,
+            updatedAt: now,
+            narration: { text: '', segments: [] },
+            scenes: [],
+            assets: [],
+            references: [],
+            compositions: [],
+            renderSettings: {
+              aspectRatio: '16:9',
+              fps: 30,
+              width: 1920,
+              height: 1080,
+              background: { type: 'color', value: '#000000' },
+              audio: { narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 },
+              subtitlesEnabled: true
+            }
+          }
+        })
+      );
+      return;
+    }
+
+    if (method === 'POST' && url === `/api/projects/${mockRun.projectId}/scene-intents/plan`) {
+      const now = new Date().toISOString();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          project: { id: mockRun.projectId, title: 'STDIO MCP Project', updatedAt: now },
+          createdIntentIds: ['intent-stdio-1']
+        })
+      );
+      return;
+    }
+
+    if (method === 'POST' && url === `/api/projects/${mockRun.projectId}/scene-intents/materialize`) {
+      const now = new Date().toISOString();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          project: { id: mockRun.projectId, title: 'STDIO MCP Project', updatedAt: now },
+          materialized: [{ intentId: 'intent-stdio-1', sceneId: 'scene-stdio-1' }],
+          skipped: []
+        })
+      );
+      return;
+    }
+
+    if (method === 'POST' && url === `/api/projects/${mockRun.projectId}/music`) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ action: 'generate', status: 'generated', assetId: 'asset-stdio-1', provider: 'fake', model: 'mock' }));
+      return;
+    }
+
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ message: 'Not found.' }));
   });
@@ -290,9 +372,57 @@ describe('stdio MCP transport integration', () => {
     const toolNames = listed.tools.map((tool) => tool.name);
 
     expect(toolNames).toContain('list_projects');
+    expect(toolNames).toContain('get_project_compositions');
+    expect(toolNames).toContain('create_project');
+    expect(toolNames).toContain('update_project');
+    expect(toolNames).toContain('plan_scene_intents');
+    expect(toolNames).toContain('materialize_scene_intents');
+    expect(toolNames).toContain('manage_project_music');
     expect(toolNames).toContain('run_production');
     expect(toolNames).toContain('get_run_status');
     expect(toolNames).toContain('get_run_log');
+
+    const created = await client.callTool({
+      name: 'create_project',
+      arguments: { title: 'Created via MCP' }
+    });
+    expect(created.isError).toBeFalsy();
+    const createdContent = created.structuredContent as { ok: boolean; data?: { projectId?: string } };
+    expect(createdContent.ok).toBe(true);
+    expect(createdContent.data?.projectId).toBe('project-created-1');
+
+    const planned = await client.callTool({
+      name: 'plan_scene_intents',
+      arguments: { projectId: mockRun.projectId }
+    });
+    expect(planned.isError).toBeFalsy();
+
+    const materialized = await client.callTool({
+      name: 'materialize_scene_intents',
+      arguments: { projectId: mockRun.projectId }
+    });
+    expect(materialized.isError).toBeFalsy();
+
+    const music = await client.callTool({
+      name: 'manage_project_music',
+      arguments: { projectId: mockRun.projectId, action: 'generate', prompt: 'calm', mode: 'mock' }
+    });
+    expect(music.isError).toBeFalsy();
+
+    const compositions = await client.callTool({
+      name: 'get_project_compositions',
+      arguments: { projectId: mockRun.projectId }
+    });
+    expect(compositions.isError).toBeFalsy();
+    const compositionsContent = compositions.structuredContent as {
+      ok: boolean;
+      data?: { available?: boolean; latest?: { compositionId?: string; downloadPath?: string } };
+    };
+    expect(compositionsContent.data?.available).toBe(true);
+    expect(compositionsContent.data?.latest?.compositionId).toBe('comp-stdio-1');
+    expect(compositionsContent.data?.latest?.downloadPath).toBe(
+      `/api/projects/${mockRun.projectId}/compositions/comp-stdio-1/file`
+    );
 
     const start = await client.callTool({
       name: 'run_production',

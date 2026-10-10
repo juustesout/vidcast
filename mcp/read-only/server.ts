@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import { createProductionToolService, registerProductionTools } from '@/mcp/production/tools';
+import { createAuthoringToolService, registerAuthoringTools } from '@/mcp/authoring/tools';
 import { createReadOnlyToolService, registerReadOnlyTools } from './tools';
 
 export function createReadOnlyMcpServer(): McpServer {
@@ -18,6 +19,7 @@ export function createReadOnlyMcpServer(): McpServer {
   );
 
   registerReadOnlyTools(server, createReadOnlyToolService());
+  registerAuthoringTools(server, createAuthoringToolService());
   registerProductionTools(server, createProductionToolService());
   return server;
 }

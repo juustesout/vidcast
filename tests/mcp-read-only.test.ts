@@ -135,7 +135,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
 describe('read-only MCP tool definitions', () => {
   it('registers read-only tools with expected names', () => {
     const names = READ_ONLY_TOOL_DEFINITIONS.map((entry) => entry.name);
-    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan']);
+    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions']);
     expect(READ_ONLY_TOOL_DEFINITIONS.every((entry) => entry.annotations.readOnlyHint)).toBe(true);
   });
 });
