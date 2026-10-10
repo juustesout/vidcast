@@ -41,16 +41,12 @@ describe('fake music provider', () => {
 });
 
 describe('music provider registry', () => {
-  it('resolves the fake provider and rejects unsupported real providers', () => {
+  it('resolves the fake provider and the real ElevenLabs provider', () => {
     const registry = createMusicRegistry();
     expect(registry.getProvider('fake').providerId).toBe('fake');
     expect(registry.getProvider('local').providerId).toBe('fake');
-    expect(() => registry.getProvider('elevenlabs')).toThrow(MusicProviderError);
-    try {
-      registry.getProvider('elevenlabs');
-    } catch (error) {
-      expect((error as MusicProviderError).code).toBe('UNSUPPORTED');
-    }
+    expect(registry.getProvider('elevenlabs').providerId).toBe('elevenlabs');
+    expect(() => registry.getProvider('unknown')).toThrow(MusicProviderError);
   });
 });
 

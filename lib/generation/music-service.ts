@@ -1,4 +1,5 @@
 import { createMusicRegistry, type MusicRegistry } from '@/lib/ai/music/registry';
+import { DEFAULT_ELEVENLABS_MUSIC_MODEL } from '@/lib/ai/music/elevenlabs-provider';
 import { MusicProviderError } from '@/lib/ai/music/provider';
 import { clampMusicLengthMs } from '@/lib/render/music-mix';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
@@ -15,7 +16,7 @@ function nowIso(): string {
 }
 
 function resolveDefaultModel(): string {
-  return process.env.ELEVENLABS_MUSIC_MODEL || 'music_v1';
+  return process.env.ELEVENLABS_MUSIC_MODEL || DEFAULT_ELEVENLABS_MUSIC_MODEL;
 }
 
 export class ProjectMusicGenerationError extends Error {
@@ -27,6 +28,9 @@ export class ProjectMusicGenerationError extends Error {
     | 'music.alreadyGenerated'
     | 'music.provider.notConfigured'
     | 'music.provider.unsupported'
+    | 'music.provider.auth'
+    | 'music.provider.rateLimited'
+    | 'music.provider.rejected'
     | 'music.provider.failed'
     | 'music.asset.notFound'
     | 'music.asset.invalidType';
@@ -41,6 +45,9 @@ export class ProjectMusicGenerationError extends Error {
       | 'music.alreadyGenerated'
       | 'music.provider.notConfigured'
       | 'music.provider.unsupported'
+      | 'music.provider.auth'
+      | 'music.provider.rateLimited'
+      | 'music.provider.rejected'
       | 'music.provider.failed'
       | 'music.asset.notFound'
       | 'music.asset.invalidType'
@@ -70,7 +77,7 @@ export interface ProjectMusicSelectionResult {
 
 interface MusicServiceDependencies {
   store: Pick<ProjectStore, 'getProject' | 'updateProject'>;
-  media: Pick<typeof mediaStore, 'saveGeneratedMusic'>;
+  media: Pick<typeof mediaStore, 'saveGeneratedMusic' | 'deleteAssetFile'>;
   registry: MusicRegistry;
 }
 
@@ -81,13 +88,21 @@ const defaultDependencies: MusicServiceDependencies = {
 };
 
 function mapProviderError(error: MusicProviderError): ProjectMusicGenerationError {
-  if (error.code === 'NOT_CONFIGURED') {
-    return new ProjectMusicGenerationError(error.message, 409, 'music.provider.notConfigured');
+  switch (error.code) {
+    case 'NOT_CONFIGURED':
+      return new ProjectMusicGenerationError(error.message, 409, 'music.provider.notConfigured');
+    case 'INVALID_REQUEST':
+    case 'UNSUPPORTED':
+      return new ProjectMusicGenerationError(error.message, 422, 'music.provider.unsupported');
+    case 'PROVIDER_AUTH':
+      return new ProjectMusicGenerationError(error.message, 502, 'music.provider.auth');
+    case 'PROVIDER_RATE_LIMIT':
+      return new ProjectMusicGenerationError(error.message, 429, 'music.provider.rateLimited');
+    case 'PROVIDER_REJECTED':
+      return new ProjectMusicGenerationError(error.message, 422, 'music.provider.rejected');
+    default:
+      return new ProjectMusicGenerationError(error.message, 502, 'music.provider.failed');
   }
-  if (error.code === 'UNSUPPORTED' || error.code === 'INVALID_REQUEST') {
-    return new ProjectMusicGenerationError(error.message, 422, 'music.provider.unsupported');
-  }
-  return new ProjectMusicGenerationError(error.message, 502, 'music.provider.failed');
 }
 
 function mapRunPolicyError(error: RunPolicyError): ProjectMusicGenerationError {
@@ -323,7 +338,14 @@ export async function generateProjectMusic(
       }
     };
 
-    await dependencies.store.updateProject(withGenerated);
+    try {
+      await dependencies.store.updateProject(withGenerated);
+    } catch {
+      // The audio file is already on disk; if the project cannot be updated we
+      // remove it so no half-registered asset is left behind.
+      await dependencies.media.deleteAssetFile(projectId, generatedAsset).catch(() => {});
+      throw new ProjectMusicGenerationError('Failed to store the generated background music.', 500, 'music.provider.failed');
+    }
 
     return {
       status: 'generated',

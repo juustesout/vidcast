@@ -1,5 +1,6 @@
 import { resolveProviderDefaults, resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
 
+import { ElevenLabsMusicProvider } from './elevenlabs-provider';
 import { FakeMusicProvider } from './fake-provider';
 import { MusicProviderError, type MusicProvider } from './provider';
 
@@ -15,11 +16,11 @@ class DefaultMusicRegistry implements MusicRegistry {
       return new FakeMusicProvider();
     }
 
-    // The real ElevenLabs music adapter is intentionally deferred. The policy
-    // and provider seam exist so it can be added later without touching the
-    // service, but no paid API call is constructed in this phase.
     if (id === 'elevenlabs') {
-      throw new MusicProviderError('ElevenLabs music generation is not available yet.', 501, 'UNSUPPORTED');
+      // Constructing the adapter performs no network call; the paid request is
+      // only built inside generate(), which the service invokes solely on an
+      // explicit user generation action.
+      return new ElevenLabsMusicProvider();
     }
 
     throw new MusicProviderError(`Unknown music provider: ${id}`, 400, 'INVALID_REQUEST');

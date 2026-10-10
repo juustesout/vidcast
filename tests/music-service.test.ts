@@ -6,6 +6,7 @@ import {
   ProjectMusicGenerationError,
   selectProjectMusic
 } from '@/lib/generation/music-service';
+import { MusicProviderError } from '@/lib/ai/music/provider';
 import type { GeneratedMusicInput } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Asset } from '@/lib/types/asset';
@@ -57,9 +58,13 @@ function createAsset(id: string, type: Asset['type'] = 'music'): Asset {
   };
 }
 
-function createDependencies(project: Project, behavior: { fail?: boolean } = {}) {
+function createDependencies(
+  project: Project,
+  behavior: { fail?: boolean; providerError?: MusicProviderError; failFinalUpdate?: boolean } = {}
+) {
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
+  const deletedAssets: string[] = [];
   let createdCount = 0;
 
   const store: Pick<ProjectStore, 'getProject' | 'updateProject'> = {
@@ -67,6 +72,9 @@ function createDependencies(project: Project, behavior: { fail?: boolean } = {})
       return id === state.project.id ? (structuredClone(state.project) as Project) : null;
     },
     async updateProject(next: Project) {
+      if (behavior.failFinalUpdate && next.music?.status === 'generated') {
+        throw new Error('disk full');
+      }
       state.project = structuredClone(next) as Project;
       return state.project;
     }
@@ -90,6 +98,9 @@ function createDependencies(project: Project, behavior: { fail?: boolean } = {})
         createdAt: now,
         updatedAt: now
       };
+    },
+    async deleteAssetFile(_projectId: string, asset: Asset): Promise<void> {
+      deletedAssets.push(asset.id);
     }
   };
 
@@ -98,6 +109,9 @@ function createDependencies(project: Project, behavior: { fail?: boolean } = {})
       return {
         providerId: 'fake',
         async generate(request: { durationMs: number; model?: string }) {
+          if (behavior.providerError) {
+            throw behavior.providerError;
+          }
           if (behavior.fail) {
             throw new Error('provider boom');
           }
@@ -115,7 +129,7 @@ function createDependencies(project: Project, behavior: { fail?: boolean } = {})
     }
   };
 
-  return { state, store, media, registry, createdCount: () => createdCount };
+  return { state, store, media, registry, createdCount: () => createdCount, deletedAssets };
 }
 
 describe('project music generation service', () => {
@@ -192,6 +206,29 @@ describe('project music generation service', () => {
     expect(deps.state.project.music?.status).toBe('failed');
     expect(deps.state.project.music?.assetId).toBe('asset-existing');
     expect(deps.state.project.assets).toHaveLength(1);
+  });
+
+  it('maps a provider rate-limit error to a 429 response', async () => {
+    const deps = createDependencies(createProject(), {
+      providerError: new MusicProviderError('quota exceeded', 429, 'PROVIDER_RATE_LIMIT')
+    });
+
+    await expect(
+      generateProjectMusic('project-1', { prompt: 'calm' }, { store: deps.store, media: deps.media, registry: deps.registry as never })
+    ).rejects.toMatchObject({ code: 'music.provider.rateLimited', status: 429 });
+
+    expect(deps.state.project.music?.status).toBe('failed');
+  });
+
+  it('removes the stored file when the final project update fails so no orphan asset remains', async () => {
+    const deps = createDependencies(createProject(), { failFinalUpdate: true });
+
+    await expect(
+      generateProjectMusic('project-1', { prompt: 'calm' }, { store: deps.store, media: deps.media, registry: deps.registry as never })
+    ).rejects.toMatchObject({ code: 'music.provider.failed', status: 500 });
+
+    expect(deps.deletedAssets).toHaveLength(1);
+    expect(deps.state.project.assets).toHaveLength(0);
   });
 
   it('requires a prompt', async () => {
