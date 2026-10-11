@@ -5,6 +5,7 @@ import { CompositionServiceError, videoCompositionService } from '@/lib/render/v
 import { SceneRenderError } from '@/lib/render/renderer';
 import { sceneRenderService } from '@/lib/render/scene-render-service';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
+import type { Project } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
 import { deriveProductionPlan } from './production-planner';
@@ -41,6 +42,13 @@ export interface RunServiceConfig {
     maxLogPageLimit: number;
   };
   policy: RunPolicyServerConfig;
+  // Bounded retry applied when a mid-run project refresh reads `null` or
+  // throws. Keeps transient read failures from aborting an otherwise healthy
+  // run while guaranteeing the retry loop always terminates.
+  refreshRetry?: {
+    attempts: number;
+    delayMs: number;
+  };
 }
 
 export class RunServiceError extends Error {
@@ -76,6 +84,12 @@ export class RunServiceError extends Error {
   }
 }
 
+const DEFAULT_REFRESH_RETRY = { attempts: 3, delayMs: 100 };
+
+type ProjectReadResult =
+  | { ok: true; project: Project }
+  | { ok: false; reason: 'not_found' | 'error'; error?: unknown };
+
 interface ServiceDependencies {
   store: Pick<ProjectStore, 'getProject'> & Partial<Pick<ProjectStore, 'updateProject' | 'mutateProject'>>;
   runBatch: typeof runProductionBatch;
@@ -87,6 +101,7 @@ interface ServiceDependencies {
   renderScene: typeof sceneRenderService.renderScene;
   composeProject: typeof videoCompositionService.composeProject;
   now: () => string;
+  delay: (ms: number) => Promise<void>;
 }
 
 const defaultDependencies: ServiceDependencies = {
@@ -99,7 +114,8 @@ const defaultDependencies: ServiceDependencies = {
   generateNarration: generateSceneNarration,
   renderScene: sceneRenderService.renderScene.bind(sceneRenderService),
   composeProject: videoCompositionService.composeProject.bind(videoCompositionService),
-  now: () => new Date().toISOString()
+  now: () => new Date().toISOString(),
+  delay: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
 };
 
 function envInt(value: string | undefined, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
@@ -228,6 +244,9 @@ export class HeadlessProductionRunService {
   private readonly persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly persistQueue = new Map<string, Promise<void>>();
   private readonly recoveredRunIds = new Set<string>();
+  // In-flight start requests keyed by projectId. Set synchronously before the
+  // first await so concurrent starts for the same project coalesce onto one run.
+  private readonly pendingStarts = new Map<string, Promise<StartProductionRunResponse>>();
 
   constructor(
     config: RunServiceConfig = buildDefaultConfig(),
@@ -265,6 +284,31 @@ export class HeadlessProductionRunService {
       };
     }
 
+    // Coalesce concurrent starts for the same project onto a single run. The
+    // reservation is inserted synchronously (no await before it), so a second
+    // caller that arrives while the first is still validating sees it and
+    // reuses the resulting run instead of starting a duplicate.
+    const pending = this.pendingStarts.get(projectId);
+    if (pending) {
+      const result = await pending;
+      return {
+        run: result.run,
+        reused: true
+      };
+    }
+
+    const startPromise = this.performStart(projectId, input);
+    this.pendingStarts.set(projectId, startPromise);
+    try {
+      return await startPromise;
+    } finally {
+      if (this.pendingStarts.get(projectId) === startPromise) {
+        this.pendingStarts.delete(projectId);
+      }
+    }
+  }
+
+  private async performStart(projectId: string, input: StartProductionRunRequest): Promise<StartProductionRunResponse> {
     const project = await this.dependencies.store.getProject(projectId);
     if (!project) {
       throw new RunServiceError('Project not found.', 'NOT_FOUND', 404, { projectId });
@@ -562,11 +606,49 @@ export class HeadlessProductionRunService {
       }
 
       this.activeWorkers += 1;
-      void this.executeRun(runId).finally(() => {
-        this.activeWorkers -= 1;
-        this.scheduleDispatchLoop();
-      });
+      void this.executeRun(runId)
+        .catch(() => {})
+        .finally(() => {
+          this.activeWorkers -= 1;
+          this.scheduleDispatchLoop();
+        });
     }
+  }
+
+  private resolveRefreshRetry(): { attempts: number; delayMs: number } {
+    const configured = this.config.refreshRetry;
+    return {
+      attempts: Math.max(1, Math.floor(configured?.attempts ?? DEFAULT_REFRESH_RETRY.attempts)),
+      delayMs: Math.max(0, Math.floor(configured?.delayMs ?? DEFAULT_REFRESH_RETRY.delayMs))
+    };
+  }
+
+  // Reads a project with a bounded number of attempts so a transient read
+  // failure (null or thrown) does not immediately abort a run. The loop is
+  // finite: it performs at most `attempts` reads and never polls indefinitely.
+  private async readProjectWithRetry(projectId: string): Promise<ProjectReadResult> {
+    const { attempts, delayMs } = this.resolveRefreshRetry();
+    let reason: 'not_found' | 'error' = 'not_found';
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const project = await this.dependencies.store.getProject(projectId);
+        if (project) {
+          return { ok: true, project };
+        }
+        reason = 'not_found';
+      } catch (error) {
+        reason = 'error';
+        lastError = error;
+      }
+
+      if (attempt < attempts - 1) {
+        await this.dependencies.delay(delayMs);
+      }
+    }
+
+    return { ok: false, reason, error: lastError };
   }
 
   private async executeRun(runId: string): Promise<void> {
@@ -578,25 +660,28 @@ export class HeadlessProductionRunService {
       return;
     }
 
-    const initialProject = await this.dependencies.store.getProject(run.projectId);
-    if (!initialProject) {
-      this.registry.updateRunStatus(runId, 'failed', { finishedAt: this.dependencies.now() });
-      this.registry.appendEvent(runId, {
-        timestamp: this.dependencies.now(),
-        iteration: 0,
-        code: 'run_failed',
-        status: 'failed',
-        message: `Production run failed: project ${run.projectId} no longer exists.`
-      });
-      return;
-    }
-
     let actionExecutionCount = 0;
     let videoPollCount = 0;
 
     try {
+      const initial = await this.readProjectWithRetry(run.projectId);
+      if (!initial.ok) {
+        const at = this.dependencies.now();
+        this.registry.updateRunStatus(runId, 'failed', { finishedAt: at });
+        this.registry.appendEvent(runId, {
+          timestamp: at,
+          iteration: 0,
+          code: 'run_failed',
+          status: 'failed',
+          message: initial.reason === 'error'
+            ? `Production run failed: project ${run.projectId} could not be read.`
+            : `Production run failed: project ${run.projectId} no longer exists.`
+        });
+        return;
+      }
+
       const result = await this.dependencies.runBatch({
-        initialProject,
+        initialProject: initial.project,
         derivePlan: this.dependencies.derivePlan,
         config: {
           maxIterations: run.acceptedConfig.limits.maxIterations,
@@ -625,13 +710,18 @@ export class HeadlessProductionRunService {
           return this.executeAction(run.projectId, action, run.acceptedConfig.policy.providers, run.acceptedConfig.policy.mode);
         },
         refreshProject: async () => {
-          const refreshed = await this.dependencies.store.getProject(run.projectId);
-          if (!refreshed) {
-            throw new RunServiceError(`Project ${run.projectId} disappeared during run refresh.`, 'NOT_FOUND', 404, {
-              projectId: run.projectId
-            });
+          const refreshed = await this.readProjectWithRetry(run.projectId);
+          if (!refreshed.ok) {
+            throw new RunServiceError(
+              refreshed.reason === 'error'
+                ? `Project ${run.projectId} could not be read during run refresh.`
+                : `Project ${run.projectId} disappeared during run refresh.`,
+              refreshed.reason === 'error' ? 'PRECONDITION_FAILED' : 'NOT_FOUND',
+              refreshed.reason === 'error' ? 409 : 404,
+              { projectId: run.projectId, reason: refreshed.reason }
+            );
           }
-          return refreshed;
+          return refreshed.project;
         },
         onProgress: (progress) => {
           this.registry.updateProgress(runId, {
