@@ -4,10 +4,10 @@ Scope: implement the minimal missing pieces needed to run **one real OpenAI
 image** through the full manual image chain (request → validated PNG asset →
 storage → FFmpeg scene render → final composition), behind a default-off,
 fail-closed opt-in. No broad refactor. No other modality activated. The paid
-smoke run is documented but **was not executed**.
+smoke run **was executed once** and passed end-to-end (see §8).
 
 This report states explicitly what is proven by the implementation/tests
-(mocked HTTP) versus what still requires a real paid run.
+(mocked HTTP) versus what is proven by the real paid run (§8).
 
 ---
 
@@ -185,12 +185,12 @@ Verification performed on the working tree:
 
 ## 6. Blockers / caveats
 
-- The real paid run has **not** been performed; end-to-end success against the
-  live OpenAI Images API is unverified here by design.
-- The model name defaults to `gpt-image-1` (`OPENAI_IMAGE_MODEL` overrides). The
-  request always asks for `response_format: 'b64_json'`; if the configured model
-  rejects that parameter, the live run will surface a 4xx
-  (`provider.request.rejected`).
+- End-to-end success against the live OpenAI Images API was verified once; see
+  §8 for the run result and the adapter fix it surfaced.
+- The model name defaults to `gpt-image-1` (`OPENAI_IMAGE_MODEL` overrides).
+  `gpt-image-*` models reject the legacy `response_format` parameter, so it is
+  now sent only for non-`gpt-image` models (dall-e) that default to URL output
+  (`openai-provider.ts`, `supportsResponseFormat`).
 - Only the manual image path is piloted. Full production runs in real mode
   (which require the global flag and all four providers) remain out of scope and
   still include the unverified OpenAI video adapter.
@@ -204,10 +204,43 @@ Verification performed on the working tree:
 
 | Acceptance item (from P28 §6) | Status now |
 | --- | --- |
-| Single real OpenAI image request, no retries/batch | **Implementation-proven** (unit + service tests; adapter has no retry) |
-| PNG persisted via real media store with `image/png`, `.png`, dims, `providerRequestId` | **Implementation-proven** (real store + metadata reader, mocked HTTP) |
-| Scene asset consumed by `sceneRenderService` → MP4 | **Implementation-proven** (real FFmpeg through the service, mocked HTTP) |
-| `videoCompositionService.composeProject` → playable MP4 | **Implemented** (script step); runtime proof requires the paid run |
+| Single real OpenAI image request, no retries/batch | **Live-proven** (script asserted exactly one `/images/` call) |
+| PNG persisted via real media store with `image/png`, `.png`, dims, `providerRequestId` | **Live-proven** (2.69 MB `scene-01-generated-*.png` written) |
+| Scene asset consumed by `sceneRenderService` → MP4 | **Live-proven** (scene render reported `completed`) |
+| `videoCompositionService.composeProject` → playable MP4 | **Live-proven** (h264 1920x1080 + aac, 5.03 s, probe below) |
 | Typed provider error, no secret leakage | **Implementation-proven** (classification tests; key only in header) |
-| Cost bounded to one image, no duplicate paid calls | **Implementation-proven** (single-fetch tests + script count assert) |
-| Actual live OpenAI Images success | **Requires the paid smoke run** (documented in §3) |
+| Cost bounded to one image, no duplicate paid calls | **Live-proven** (single-fetch count assert) |
+| Actual live OpenAI Images success | **Live-proven** (see §8) |
+
+---
+
+## 8. Live pilot run (executed)
+
+Run command (the platform's ambient `OPENAI_API_KEY` was unset so only the key
+from `.env` could be used; values are never printed):
+
+```bash
+# key from .env only; pilot flags also supplied via .env
+env -u OPENAI_API_KEY npx tsx --env-file=.env scripts/real-image-pilot.ts \
+  project_afca8256-f75c-4f75-9779-26ae34f7b209 \
+  scene_3e154ea3-cda3-4beb-a8de-a9f3c02fea9a
+```
+
+Result: `PASS`
+
+- One real OpenAI Images request issued (script asserted the `/images/` count
+  was exactly 1).
+- Asset persisted: `projects/<id>/assets/scene-01-generated-*.png` (~2.69 MB),
+  `provider=openai`.
+- Scene render: `renders/scene_*.mp4` reported `completed`.
+- Final composition: `renders/compositions/final-composition_*.mp4`; `ffprobe`
+  reports `h264` 1920x1080 video + `aac` audio, duration `5.035 s`, ~1.26 MB.
+
+Bug found and fixed by the live run:
+
+- The first attempt failed with OpenAI `Unknown parameter: 'response_format'`.
+  `gpt-image-1` always returns base64 and rejects `response_format`, which the
+  adapter previously sent unconditionally. Fixed in
+  `lib/ai/image-generation/openai-provider.ts` (`supportsResponseFormat`): the
+  parameter is now sent only for non-`gpt-image` models (dall-e). Covered by a
+  new unit test.

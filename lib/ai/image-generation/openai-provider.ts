@@ -57,6 +57,13 @@ function parseErrorMessage(payload: unknown): string {
   return 'Image generation provider call failed.';
 }
 
+// `gpt-image-*` models always return base64 and reject the legacy
+// `response_format` parameter, while dall-e models default to a URL response and
+// still need it to be asked for base64.
+function supportsResponseFormat(model: string): boolean {
+  return !model.startsWith('gpt-image');
+}
+
 // Rejects empty, truncated or non-PNG provider bytes. This runs before the
 // asset is written so an invalid paid response can never be persisted as a
 // successfully generated scene image.
@@ -158,6 +165,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
 
     const size = request.width && request.height ? `${request.width}x${request.height}` : mapAspectRatioToSize(request.aspectRatio);
     const prompt = request.negativePrompt ? `${request.prompt}\n\nNegative prompt: ${request.negativePrompt}` : request.prompt;
+    const model = request.model || this.model;
 
     const { signal, cleanup } = createRequestSignal(options?.signal, this.timeoutMs);
 
@@ -167,12 +175,14 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       try {
         if (request.referenceImages && request.referenceImages.length > 0) {
           const form = new FormData();
-          form.set('model', request.model || this.model);
+          form.set('model', model);
           form.set('prompt', prompt);
           if (size) {
             form.set('size', size);
           }
-          form.set('response_format', 'b64_json');
+          if (supportsResponseFormat(model)) {
+            form.set('response_format', 'b64_json');
+          }
           for (const reference of request.referenceImages) {
             const arrayBuffer = reference.data.buffer.slice(reference.data.byteOffset, reference.data.byteOffset + reference.data.byteLength) as ArrayBuffer;
             form.append('image[]', new Blob([arrayBuffer], { type: reference.mimeType }), reference.filename || `${reference.id}.png`);
@@ -187,18 +197,22 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
             signal
           });
         } else {
+          const body: Record<string, unknown> = {
+            model,
+            prompt,
+            size
+          };
+          if (supportsResponseFormat(model)) {
+            body.response_format = 'b64_json';
+          }
+
           response = await fetch(`${this.baseUrl}/images/generations`, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${this.apiKey}`,
               'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-              model: request.model || this.model,
-              prompt,
-              size,
-              response_format: 'b64_json'
-            }),
+            body: JSON.stringify(body),
             signal
           });
         }
@@ -226,7 +240,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
 
       return {
         provider: this.providerId,
-        model: request.model || this.model,
+        model,
         mimeType: 'image/png',
         data,
         width,

@@ -116,4 +116,21 @@ describe('OpenAI provider adapter', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('omits response_format for gpt-image models and includes it for dall-e', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify({ data: [{ b64_json: PNG_BASE64 }] }), { status: 200 });
+      })
+    );
+
+    await new OpenAiImageGenerationProvider({ apiKey: 'test-key', model: 'gpt-image-1' }).generateImage({ prompt: 'test', aspectRatio: '16:9' });
+    await new OpenAiImageGenerationProvider({ apiKey: 'test-key', model: 'dall-e-3' }).generateImage({ prompt: 'test', aspectRatio: '16:9' });
+
+    expect(bodies[0]).not.toHaveProperty('response_format');
+    expect(bodies[1]).toHaveProperty('response_format', 'b64_json');
+  });
 });
