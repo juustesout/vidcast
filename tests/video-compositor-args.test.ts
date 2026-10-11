@@ -56,6 +56,35 @@ describe('video compositor args', () => {
     expect(embedded.join(' ')).not.toContain('volume=');
   });
 
+  it('forces a stereo channel layout on every normalize branch', () => {
+    const narration = buildNormalizeArgs('in.mp4', 'out.mp4', plan, 1, { inputHasAudio: true, narrationAudioPath: 'voice.mp3' }).join(' ');
+    const embedded = buildNormalizeArgs('in.mp4', 'out.mp4', plan, 1, { inputHasAudio: true }).join(' ');
+    const silence = buildNormalizeArgs('in.mp4', 'out.mp4', plan, 1, { inputHasAudio: false }).join(' ');
+
+    for (const joined of [narration, embedded, silence]) {
+      expect(joined).toContain('aresample=48000,aformat=channel_layouts=stereo');
+    }
+  });
+
+  // P24 section 4: composition trims and pads against `item.duration`
+  // (the probed render duration), not `scene.duration`. This is the current,
+  // intentional-but-unresolved timing behavior; P25 deliberately does not change
+  // it. This test keeps that authority explicit and traceable.
+  it('trims and pads each segment to the passed render duration, not scene duration', () => {
+    const args = buildNormalizeArgs('in.mp4', 'out.mp4', plan, 1.8, { inputHasAudio: true, narrationAudioPath: 'voice.mp3' }).join(' ');
+    expect(args).toContain('atrim=0:1.800');
+    expect(args).toContain('apad=pad_dur=1.800');
+    expect(args).toContain('-t 1.800');
+  });
+
+  it('applies the final peak limiter to the concat step only when requested (no music)', () => {
+    const withLimiter = buildComposeArgs('concat-list.txt', 'final.mp4', plan, { limitAudio: true }).join(' ');
+    expect(withLimiter).toContain('-af alimiter=limit=0.95:level=false');
+
+    const withoutLimiter = buildComposeArgs('concat-list.txt', 'final.mp4', plan).join(' ');
+    expect(withoutLimiter).not.toContain('alimiter');
+  });
+
   it('builds compose args with concat demuxer and deterministic output settings', () => {
     const args = buildComposeArgs('concat-list.txt', 'final.mp4', plan);
     expect(args.slice(0, 6)).toEqual(['-y', '-f', 'concat', '-safe', '0', '-i']);
@@ -81,6 +110,7 @@ describe('video compositor args', () => {
     expect(joined).toContain('afade=t=in:st=0:d=1.000');
     expect(joined).toContain('afade=t=out:st=28.000:d=2.000');
     expect(joined).toContain('amix=inputs=2');
+    expect(joined).toContain('alimiter=limit=0.95:level=false');
     expect(joined).toContain('-map 0:v:0');
     expect(joined).toContain('-map [aout]');
     expect(joined).toContain('-c:v copy');

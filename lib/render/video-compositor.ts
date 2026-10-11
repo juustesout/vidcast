@@ -9,7 +9,20 @@ import { formatVolumeFilter } from './audio-mix';
 import { resolveMusicFade } from './music-mix';
 import type { CompositionPlan } from '@/lib/types/render';
 
-export const COMPOSER_VERSION = 'p7';
+export const COMPOSER_VERSION = 'p8';
+
+// Every scene segment is forced to a stereo layout before concatenation. The
+// concat demuxer otherwise adopts the first segment's layout and coerces the
+// rest, which can silently downmix stereo to mono and clip. See
+// p24-audio-mixing-timing-recon.md section 5.
+export const SEGMENT_CHANNEL_LAYOUT_FILTER = 'aformat=channel_layouts=stereo';
+
+// Shared peak limiter applied to the final audio for every composition path
+// (with or without background music). `level=false` is required: FFmpeg's
+// alimiter defaults to auto-level (`level=true`), which re-scales the signal
+// back toward full scale and can still reach 0 dBFS (and even overshoot after
+// AAC encoding). See p25.1-music-limiter-followup.md.
+export const AUDIO_PEAK_LIMITER_FILTER = 'alimiter=limit=0.95:level=false';
 
 export type VideoCompositionErrorCode = 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID';
 
@@ -77,7 +90,8 @@ export function buildNormalizeArgs(
   const audioFilters = [
     `atrim=0:${duration}`,
     `apad=pad_dur=${duration}`,
-    'aresample=48000'
+    'aresample=48000',
+    SEGMENT_CHANNEL_LAYOUT_FILTER
   ];
   if (applyNarrationVolume) {
     audioFilters.push(`volume=${formatVolumeFilter(plan.audio?.narrationVolume)}`);
@@ -111,8 +125,13 @@ export function buildNormalizeArgs(
   ];
 }
 
-export function buildComposeArgs(listPath: string, outputPath: string, plan: CompositionPlan): string[] {
-  return [
+export function buildComposeArgs(
+  listPath: string,
+  outputPath: string,
+  plan: CompositionPlan,
+  options: { limitAudio?: boolean } = {}
+): string[] {
+  const args: string[] = [
     '-y',
     '-f',
     'concat',
@@ -120,6 +139,13 @@ export function buildComposeArgs(listPath: string, outputPath: string, plan: Com
     '0',
     '-i',
     listPath,
+  ];
+
+  if (options.limitAudio) {
+    args.push('-af', AUDIO_PEAK_LIMITER_FILTER);
+  }
+
+  args.push(
     '-c:v',
     'libx264',
     '-c:a',
@@ -131,7 +157,9 @@ export function buildComposeArgs(listPath: string, outputPath: string, plan: Com
     '-movflags',
     '+faststart',
     outputPath
-  ];
+  );
+
+  return args;
 }
 
 async function normalizeInput(
@@ -172,7 +200,7 @@ export function buildMusicMixArgs(
 
   const filterComplex = [
     `[1:a]${musicFilters.join(',')}[music]`,
-    '[0:a][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]'
+    `[0:a][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,${AUDIO_PEAK_LIMITER_FILTER}[aout]`
   ].join(';');
 
   return [
@@ -213,7 +241,7 @@ async function composeConcat(normalizedPaths: string[], outputPath: string, plan
   const listContent = normalizedPaths.map((entry) => `file '${entry.replace(/'/g, "'\\''")}'`).join('\n');
   await fs.writeFile(listPath, `${listContent}\n`, 'utf8');
 
-  const args = buildComposeArgs(listPath, outputPath, plan);
+  const args = buildComposeArgs(listPath, outputPath, plan, { limitAudio: !plan.music });
 
   await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
 }
