@@ -242,6 +242,7 @@ export async function generateSceneNarration(
         voiceId,
         model,
         format,
+        maxDurationSeconds: scene.duration,
         settings: options.settings
       });
     } catch (error) {
@@ -274,6 +275,8 @@ export async function generateSceneNarration(
       }
       throw new SceneNarrationGenerationError('Narration provider call failed.', 502, 'narration.provider.failed');
     }
+
+    const outputFormat = synthesized.format ?? format;
 
     if (typeof synthesized.duration === 'number' && synthesized.duration > scene.duration + 0.01) {
       const message = `Narration duration (${synthesized.duration.toFixed(2)}s) exceeds scene duration (${scene.duration.toFixed(2)}s).`;
@@ -329,7 +332,7 @@ export async function generateSceneNarration(
           text,
           voiceId,
           model,
-          format,
+          format: outputFormat,
           audioAssetId: generatedAsset.id,
           duration: generatedAsset.duration,
           status: 'generated',
@@ -338,6 +341,7 @@ export async function generateSceneNarration(
           attempts: (entry.narration?.attempts ?? []).map((attempt) => attempt.id === attemptId ? {
             ...attempt,
             status: 'generated',
+            format: outputFormat,
             completedAt: nowIso(),
             providerRequestId: synthesized.providerRequestId,
             duration: generatedAsset.duration,
@@ -359,7 +363,7 @@ export async function generateSceneNarration(
       provider: synthesized.provider,
       model: synthesized.model,
       voiceId,
-      format,
+      format: outputFormat,
       duration: generatedAsset.duration
     };
   } finally {

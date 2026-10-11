@@ -5,6 +5,7 @@ export interface TextToSpeechRequest {
   voiceId: string;
   model?: string;
   format: TextToSpeechFormat;
+  maxDurationSeconds?: number;
   settings?: {
     stability?: number;
     similarityBoost?: number;

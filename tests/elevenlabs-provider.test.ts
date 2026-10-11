@@ -36,6 +36,32 @@ describe('ElevenLabs TTS provider adapter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('normalizes an m4a request to a genuinely supported MP3 output and reports the emitted format', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      return new Response(Buffer.from('ID3fakemp3', 'utf8'), {
+        status: 200,
+        headers: {
+          'content-type': 'audio/mpeg',
+          'x-request-id': 'req-tts-m4a'
+        }
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'test-key' });
+    const result = await provider.synthesize({ text: 'Hello world', voiceId: 'voice-1', format: 'm4a' });
+
+    const init = fetchMock.mock.calls[0][1];
+    const body = JSON.parse(String(init?.body)) as { output_format: string };
+    expect(body.output_format).toBe('mp3_44100_128');
+    expect((init?.headers as Record<string, string>).Accept).toBe('audio/mpeg');
+    expect(result.format).toBe('mp3');
+    expect(result.mimeType).toBe('audio/mpeg');
+    expect(result.metadata?.outputFormat).toBe('mp3_44100_128');
+    expect(result.metadata?.requestedFormat).toBe('m4a');
+  });
+
   it('fails with configuration error when key is missing', async () => {
     const provider = new ElevenLabsTextToSpeechProvider({ apiKey: '' });
     await expect(

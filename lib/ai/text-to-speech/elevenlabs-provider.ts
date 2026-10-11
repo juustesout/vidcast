@@ -1,5 +1,5 @@
 import { mediaMetadataReader } from '@/lib/media/metadata-reader';
-import { TextToSpeechProviderError, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
+import { TextToSpeechProviderError, type TextToSpeechFormat, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
 
 interface ElevenLabsTextToSpeechProviderOptions {
   apiKey?: string;
@@ -7,24 +7,20 @@ interface ElevenLabsTextToSpeechProviderOptions {
   baseUrl?: string;
 }
 
-function outputFormatForRequest(format: TextToSpeechRequest['format']): string {
-  if (format === 'wav') {
-    return 'pcm_44100';
-  }
-  if (format === 'm4a') {
-    return 'mp3_44100_128';
-  }
-  return 'mp3_44100_128';
+interface ResolvedOutputFormat {
+  outputFormat: string;
+  mimeType: string;
+  format: TextToSpeechFormat;
 }
 
-function mimeFromFormat(format: TextToSpeechRequest['format']): string {
-  if (format === 'wav') {
-    return 'audio/wav';
+function resolveOutputFormat(requested: TextToSpeechFormat): ResolvedOutputFormat {
+  if (requested === 'wav') {
+    return { outputFormat: 'pcm_44100', mimeType: 'audio/wav', format: 'wav' };
   }
-  if (format === 'm4a') {
-    return 'audio/mp4';
-  }
-  return 'audio/mpeg';
+
+  // ElevenLabs exposes no AAC/M4A output format, so `m4a` requests are served as
+  // MP3 and reported truthfully instead of labeling MP3 bytes as M4A.
+  return { outputFormat: 'mp3_44100_128', mimeType: 'audio/mpeg', format: 'mp3' };
 }
 
 function parseErrorMessage(payload: unknown): string {
@@ -69,18 +65,18 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       throw new TextToSpeechProviderError('Voice id is required.', 400, 'INVALID_REQUEST');
     }
 
-    const format = outputFormatForRequest(request.format);
+    const resolved = resolveOutputFormat(request.format);
     const response = await fetch(`${this.baseUrl}/text-to-speech/${encodeURIComponent(request.voiceId)}`, {
       method: 'POST',
       headers: {
         'xi-api-key': this.apiKey,
         'Content-Type': 'application/json',
-        Accept: mimeFromFormat(request.format)
+        Accept: resolved.mimeType
       },
       body: JSON.stringify({
         text: request.text,
         model_id: request.model || this.model,
-        output_format: format,
+        output_format: resolved.outputFormat,
         voice_settings: {
           stability: request.settings?.stability,
           similarity_boost: request.settings?.similarityBoost,
@@ -103,21 +99,22 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       throw new TextToSpeechProviderError(parseErrorMessage(payload), response.status >= 400 && response.status < 500 ? 422 : 502, code);
     }
 
-    const mimeType = response.headers.get('content-type') || mimeFromFormat(request.format);
+    const mimeType = response.headers.get('content-type') || resolved.mimeType;
     const providerRequestId = response.headers.get('request-id') || response.headers.get('x-request-id') || undefined;
     const data = Buffer.from(await response.arrayBuffer());
-    const metadata = await mediaMetadataReader.read(data, `narration.${request.format}`, mimeType, 'audio');
+    const metadata = await mediaMetadataReader.read(data, `narration.${resolved.format}`, mimeType, 'audio');
 
     return {
       provider: this.providerId,
       model: request.model || this.model,
       mimeType,
-      format: request.format,
+      format: resolved.format,
       data,
       duration: metadata.duration,
       providerRequestId,
       metadata: {
-        outputFormat: format
+        outputFormat: resolved.outputFormat,
+        requestedFormat: request.format
       }
     };
   }

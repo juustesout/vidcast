@@ -1,7 +1,17 @@
+import { buildSilentWav, silentWavDurationSeconds } from '@/lib/ai/audio/silent-wav';
+
 import { TextToSpeechProviderError, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
 
-const SILENCE_WAV_BASE64 =
-  'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+const WORDS_PER_SECOND = 2.5;
+
+function estimateDurationSeconds(text: string, maxDurationSeconds?: number): number {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  const estimated = words / WORDS_PER_SECOND;
+  const capped = typeof maxDurationSeconds === 'number' && maxDurationSeconds > 0
+    ? Math.min(estimated, maxDurationSeconds)
+    : estimated;
+  return Math.max(0, capped);
+}
 
 export class FakeTextToSpeechProvider implements TextToSpeechProvider {
   readonly providerId = 'fake';
@@ -15,15 +25,20 @@ export class FakeTextToSpeechProvider implements TextToSpeechProvider {
       throw new TextToSpeechProviderError('Voice id is required.', 400, 'INVALID_REQUEST');
     }
 
-    const data = Buffer.from(SILENCE_WAV_BASE64, 'base64');
+    const durationSeconds = estimateDurationSeconds(request.text, request.maxDurationSeconds);
+    const data = buildSilentWav(durationSeconds * 1000);
+
     return {
       provider: this.providerId,
       model: request.model || 'fake-tts',
-      mimeType: request.format === 'wav' ? 'audio/wav' : request.format === 'm4a' ? 'audio/mp4' : 'audio/mpeg',
-      format: request.format,
+      mimeType: 'audio/wav',
+      format: 'wav',
       data,
-      duration: 0.25,
-      providerRequestId: 'fake-request-id'
+      duration: silentWavDurationSeconds(data),
+      providerRequestId: 'fake-request-id',
+      metadata: {
+        requestedFormat: request.format
+      }
     };
   }
 }
