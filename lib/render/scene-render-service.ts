@@ -3,8 +3,8 @@ import path from 'node:path';
 
 import { resolveRenderPlan } from './scene-resolver';
 import { validateRenderPlan } from './render-plan-validator';
-import { createSceneRenderPaths, ensureRenderDirectories } from './render-artifacts';
-import { LocalFFmpegRenderer } from './renderer';
+import { createSceneRenderPaths } from './render-artifacts';
+import { LocalFFmpegRenderer, type Renderer } from './renderer';
 import { projectStore } from '@/lib/storage/project-store';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { SceneRenderResult } from '@/lib/types/render';
@@ -19,7 +19,11 @@ export interface SceneRenderServiceResult {
 }
 
 export class SceneRenderService {
-  private readonly renderer = new LocalFFmpegRenderer();
+  private readonly renderer: Renderer;
+
+  constructor(renderer: Renderer = new LocalFFmpegRenderer()) {
+    this.renderer = renderer;
+  }
 
   async renderScene(projectId: string, sceneId: string): Promise<SceneRenderServiceResult> {
     const project = await projectStore.getProject(projectId);
@@ -46,7 +50,7 @@ export class SceneRenderService {
 
     const renderId = createId('render');
     const paths = createSceneRenderPaths(projectId, sceneId, renderId);
-    const { tempRoot } = await ensureRenderDirectories(projectId);
+    await fs.mkdir(paths.rendersRoot, { recursive: true });
 
     let render: SceneRenderResult;
     try {
@@ -55,7 +59,7 @@ export class SceneRenderService {
         sceneId,
         renderId,
         outputPath: paths.outputPath,
-        tempDir: tempRoot,
+        tempDir: paths.tempRoot,
         sceneWidth: singleScenePlan.width,
         sceneHeight: singleScenePlan.height,
         sceneFps: singleScenePlan.fps

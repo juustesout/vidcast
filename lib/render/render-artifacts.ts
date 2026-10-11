@@ -1,21 +1,16 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { getProjectRendersRoot } from '@/lib/storage/storage-paths';
 
 export interface SceneRenderPaths {
   rendersRoot: string;
+  /**
+   * Per-render scratch directory. Each render must own a unique temp directory
+   * so concurrent renders in the same project cannot delete each other's files.
+   */
   tempRoot: string;
   outputPath: string;
   metadataPath: string;
-}
-
-export async function ensureRenderDirectories(projectId: string): Promise<{ rendersRoot: string; tempRoot: string }> {
-  const rendersRoot = getProjectRendersRoot(projectId);
-  const tempRoot = path.join(rendersRoot, '.tmp');
-  await fs.mkdir(rendersRoot, { recursive: true });
-  await fs.mkdir(tempRoot, { recursive: true });
-  return { rendersRoot, tempRoot };
 }
 
 export function createSceneRenderPaths(projectId: string, sceneId: string, renderId: string): SceneRenderPaths {

@@ -566,46 +566,54 @@ function buildSampleProject(): Project {
   };
 }
 
+async function hasProjectDirectories(): Promise<boolean> {
+  const entries = await fs.readdir(getProjectsRoot(), { withFileTypes: true });
+  return entries.some((entry) => entry.isDirectory());
+}
+
 async function ensureSeedProject(): Promise<void> {
   await ensureDirectory(getProjectsRoot());
 
-  const entries = await fs.readdir(getProjectsRoot(), { withFileTypes: true });
-  const projectDirectories = entries.filter((entry) => entry.isDirectory());
-
-  if (projectDirectories.length > 0) {
+  if (await hasProjectDirectories()) {
     return;
   }
 
-  const sampleProject = buildSampleProject();
-  await writeProjectFile(sampleProject);
-
-  const sampleAssets = [
-    {
-      path: path.join(getProjectAssetsRoot(sampleProject.id), 'woman_shower.svg'),
-      content: createPlaceholderSvg('Woman in Shower', '#9fb4d4')
-    },
-    {
-      path: path.join(getProjectAssetsRoot(sampleProject.id), 'skin_blood_vessels.svg'),
-      content: createPlaceholderSvg('Skin Blood Vessels', '#f2d17b')
-    },
-    {
-      path: path.join(getProjectReferencesRoot(sampleProject.id), 'main_character.svg'),
-      content: createPlaceholderSvg('Main Character', '#a9c5ff')
-    },
-    {
-      path: path.join(getProjectReferencesRoot(sampleProject.id), 'bathroom.svg'),
-      content: createPlaceholderSvg('Bathroom', '#f2d17b')
-    },
-    {
-      path: path.join(getProjectReferencesRoot(sampleProject.id), 'skin_closeup.svg'),
-      content: createPlaceholderSvg('Skin Close-up', '#f2d17b')
+  await withKeyedLock(PROJECTS_ROOT_LOCK_KEY, async () => {
+    if (await hasProjectDirectories()) {
+      return;
     }
-  ];
 
-  for (const sampleAsset of sampleAssets) {
-    await ensureDirectory(path.dirname(sampleAsset.path));
-    await fs.writeFile(sampleAsset.path, sampleAsset.content, 'utf8');
-  }
+    const sampleProject = buildSampleProject();
+    await writeProjectFile(sampleProject);
+
+    const sampleAssets = [
+      {
+        path: path.join(getProjectAssetsRoot(sampleProject.id), 'woman_shower.svg'),
+        content: createPlaceholderSvg('Woman in Shower', '#9fb4d4')
+      },
+      {
+        path: path.join(getProjectAssetsRoot(sampleProject.id), 'skin_blood_vessels.svg'),
+        content: createPlaceholderSvg('Skin Blood Vessels', '#f2d17b')
+      },
+      {
+        path: path.join(getProjectReferencesRoot(sampleProject.id), 'main_character.svg'),
+        content: createPlaceholderSvg('Main Character', '#a9c5ff')
+      },
+      {
+        path: path.join(getProjectReferencesRoot(sampleProject.id), 'bathroom.svg'),
+        content: createPlaceholderSvg('Bathroom', '#f2d17b')
+      },
+      {
+        path: path.join(getProjectReferencesRoot(sampleProject.id), 'skin_closeup.svg'),
+        content: createPlaceholderSvg('Skin Close-up', '#f2d17b')
+      }
+    ];
+
+    for (const sampleAsset of sampleAssets) {
+      await ensureDirectory(path.dirname(sampleAsset.path));
+      await fs.writeFile(sampleAsset.path, sampleAsset.content, 'utf8');
+    }
+  });
 }
 
 async function writeProject(project: Project): Promise<Project> {
@@ -620,6 +628,8 @@ async function writeProject(project: Project): Promise<Project> {
 function projectLockKey(projectId: string): string {
   return `project:${projectId}`;
 }
+
+const PROJECTS_ROOT_LOCK_KEY = 'projects:root';
 
 export interface ProjectStore {
   listProjects(ownerId?: string): Promise<ProjectSummary[]>;
@@ -731,7 +741,7 @@ class JsonProjectStore implements ProjectStore {
   }
 
   async deleteProject(id: string): Promise<void> {
-    await fs.rm(getProjectRoot(id), { recursive: true, force: true });
+    await withKeyedLock(projectLockKey(id), () => fs.rm(getProjectRoot(id), { recursive: true, force: true }));
   }
 
   async importAsset(projectId: string, file: File): Promise<Asset> {
