@@ -407,15 +407,32 @@ function assertRealProviderCredentials(kind: GenerationModality, provider: strin
  * may only request a provider, never a mode. In mock mode real providers are rejected
  * before any paid request is constructed; in real mode the matching credentials must
  * be present. There is no silent fallback between fake and real providers.
+ *
+ * `imagePilot` is a narrow, server-controlled escape hatch used only by the opt-in
+ * real image pilot (see `lib/ai/image-generation/real-image-pilot.ts`). When it is
+ * true and the global real-provider flag is off, a manual *image* call may resolve
+ * to the real `openai` provider. It never affects other modalities, never applies
+ * when the caller explicitly asks for `fake`, and still runs through credential
+ * assertions below. It is a no-op when the global flag is already enabled or when an
+ * explicit `mode` is supplied.
  */
 export function resolveManualGenerationProvider(
   kind: GenerationModality,
   requestedProvider: string | undefined,
-  options: { serverConfig?: RunPolicyServerConfig; mode?: RunMode } = {}
+  options: { serverConfig?: RunPolicyServerConfig; mode?: RunMode; imagePilot?: boolean } = {}
 ): GenerationProviderResolution {
   const serverConfig = options.serverConfig ?? resolveRunPolicyServerConfig();
-  const mode = options.mode ?? serverConfig.defaultMode;
   const normalized = normalizeRequestedProvider(kind, requestedProvider);
+
+  const pilotRequestsRealImage =
+    kind === 'image' &&
+    options.imagePilot === true &&
+    options.mode === undefined &&
+    !serverConfig.allowRealProviders &&
+    normalized !== 'fake';
+
+  const effectiveServerConfig = pilotRequestsRealImage ? { ...serverConfig, allowRealProviders: true } : serverConfig;
+  const mode = options.mode ?? (pilotRequestsRealImage ? 'real' : effectiveServerConfig.defaultMode);
 
   let providers: Partial<RunProviderSelection> | undefined;
   if (normalized) {
@@ -428,9 +445,11 @@ export function resolveManualGenerationProvider(
     } else {
       providers = { narration: normalized as NarrationRunProvider };
     }
+  } else if (pilotRequestsRealImage) {
+    providers = { image: 'openai' };
   }
 
-  const policy = resolveRunPolicy({ mode, providers }, serverConfig);
+  const policy = resolveRunPolicy({ mode, providers }, effectiveServerConfig);
   const provider = policy.providers[kind];
 
   if (policy.mode === 'real') {

@@ -2,10 +2,17 @@ import { imageSize } from 'image-size';
 
 import { ImageGenerationProviderError, type ImageGenerationProvider, type ImageGenerationRequest, type ImageGenerationResult } from './provider';
 
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+// The 8-byte magic number starting every PNG file. Used to reject non-PNG or
+// truncated provider output before it can be persisted as a scene asset.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 interface OpenAiProviderOptions {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
+  timeoutMs?: number;
 }
 
 function mapAspectRatioToSize(aspectRatio?: string): string | undefined {
@@ -50,17 +57,98 @@ function parseErrorMessage(payload: unknown): string {
   return 'Image generation provider call failed.';
 }
 
+// Rejects empty, truncated or non-PNG provider bytes. This runs before the
+// asset is written so an invalid paid response can never be persisted as a
+// successfully generated scene image.
+function validatePngBytes(data: Buffer): { width: number; height: number } {
+  if (data.byteLength < PNG_SIGNATURE.byteLength || !data.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE)) {
+    throw new ImageGenerationProviderError('Provider response was not a valid PNG image.', 502, 'provider.response.invalidImage');
+  }
+
+  let dimensions: ReturnType<typeof imageSize>;
+  try {
+    dimensions = imageSize(data);
+  } catch {
+    throw new ImageGenerationProviderError('Provider response was not a decodable PNG image.', 502, 'provider.response.invalidImage');
+  }
+
+  const width = dimensions.width;
+  const height = dimensions.height;
+  if (!width || !height || width <= 0 || height <= 0) {
+    throw new ImageGenerationProviderError('Provider response PNG had no usable dimensions.', 502, 'provider.response.invalidImage');
+  }
+
+  return { width, height };
+}
+
+// Classifies non-2xx HTTP responses without ever echoing credentials. Auth and
+// rate-limit failures are surfaced distinctly so callers can react (and so a
+// retry is never issued automatically by this adapter).
+function classifyHttpError(status: number, message: string): ImageGenerationProviderError {
+  if (status === 401 || status === 403) {
+    return new ImageGenerationProviderError(message, 502, 'provider.request.unauthorized');
+  }
+  if (status === 429) {
+    return new ImageGenerationProviderError(message, 429, 'provider.request.rateLimited');
+  }
+  if (status >= 400 && status < 500) {
+    return new ImageGenerationProviderError(message, 422, 'provider.request.rejected');
+  }
+  return new ImageGenerationProviderError(message, 502, 'provider.request.failed');
+}
+
+function mapTransportError(error: unknown): ImageGenerationProviderError {
+  const name = error instanceof Error ? error.name : '';
+  if (name === 'AbortError' || name === 'TimeoutError') {
+    return new ImageGenerationProviderError('OpenAI image generation timed out or was aborted.', 504, 'provider.request.timeout');
+  }
+  return new ImageGenerationProviderError('Could not reach the OpenAI image generation service.', 502, 'provider.request.unreachable');
+}
+
+// Binds the caller supplied abort signal together with a hard request deadline
+// so a stalled paid call cannot hang a request indefinitely.
+function createRequestSignal(callerSignal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(callerSignal?.reason);
+
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort(callerSignal.reason);
+    } else {
+      callerSignal.addEventListener('abort', onAbort, { once: true });
+    }
+  }
+
+  const timer = setTimeout(() => controller.abort(new Error('Image generation request timed out.')), timeoutMs);
+  if (typeof timer === 'object' && typeof timer.unref === 'function') {
+    timer.unref();
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (callerSignal) {
+        callerSignal.removeEventListener('abort', onAbort);
+      }
+    }
+  };
+}
+
 export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly providerId = 'openai';
 
   private readonly apiKey?: string;
   private readonly model: string;
   private readonly baseUrl: string;
+  private readonly timeoutMs: number;
 
   constructor(options: OpenAiProviderOptions = {}) {
     this.apiKey = options.apiKey || process.env.OPENAI_API_KEY;
     this.model = options.model || process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
     this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
+    const envTimeout = Number(process.env.OPENAI_IMAGE_TIMEOUT_MS);
+    this.timeoutMs = options.timeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);
   }
 
   async generateImage(request: ImageGenerationRequest, options?: { signal?: AbortSignal }): Promise<ImageGenerationResult> {
@@ -71,76 +159,85 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     const size = request.width && request.height ? `${request.width}x${request.height}` : mapAspectRatioToSize(request.aspectRatio);
     const prompt = request.negativePrompt ? `${request.prompt}\n\nNegative prompt: ${request.negativePrompt}` : request.prompt;
 
-    let response: Response;
+    const { signal, cleanup } = createRequestSignal(options?.signal, this.timeoutMs);
 
-    if (request.referenceImages && request.referenceImages.length > 0) {
-      const form = new FormData();
-      form.set('model', request.model || this.model);
-      form.set('prompt', prompt);
-      if (size) {
-        form.set('size', size);
-      }
-      form.set('response_format', 'b64_json');
-      for (const reference of request.referenceImages) {
-        const arrayBuffer = reference.data.buffer.slice(reference.data.byteOffset, reference.data.byteOffset + reference.data.byteLength) as ArrayBuffer;
-        form.append('image[]', new Blob([arrayBuffer], { type: reference.mimeType }), reference.filename || `${reference.id}.png`);
-      }
-
-      response = await fetch(`${this.baseUrl}/images/edits`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`
-        },
-        body: form,
-        signal: options?.signal
-      });
-    } else {
-      response = await fetch(`${this.baseUrl}/images/generations`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: request.model || this.model,
-          prompt,
-          size,
-          response_format: 'b64_json'
-        }),
-        signal: options?.signal
-      });
-    }
-
-    const requestId = response.headers.get('x-request-id') || undefined;
-    const json = (await response.json().catch(() => ({}))) as unknown;
-
-    if (!response.ok) {
-      throw new ImageGenerationProviderError(parseErrorMessage(json), response.status >= 400 && response.status < 500 ? 422 : 502, 'provider.request.failed');
-    }
-
-    const data = decodeBase64Image(json);
-    let width: number | undefined;
-    let height: number | undefined;
     try {
-      const dimensions = imageSize(data);
-      width = dimensions.width;
-      height = dimensions.height;
-    } catch {
-      width = undefined;
-      height = undefined;
-    }
+      let response: Response;
 
-    return {
-      provider: this.providerId,
-      model: request.model || this.model,
-      mimeType: 'image/png',
-      data,
-      width,
-      height,
-      providerRequestId: requestId,
-      metadata: {
-        size
+      try {
+        if (request.referenceImages && request.referenceImages.length > 0) {
+          const form = new FormData();
+          form.set('model', request.model || this.model);
+          form.set('prompt', prompt);
+          if (size) {
+            form.set('size', size);
+          }
+          form.set('response_format', 'b64_json');
+          for (const reference of request.referenceImages) {
+            const arrayBuffer = reference.data.buffer.slice(reference.data.byteOffset, reference.data.byteOffset + reference.data.byteLength) as ArrayBuffer;
+            form.append('image[]', new Blob([arrayBuffer], { type: reference.mimeType }), reference.filename || `${reference.id}.png`);
+          }
+
+          response = await fetch(`${this.baseUrl}/images/edits`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`
+            },
+            body: form,
+            signal
+          });
+        } else {
+          response = await fetch(`${this.baseUrl}/images/generations`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: request.model || this.model,
+              prompt,
+              size,
+              response_format: 'b64_json'
+            }),
+            signal
+          });
+        }
+      } catch (error) {
+        throw mapTransportError(error);
       }
-    };
+
+      const requestId = response.headers.get('x-request-id') || undefined;
+
+      let json: unknown = {};
+      try {
+        json = await response.json();
+      } catch (error) {
+        if (response.ok) {
+          throw mapTransportError(error);
+        }
+      }
+
+      if (!response.ok) {
+        throw classifyHttpError(response.status, parseErrorMessage(json));
+      }
+
+      const data = decodeBase64Image(json);
+      const { width, height } = validatePngBytes(data);
+
+      return {
+        provider: this.providerId,
+        model: request.model || this.model,
+        mimeType: 'image/png',
+        data,
+        width,
+        height,
+        providerRequestId: requestId,
+        metadata: {
+          size
+        }
+      };
+    } finally {
+      cleanup();
+    }
   }
 }

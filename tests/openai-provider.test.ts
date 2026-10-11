@@ -52,4 +52,68 @@ describe('OpenAI provider adapter', () => {
     const provider = new OpenAiImageGenerationProvider({ apiKey: 'test-key' });
     await expect(provider.generateImage({ prompt: 'test', aspectRatio: '16:9' })).rejects.toThrow(ImageGenerationProviderError);
   });
+
+  it('rejects provider output that is not a valid PNG before it can be stored', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('this is not a png').toString('base64') }] }), { status: 200 });
+      })
+    );
+
+    const provider = new OpenAiImageGenerationProvider({ apiKey: 'test-key' });
+    await expect(provider.generateImage({ prompt: 'test', aspectRatio: '16:9' })).rejects.toMatchObject({
+      code: 'provider.response.invalidImage'
+    });
+  });
+
+  it('aborts a stalled request and surfaces a typed timeout error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        await new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        });
+        return new Response('{}');
+      })
+    );
+
+    const provider = new OpenAiImageGenerationProvider({ apiKey: 'test-key', timeoutMs: 5 });
+    await expect(provider.generateImage({ prompt: 'test' })).rejects.toMatchObject({
+      status: 504,
+      code: 'provider.request.timeout'
+    });
+  });
+
+  it('distinguishes unauthorized and rate-limited responses', async () => {
+    const provider = new OpenAiImageGenerationProvider({ apiKey: 'test-key' });
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { message: 'nope' } }), { status: 401 })));
+    await expect(provider.generateImage({ prompt: 'test' })).rejects.toMatchObject({
+      status: 502,
+      code: 'provider.request.unauthorized'
+    });
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { message: 'slow down' } }), { status: 429 })));
+    await expect(provider.generateImage({ prompt: 'test' })).rejects.toMatchObject({
+      status: 429,
+      code: 'provider.request.rateLimited'
+    });
+  });
+
+  it('forwards an abort signal and issues a single request', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(JSON.stringify({ data: [{ b64_json: PNG_BASE64 }] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new OpenAiImageGenerationProvider({ apiKey: 'test-key' });
+    const controller = new AbortController();
+    await provider.generateImage({ prompt: 'test', aspectRatio: '16:9' }, { signal: controller.signal });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

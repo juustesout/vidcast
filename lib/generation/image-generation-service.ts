@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { createImageGenerationRegistry } from '@/lib/ai/image-generation/registry';
 import { ImageGenerationProviderError, type ImageGenerationRequest, type ReferenceInput } from '@/lib/ai/image-generation/provider';
+import { resolveRealImagePilotGate } from '@/lib/ai/image-generation/real-image-pilot';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
@@ -136,8 +137,9 @@ function mapRunPolicyError(error: RunPolicyError): SceneImageGenerationError {
 }
 
 function resolveImageProvider(options: { provider?: string; mode?: RunMode }): string {
+  const pilot = resolveRealImagePilotGate();
   try {
-    return resolveManualGenerationProvider('image', options.provider, { mode: options.mode }).provider;
+    return resolveManualGenerationProvider('image', options.provider, { mode: options.mode, imagePilot: pilot.allowed }).provider;
   } catch (error) {
     if (error instanceof RunPolicyError) {
       throw mapRunPolicyError(error);
