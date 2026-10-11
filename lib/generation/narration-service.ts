@@ -1,3 +1,5 @@
+import { AudioIntegrityError, validateGeneratedAudio, type AudioIntegrityResult } from '@/lib/ai/audio/audio-integrity';
+import { resolveRealNarrationPilotGate } from '@/lib/ai/text-to-speech/real-narration-pilot';
 import { createTextToSpeechRegistry } from '@/lib/ai/text-to-speech/registry';
 import { TextToSpeechProviderError, type TextToSpeechFormat } from '@/lib/ai/text-to-speech/provider';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
@@ -127,7 +129,8 @@ function mapRunPolicyError(error: RunPolicyError): SceneNarrationGenerationError
 
 function resolveNarrationProvider(requestedProvider: string | undefined, mode: RunMode | undefined): string {
   try {
-    return resolveManualGenerationProvider('narration', requestedProvider, { mode }).provider;
+    const narrationPilot = resolveRealNarrationPilotGate().allowed;
+    return resolveManualGenerationProvider('narration', requestedProvider, { mode, narrationPilot }).provider;
   } catch (error) {
     if (error instanceof RunPolicyError) {
       throw mapRunPolicyError(error);
@@ -276,10 +279,14 @@ export async function generateSceneNarration(
       throw new SceneNarrationGenerationError('Narration provider call failed.', 502, 'narration.provider.failed');
     }
 
-    const outputFormat = synthesized.format ?? format;
-
-    if (typeof synthesized.duration === 'number' && synthesized.duration > scene.duration + 0.01) {
-      const message = `Narration duration (${synthesized.duration.toFixed(2)}s) exceeds scene duration (${scene.duration.toFixed(2)}s).`;
+    let integrity: AudioIntegrityResult;
+    try {
+      integrity = await validateGeneratedAudio(synthesized.data, { reportedFormat: synthesized.format });
+    } catch (error) {
+      if (!(error instanceof AudioIntegrityError)) {
+        throw error;
+      }
+      const message = error.message;
       const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
         ...entry,
         narration: {
@@ -299,8 +306,39 @@ export async function generateSceneNarration(
             completedAt: nowIso(),
             error: message,
             providerRequestId: synthesized.providerRequestId,
-            duration: synthesized.duration,
             mimeType: synthesized.mimeType
+          } : attempt)
+        }
+      }));
+      await dependencies.store.mutateProject(projectId, failed);
+      throw new SceneNarrationGenerationError(message, 502, 'narration.provider.failed');
+    }
+
+    const outputFormat = integrity.format;
+
+    if (integrity.duration > scene.duration + 0.01) {
+      const message = `Narration duration (${integrity.duration.toFixed(2)}s) exceeds scene duration (${scene.duration.toFixed(2)}s).`;
+      const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
+        ...entry,
+        narration: {
+          ...(entry.narration ?? { text }),
+          text,
+          voiceId,
+          model,
+          format,
+          audioAssetId: previousAudioAssetId,
+          duration: previousDuration,
+          status: 'failed',
+          lastAttemptId: attemptId,
+          error: message,
+          attempts: (entry.narration?.attempts ?? []).map((attempt) => attempt.id === attemptId ? {
+            ...attempt,
+            status: 'failed',
+            completedAt: nowIso(),
+            error: message,
+            providerRequestId: synthesized.providerRequestId,
+            duration: integrity.duration,
+            mimeType: integrity.mimeType
           } : attempt)
         }
       }));
@@ -312,7 +350,7 @@ export async function generateSceneNarration(
       projectId,
       sceneOrder: scene.order,
       attemptId,
-      mimeType: synthesized.mimeType,
+      mimeType: integrity.mimeType,
       data: synthesized.data,
       generation: {
         generationId: attemptId,

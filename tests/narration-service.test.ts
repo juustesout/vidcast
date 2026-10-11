@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { buildSilentWav } from '@/lib/ai/audio/silent-wav';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -136,13 +137,15 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
             throw new Error('provider failed');
           }
 
+          const durationSeconds = behavior?.durationSeconds ?? 1.4;
+
           return {
             provider: 'fake',
             model: 'fake-tts',
-            mimeType: 'audio/mpeg',
-            format: 'mp3' as const,
-            data: Buffer.from('fake-audio'),
-            duration: behavior?.durationSeconds ?? 1.4,
+            mimeType: 'audio/wav',
+            format: 'wav' as const,
+            data: buildSilentWav(durationSeconds * 1000),
+            duration: durationSeconds,
             providerRequestId: 'req-1'
           };
         }

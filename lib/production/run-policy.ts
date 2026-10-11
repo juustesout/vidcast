@@ -408,31 +408,39 @@ function assertRealProviderCredentials(kind: GenerationModality, provider: strin
  * before any paid request is constructed; in real mode the matching credentials must
  * be present. There is no silent fallback between fake and real providers.
  *
- * `imagePilot` is a narrow, server-controlled escape hatch used only by the opt-in
- * real image pilot (see `lib/ai/image-generation/real-image-pilot.ts`). When it is
- * true and the global real-provider flag is off, a manual *image* call may resolve
- * to the real `openai` provider. It never affects other modalities, never applies
- * when the caller explicitly asks for `fake`, and still runs through credential
- * assertions below. It is a no-op when the global flag is already enabled or when an
- * explicit `mode` is supplied.
+ * `imagePilot` / `narrationPilot` are narrow, server-controlled escape hatches used
+ * only by the opt-in real pilots (see `lib/ai/image-generation/real-image-pilot.ts`
+ * and `lib/ai/text-to-speech/real-narration-pilot.ts`). When one is true and the
+ * global real-provider flag is off, a manual call for *that single modality* may
+ * resolve to its real provider (`openai` for image, `elevenlabs` for narration).
+ * Neither ever affects another modality, neither applies when the caller explicitly
+ * asks for `fake`, and both still run through the credential assertions below. They
+ * are no-ops when the global flag is already enabled or when an explicit `mode` is
+ * supplied.
  */
 export function resolveManualGenerationProvider(
   kind: GenerationModality,
   requestedProvider: string | undefined,
-  options: { serverConfig?: RunPolicyServerConfig; mode?: RunMode; imagePilot?: boolean } = {}
+  options: { serverConfig?: RunPolicyServerConfig; mode?: RunMode; imagePilot?: boolean; narrationPilot?: boolean } = {}
 ): GenerationProviderResolution {
   const serverConfig = options.serverConfig ?? resolveRunPolicyServerConfig();
   const normalized = normalizeRequestedProvider(kind, requestedProvider);
 
-  const pilotRequestsRealImage =
-    kind === 'image' &&
-    options.imagePilot === true &&
+  const pilotProvider: Partial<RunProviderSelection> | undefined =
+    kind === 'image' && options.imagePilot === true
+      ? { image: 'openai' }
+      : kind === 'narration' && options.narrationPilot === true
+        ? { narration: 'elevenlabs' }
+        : undefined;
+
+  const pilotRequestsRealProvider =
+    pilotProvider !== undefined &&
     options.mode === undefined &&
     !serverConfig.allowRealProviders &&
     normalized !== 'fake';
 
-  const effectiveServerConfig = pilotRequestsRealImage ? { ...serverConfig, allowRealProviders: true } : serverConfig;
-  const mode = options.mode ?? (pilotRequestsRealImage ? 'real' : effectiveServerConfig.defaultMode);
+  const effectiveServerConfig = pilotRequestsRealProvider ? { ...serverConfig, allowRealProviders: true } : serverConfig;
+  const mode = options.mode ?? (pilotRequestsRealProvider ? 'real' : effectiveServerConfig.defaultMode);
 
   let providers: Partial<RunProviderSelection> | undefined;
   if (normalized) {
@@ -445,8 +453,8 @@ export function resolveManualGenerationProvider(
     } else {
       providers = { narration: normalized as NarrationRunProvider };
     }
-  } else if (pilotRequestsRealImage) {
-    providers = { image: 'openai' };
+  } else if (pilotRequestsRealProvider) {
+    providers = pilotProvider;
   }
 
   const policy = resolveRunPolicy({ mode, providers }, effectiveServerConfig);
