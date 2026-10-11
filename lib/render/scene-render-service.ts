@@ -61,34 +61,30 @@ export class SceneRenderService {
         sceneFps: singleScenePlan.fps
       });
     } catch (error) {
-      const refreshedProject = await projectStore.getProject(projectId);
-      if (refreshedProject) {
-        const failedScenePlan = singleScenePlan.scenes[0];
-        const failedRender: SceneRenderResult = {
-          renderId,
-          sceneId,
-          outputPath: paths.outputPath,
-          createdAt: new Date().toISOString(),
-          width: singleScenePlan.width,
-          height: singleScenePlan.height,
-          fps: singleScenePlan.fps,
-          duration: failedScenePlan.duration,
-          filesize: 0,
-          mimeType: 'video/mp4',
-          renderer: 'ffmpeg',
-          status: 'failed',
-          message: error instanceof Error ? error.message : 'Render failed.',
-          renderFingerprint: createSceneRenderFingerprint(singleScenePlan, failedScenePlan)
-        };
+      const failedScenePlan = singleScenePlan.scenes[0];
+      const failedRender: SceneRenderResult = {
+        renderId,
+        sceneId,
+        outputPath: paths.outputPath,
+        createdAt: new Date().toISOString(),
+        width: singleScenePlan.width,
+        height: singleScenePlan.height,
+        fps: singleScenePlan.fps,
+        duration: failedScenePlan.duration,
+        filesize: 0,
+        mimeType: 'video/mp4',
+        renderer: 'ffmpeg',
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'Render failed.',
+        renderFingerprint: createSceneRenderFingerprint(singleScenePlan, failedScenePlan)
+      };
 
-        const failedSceneIndex = refreshedProject.scenes.findIndex((entry) => entry.id === sceneId);
-        if (failedSceneIndex >= 0) {
-          const failedScene = refreshedProject.scenes[failedSceneIndex];
-          failedScene.renders = [failedRender, ...(failedScene.renders ?? [])];
-          refreshedProject.scenes[failedSceneIndex] = failedScene;
-          await projectStore.updateProject(refreshedProject);
-        }
-      }
+      await projectStore.mutateProject(projectId, (current) => ({
+        ...current,
+        scenes: current.scenes.map((scene) =>
+          scene.id === sceneId ? { ...scene, renders: [failedRender, ...(scene.renders ?? [])] } : scene
+        )
+      }));
 
       throw error;
     }
@@ -96,17 +92,15 @@ export class SceneRenderService {
     const relativeOutputPath = path.relative(getProjectRoot(projectId), render.outputPath).replace(/\\/g, '/');
     render.outputPath = relativeOutputPath;
 
-    const refreshedProject = await projectStore.getProject(projectId);
-    if (!refreshedProject) {
-      throw new SceneRenderError(`Project ${projectId} disappeared during render.`, 'INVALID_PLAN');
-    }
+    const persisted = await projectStore.mutateProject(projectId, (current) => ({
+      ...current,
+      scenes: current.scenes.map((scene) =>
+        scene.id === sceneId ? { ...scene, renders: [render, ...(scene.renders ?? [])] } : scene
+      )
+    }));
 
-    const sceneIndex = refreshedProject.scenes.findIndex((entry) => entry.id === sceneId);
-    if (sceneIndex >= 0) {
-      const scene = refreshedProject.scenes[sceneIndex];
-      scene.renders = [render, ...(scene.renders ?? [])];
-      refreshedProject.scenes[sceneIndex] = scene;
-      await projectStore.updateProject(refreshedProject);
+    if (!persisted) {
+      throw new SceneRenderError(`Project ${projectId} disappeared during render.`, 'INVALID_PLAN');
     }
 
     await fs.writeFile(paths.metadataPath, JSON.stringify(render, null, 2), 'utf8');

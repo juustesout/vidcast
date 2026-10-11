@@ -30,7 +30,8 @@ export class CompositionServiceError extends Error {
     | 'RENDER_FILE_MISSING'
     | 'INCOMPATIBLE_RENDER'
     | 'COMPOSITION_FAILED'
-    | 'FFMPEG_UNAVAILABLE';
+    | 'FFMPEG_UNAVAILABLE'
+    | 'FFMPEG_TIMEOUT';
   readonly details?: string;
 
   constructor(
@@ -42,7 +43,8 @@ export class CompositionServiceError extends Error {
       | 'RENDER_FILE_MISSING'
       | 'INCOMPATIBLE_RENDER'
       | 'COMPOSITION_FAILED'
-      | 'FFMPEG_UNAVAILABLE',
+      | 'FFMPEG_UNAVAILABLE'
+      | 'FFMPEG_TIMEOUT',
     details?: string
   ) {
     super(message);
@@ -305,20 +307,27 @@ export class VideoCompositionService {
         });
       } catch (error) {
         if (error instanceof VideoCompositionError) {
-          throw new CompositionServiceError(error.message, error.code === 'FFMPEG_UNAVAILABLE' ? 'FFMPEG_UNAVAILABLE' : 'COMPOSITION_FAILED', error.details);
+          const code =
+            error.code === 'FFMPEG_UNAVAILABLE'
+              ? 'FFMPEG_UNAVAILABLE'
+              : error.code === 'FFMPEG_TIMEOUT'
+                ? 'FFMPEG_TIMEOUT'
+                : 'COMPOSITION_FAILED';
+          throw new CompositionServiceError(error.message, code, error.details);
         }
         throw error;
       }
 
       const artifact = buildCompositionArtifact(projectId, compositionId, paths.relativeOutputPath, plan, preparedProject, composed.filesize, composed.duration);
 
-      const refreshed = await projectStore.getProject(projectId);
-      if (!refreshed) {
+      const persisted = await projectStore.mutateProject(projectId, (current) => ({
+        ...current,
+        compositions: [artifact, ...(current.compositions ?? [])]
+      }));
+
+      if (!persisted) {
         throw new CompositionServiceError(`Project ${projectId} disappeared during composition.`, 'PROJECT_NOT_FOUND');
       }
-
-      refreshed.compositions = [artifact, ...(refreshed.compositions ?? [])];
-      await projectStore.updateProject(refreshed);
 
       await fs.writeFile(paths.metadataPath, JSON.stringify(artifact, null, 2), 'utf8');
 

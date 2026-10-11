@@ -39,7 +39,7 @@ export async function POST(_request: Request, context: RouteContext) {
           code: error.code,
           details: error.details
         },
-        { status: error.code === 'MISSING_ASSET' ? 404 : error.code === 'INVALID_PLAN' || error.code === 'UNSUPPORTED_RENDER' ? 422 : 500 }
+        { status: error.code === 'MISSING_ASSET' ? 404 : error.code === 'INVALID_PLAN' || error.code === 'UNSUPPORTED_RENDER' ? 422 : error.code === 'FFMPEG_UNAVAILABLE' ? 503 : error.code === 'FFMPEG_TIMEOUT' ? 504 : 500 }
       );
     }
 

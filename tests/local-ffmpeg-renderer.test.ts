@@ -81,4 +81,34 @@ describe('LocalFFmpegRenderer', () => {
     const fileStat = await fs.stat(outputPath);
     expect(fileStat.size).toBeGreaterThan(0);
   }, 120000);
+
+  it('renders a blank scene at 1080p', async () => {
+    const project = createProject();
+    project.renderSettings = { ...project.renderSettings, width: 1920, height: 1080 };
+    const plan = resolveRenderPlan(project);
+    const scenePlan = plan.scenes[0];
+    expect(scenePlan.status).toBe('renderable');
+    expect(plan.width).toBe(1920);
+    expect(plan.height).toBe(1080);
+
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'explainer-render-1080-'));
+    const outputPath = path.join(tempRoot, 'scene-blank-1080.mp4');
+    const renderer = new LocalFFmpegRenderer();
+
+    const result = await renderer.render(plan, {
+      projectId: project.id,
+      sceneId: scenePlan.sceneId,
+      renderId: 'render-test-1080',
+      outputPath,
+      tempDir: path.join(tempRoot, 'tmp'),
+      sceneWidth: plan.width,
+      sceneHeight: plan.height,
+      sceneFps: plan.fps
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.width).toBe(1920);
+    expect(result.height).toBe(1080);
+    expect(result.filesize).toBeGreaterThan(0);
+  }, 120000);
 });

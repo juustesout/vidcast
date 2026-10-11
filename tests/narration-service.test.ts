@@ -75,7 +75,7 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
 
-  const store: Pick<ProjectStore, 'getProject' | 'updateProject'> = {
+  const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
       if (id !== state.project.id) {
         return null;
@@ -84,6 +84,14 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
     },
     async updateProject(nextProject: Project) {
       state.project = structuredClone(nextProject) as Project;
+      return state.project;
+    },
+    async mutateProject(id, mutator) {
+      if (id !== state.project.id) {
+        return null;
+      }
+      const next = await mutator(structuredClone(state.project) as Project);
+      state.project = structuredClone(next) as Project;
       return state.project;
     }
   };

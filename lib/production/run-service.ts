@@ -77,7 +77,7 @@ export class RunServiceError extends Error {
 }
 
 interface ServiceDependencies {
-  store: Pick<ProjectStore, 'getProject'> & Partial<Pick<ProjectStore, 'updateProject'>>;
+  store: Pick<ProjectStore, 'getProject'> & Partial<Pick<ProjectStore, 'updateProject' | 'mutateProject'>>;
   runBatch: typeof runProductionBatch;
   derivePlan: typeof deriveProductionPlan;
   generateImage: typeof generateSceneImage;
@@ -186,6 +186,9 @@ function statusFromSceneRenderCode(code: SceneRenderError['code']): number {
   if (code === 'FFMPEG_UNAVAILABLE') {
     return 503;
   }
+  if (code === 'FFMPEG_TIMEOUT') {
+    return 504;
+  }
   return 500;
 }
 
@@ -198,6 +201,9 @@ function statusFromCompositionCode(code: CompositionServiceError['code']): numbe
   }
   if (code === 'FFMPEG_UNAVAILABLE') {
     return 503;
+  }
+  if (code === 'FFMPEG_TIMEOUT') {
+    return 504;
   }
   return 500;
 }
@@ -466,9 +472,16 @@ export class HeadlessProductionRunService {
 
     const reconciliation = reconcileInterruptedGenerations(project, entry.acceptedConfig.policy.mode);
 
-    if (reconciliation.updatedProject && this.dependencies.store.updateProject) {
+    if (reconciliation.updatedProject) {
       try {
-        await this.dependencies.store.updateProject(reconciliation.updatedProject);
+        if (this.dependencies.store.mutateProject) {
+          await this.dependencies.store.mutateProject(entry.projectId, (current) => {
+            const fresh = reconcileInterruptedGenerations(current, entry.acceptedConfig.policy.mode);
+            return fresh.updatedProject ?? current;
+          });
+        } else if (this.dependencies.store.updateProject) {
+          await this.dependencies.store.updateProject(reconciliation.updatedProject);
+        }
       } catch (error) {
         this.registry.appendEvent(runId, {
           timestamp: at,

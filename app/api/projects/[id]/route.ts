@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import { applyProjectUpdate } from '@/lib/projects/project-update';
+import { applyProjectUpdate, ProjectUpdateValidationError } from '@/lib/projects/project-update';
 import { AccessControlError, requireProjectAccess } from '@/lib/security/access-control';
 import { toAccessControlResponse } from '@/lib/security/http-response';
 import { projectStore } from '@/lib/storage/project-store';
@@ -51,7 +51,7 @@ export async function PUT(request: Request, context: RouteContext) {
     return NextResponse.json({ message: 'Project id mismatch.' }, { status: 400 });
   }
 
-  const { project: candidate, validation } = applyProjectUpdate(existingProject, body);
+  const { validation } = applyProjectUpdate(existingProject, body);
   if (!validation.valid) {
     return NextResponse.json(
       {
@@ -63,7 +63,33 @@ export async function PUT(request: Request, context: RouteContext) {
     );
   }
 
-  const project = await projectStore.updateProject(candidate);
+  let project;
+  try {
+    project = await projectStore.mutateProject(id, (current) => {
+      const { project: candidate, validation: freshValidation } = applyProjectUpdate(current, body);
+      if (!freshValidation.valid) {
+        throw new ProjectUpdateValidationError(freshValidation);
+      }
+      return candidate;
+    });
+  } catch (error) {
+    if (error instanceof ProjectUpdateValidationError) {
+      return NextResponse.json(
+        {
+          message: 'Project validation failed.',
+          errors: error.validation.errors,
+          warnings: error.validation.warnings
+        },
+        { status: 422 }
+      );
+    }
+    throw error;
+  }
+
+  if (!project) {
+    return NextResponse.json({ message: 'Project not found.', code: 'project.notFound' }, { status: 404 });
+  }
+
   return NextResponse.json({ project });
 }
 

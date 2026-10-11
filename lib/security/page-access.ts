@@ -32,7 +32,18 @@ export async function getProjectForIdentity(identity: RequestIdentity, projectId
 
   const ownerId = project.ownerId?.trim();
   if (!ownerId) {
-    return projectStore.updateProject({ ...project, ownerId: identity.subject });
+    const claimed = await projectStore.mutateProject(projectId, (current) => {
+      if (current.ownerId?.trim()) {
+        return current;
+      }
+      return { ...current, ownerId: identity.subject };
+    });
+
+    if (!claimed || claimed.ownerId?.trim() !== identity.subject) {
+      return null;
+    }
+
+    return claimed;
   }
 
   if (ownerId !== identity.subject) {

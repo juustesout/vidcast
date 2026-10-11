@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 
+export type ProcessFailureReason = 'spawn_error' | 'timeout' | 'exit' | 'signal';
+
 export interface ProcessExecutionOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -12,23 +14,51 @@ export interface ProcessExecutionResult {
   stderr: string;
 }
 
+export interface ProcessExecutionErrorOptions {
+  reason: ProcessFailureReason;
+  exitCode?: number;
+  signal?: NodeJS.Signals | null;
+}
+
 export class ProcessExecutionError extends Error {
   readonly command: string;
   readonly args: string[];
   readonly exitCode?: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly reason: ProcessFailureReason;
+  readonly signal: NodeJS.Signals | null;
 
-  constructor(message: string, command: string, args: string[], stdout: string, stderr: string, exitCode?: number) {
+  constructor(
+    message: string,
+    command: string,
+    args: string[],
+    stdout: string,
+    stderr: string,
+    options: ProcessExecutionErrorOptions
+  ) {
     super(message);
     this.name = 'ProcessExecutionError';
     this.command = command;
     this.args = args;
-    this.exitCode = exitCode;
+    this.exitCode = options.exitCode;
     this.stdout = stdout;
     this.stderr = stderr;
+    this.reason = options.reason;
+    this.signal = options.signal ?? null;
+  }
+
+  /**
+   * True only when the executable itself could not be started (e.g. ENOENT).
+   * A timeout, non-zero exit, or signal is reported through `reason` instead so
+   * callers never mistake a slow-but-present binary for a missing one.
+   */
+  get unavailable(): boolean {
+    return this.reason === 'spawn_error';
   }
 }
+
+const KILL_GRACE_MS = 5_000;
 
 export async function runProcess(command: string, args: string[], options: ProcessExecutionOptions = {}): Promise<ProcessExecutionResult> {
   return new Promise<ProcessExecutionResult>((resolve, reject) => {
@@ -42,7 +72,9 @@ export async function runProcess(command: string, args: string[], options: Proce
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let timedOut = false;
     let timeout: NodeJS.Timeout | undefined;
+    let killGraceTimeout: NodeJS.Timeout | undefined;
 
     const finish = (error: ProcessExecutionError | null, result?: ProcessExecutionResult) => {
       if (settled) {
@@ -51,6 +83,9 @@ export async function runProcess(command: string, args: string[], options: Proce
       settled = true;
       if (timeout) {
         clearTimeout(timeout);
+      }
+      if (killGraceTimeout) {
+        clearTimeout(killGraceTimeout);
       }
       if (error) {
         reject(error);
@@ -72,23 +107,44 @@ export async function runProcess(command: string, args: string[], options: Proce
     }
 
     child.on('error', (error) => {
-      finish(new ProcessExecutionError(error.message, command, args, stdout, stderr));
+      finish(new ProcessExecutionError(error.message, command, args, stdout, stderr, { reason: 'spawn_error' }));
     });
 
     child.on('close', (code, signal) => {
+      if (timedOut) {
+        finish(
+          new ProcessExecutionError(`${command} timed out after ${options.timeoutMs}ms.`, command, args, stdout, stderr, {
+            reason: 'timeout',
+            signal
+          })
+        );
+        return;
+      }
+
       if (code === 0) {
         finish(null, { exitCode: 0, stdout, stderr });
         return;
       }
 
+      const reason: ProcessFailureReason = signal ? 'signal' : 'exit';
       const message = signal ? `${command} terminated by signal ${signal}.` : `${command} exited with code ${code ?? -1}.`;
-      finish(new ProcessExecutionError(message, command, args, stdout, stderr, code ?? undefined));
+      finish(new ProcessExecutionError(message, command, args, stdout, stderr, { reason, exitCode: code ?? undefined, signal }));
     });
 
     if (options.timeoutMs && options.timeoutMs > 0) {
       timeout = setTimeout(() => {
+        timedOut = true;
+        // Ask the child to terminate, then wait for its `close` event so the
+        // failure is only surfaced after the process has actually exited.
         child.kill('SIGKILL');
-        finish(new ProcessExecutionError(`${command} timed out after ${options.timeoutMs}ms.`, command, args, stdout, stderr));
+
+        killGraceTimeout = setTimeout(() => {
+          finish(
+            new ProcessExecutionError(`${command} timed out after ${options.timeoutMs}ms (termination not confirmed).`, command, args, stdout, stderr, {
+              reason: 'timeout'
+            })
+          );
+        }, KILL_GRACE_MS);
       }, options.timeoutMs);
     }
   });

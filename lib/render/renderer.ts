@@ -8,9 +8,10 @@ import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia, FFprobeError } from './ffprobe';
 import { buildSceneFadeFilters, createStillSceneSvg, sceneMotionToZoomPan } from './render-source';
 import { createSceneRenderFingerprint } from './render-fingerprint';
+import { getSceneRenderTimeoutMs } from './render-timeouts';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 
-export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
+export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
 
 export interface SceneRenderOptions {
   projectId: string;
@@ -237,6 +238,17 @@ function validatePlan(plan: RenderPlan): RenderPlanScene {
   return scene;
 }
 
+function mapSceneProcessError(error: ProcessExecutionError): SceneRenderError {
+  const details = error.stderr || error.stdout || error.message;
+  if (error.reason === 'spawn_error') {
+    return new SceneRenderError('FFmpeg could not be started for scene rendering.', 'FFMPEG_UNAVAILABLE', details);
+  }
+  if (error.reason === 'timeout') {
+    return new SceneRenderError('FFmpeg timed out while rendering the scene.', 'FFMPEG_TIMEOUT', details);
+  }
+  return new SceneRenderError('FFmpeg failed while rendering the scene.', 'FFMPEG_FAILED', details);
+}
+
 async function validateOutputFile(outputPath: string, expectedWidth: number, expectedHeight: number, expectedFps: number, expectedDuration: number, runtime: FFmpegRuntime): Promise<{ filesize: number; duration: number }> {
   const stat = await fs.stat(outputPath).catch(() => null);
   if (!stat || stat.size <= 0) {
@@ -247,8 +259,17 @@ async function validateOutputFile(outputPath: string, expectedWidth: number, exp
   try {
     probe = await probeMedia(outputPath, runtime);
   } catch (error) {
-    const details = error instanceof FFprobeError ? error.stderr || error.stdout : undefined;
-    throw new SceneRenderError('Rendered output could not be validated with ffprobe.', 'OUTPUT_INVALID', details);
+    if (error instanceof FFprobeError) {
+      const details = error.stderr || error.stdout || error.message;
+      if (error.reason === 'spawn_error') {
+        throw new SceneRenderError('ffprobe could not be started to validate the rendered output.', 'FFMPEG_UNAVAILABLE', details);
+      }
+      if (error.reason === 'timeout') {
+        throw new SceneRenderError('ffprobe timed out while validating the rendered output.', 'FFMPEG_TIMEOUT', details);
+      }
+      throw new SceneRenderError('Rendered output could not be validated with ffprobe.', 'OUTPUT_INVALID', details);
+    }
+    throw error;
   }
 
   const videoStream = probe.streams.find((stream) => stream.codec_type === 'video');
@@ -307,7 +328,7 @@ export class LocalFFmpegRenderer implements Renderer {
 
     try {
       const command = this.runtime.ffmpegPath;
-      await runProcess(command, args, { cwd: options.tempDir, timeoutMs: 60_000 });
+      await runProcess(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() });
       const validated = await validateOutputFile(outputPath, options.sceneWidth, options.sceneHeight, options.sceneFps, scene.duration, this.runtime);
 
       return {
@@ -328,7 +349,7 @@ export class LocalFFmpegRenderer implements Renderer {
       };
     } catch (error) {
       if (error instanceof ProcessExecutionError) {
-        throw new SceneRenderError('FFmpeg failed while rendering the scene.', error.exitCode === undefined ? 'FFMPEG_UNAVAILABLE' : 'FFMPEG_FAILED', error.stderr || error.stdout || error.message);
+        throw mapSceneProcessError(error);
       }
       if (error instanceof SceneRenderError) {
         throw error;

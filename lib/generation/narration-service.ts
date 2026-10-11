@@ -79,7 +79,7 @@ export interface SceneNarrationGenerationResult {
 }
 
 interface NarrationServiceDependencies {
-  store: Pick<ProjectStore, 'getProject' | 'updateProject'>;
+  store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedAudio'>;
   registry: ReturnType<typeof createTextToSpeechRegistry>;
 }
@@ -216,7 +216,7 @@ export async function generateSceneNarration(
       createdAt: nowIso()
     };
 
-    const withGenerating = updateScene(project, sceneId, (entry) => ({
+    const withGenerating = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
       ...entry,
       narration: {
         ...(entry.narration ?? { text: '' }),
@@ -233,7 +233,7 @@ export async function generateSceneNarration(
       }
     }));
 
-    await dependencies.store.updateProject(withGenerating);
+    await dependencies.store.mutateProject(projectId, withGenerating);
 
     let synthesized;
     try {
@@ -246,7 +246,7 @@ export async function generateSceneNarration(
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Narration provider call failed.';
-      const failed = updateScene(withGenerating, sceneId, (entry) => ({
+      const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
         ...entry,
         narration: {
           ...(entry.narration ?? { text }),
@@ -267,7 +267,7 @@ export async function generateSceneNarration(
           } : attempt)
         }
       }));
-      await dependencies.store.updateProject(failed);
+      await dependencies.store.mutateProject(projectId, failed);
 
       if (error instanceof TextToSpeechProviderError) {
         throw mapProviderError(error);
@@ -277,7 +277,7 @@ export async function generateSceneNarration(
 
     if (typeof synthesized.duration === 'number' && synthesized.duration > scene.duration + 0.01) {
       const message = `Narration duration (${synthesized.duration.toFixed(2)}s) exceeds scene duration (${scene.duration.toFixed(2)}s).`;
-      const failed = updateScene(withGenerating, sceneId, (entry) => ({
+      const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
         ...entry,
         narration: {
           ...(entry.narration ?? { text }),
@@ -301,7 +301,7 @@ export async function generateSceneNarration(
           } : attempt)
         }
       }));
-      await dependencies.store.updateProject(failed);
+      await dependencies.store.mutateProject(projectId, failed);
       throw new SceneNarrationGenerationError(message, 422, 'narration.invalid');
     }
 
@@ -321,33 +321,35 @@ export async function generateSceneNarration(
       }
     });
 
-    const withGenerated = updateScene(withGenerating, sceneId, (entry) => ({
-      ...entry,
-      narration: {
-        ...(entry.narration ?? { text: '' }),
-        text,
-        voiceId,
-        model,
-        format,
-        audioAssetId: generatedAsset.id,
-        duration: generatedAsset.duration,
-        status: 'generated',
-        lastAttemptId: attemptId,
-        error: undefined,
-        attempts: (entry.narration?.attempts ?? []).map((attempt) => attempt.id === attemptId ? {
-          ...attempt,
-          status: 'generated',
-          completedAt: nowIso(),
-          providerRequestId: synthesized.providerRequestId,
+    const withGenerated = (fresh: Project) => {
+      const next = updateScene(fresh, sceneId, (entry) => ({
+        ...entry,
+        narration: {
+          ...(entry.narration ?? { text: '' }),
+          text,
+          voiceId,
+          model,
+          format,
+          audioAssetId: generatedAsset.id,
           duration: generatedAsset.duration,
-          mimeType: generatedAsset.mimeType,
-          audioAssetId: generatedAsset.id
-        } : attempt)
-      }
-    }));
+          status: 'generated',
+          lastAttemptId: attemptId,
+          error: undefined,
+          attempts: (entry.narration?.attempts ?? []).map((attempt) => attempt.id === attemptId ? {
+            ...attempt,
+            status: 'generated',
+            completedAt: nowIso(),
+            providerRequestId: synthesized.providerRequestId,
+            duration: generatedAsset.duration,
+            mimeType: generatedAsset.mimeType,
+            audioAssetId: generatedAsset.id
+          } : attempt)
+        }
+      }));
+      return { ...next, assets: [...next.assets, generatedAsset] };
+    };
 
-    withGenerated.assets.push(generatedAsset);
-    await dependencies.store.updateProject(withGenerated);
+    await dependencies.store.mutateProject(projectId, withGenerated);
 
     return {
       sceneId,

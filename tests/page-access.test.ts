@@ -4,7 +4,8 @@ vi.mock('@/lib/storage/project-store', () => ({
   projectStore: {
     listProjects: vi.fn(),
     getProject: vi.fn(),
-    updateProject: vi.fn()
+    updateProject: vi.fn(),
+    mutateProject: vi.fn()
   }
 }));
 
@@ -20,6 +21,7 @@ describe('page data access', () => {
     vi.mocked(projectStore.listProjects).mockReset();
     vi.mocked(projectStore.getProject).mockReset();
     vi.mocked(projectStore.updateProject).mockReset();
+    vi.mocked(projectStore.mutateProject).mockReset();
   });
 
   it('scopes project listing to the user identity', async () => {
@@ -43,14 +45,14 @@ describe('page data access', () => {
     vi.mocked(projectStore.getProject).mockResolvedValue(project);
 
     await expect(getProjectForIdentity(USER_A, 'p1')).resolves.toBe(project);
-    expect(projectStore.updateProject).not.toHaveBeenCalled();
+    expect(projectStore.mutateProject).not.toHaveBeenCalled();
   });
 
   it('returns null for a foreign project', async () => {
     vi.mocked(projectStore.getProject).mockResolvedValue({ id: 'p1', ownerId: 'user-b' } as never);
 
     await expect(getProjectForIdentity(USER_A, 'p1')).resolves.toBeNull();
-    expect(projectStore.updateProject).not.toHaveBeenCalled();
+    expect(projectStore.mutateProject).not.toHaveBeenCalled();
   });
 
   it('returns null when the project does not exist', async () => {
@@ -60,12 +62,13 @@ describe('page data access', () => {
   });
 
   it('claims a legacy ownerless project for the user', async () => {
-    const claimed = { id: 'p1', ownerId: 'user-a' };
     vi.mocked(projectStore.getProject).mockResolvedValue({ id: 'p1' } as never);
-    vi.mocked(projectStore.updateProject).mockResolvedValue(claimed as never);
+    vi.mocked(projectStore.mutateProject).mockImplementation(async (_id, mutator) =>
+      (await mutator({ id: 'p1' } as never)) as never
+    );
 
-    await expect(getProjectForIdentity(USER_A, 'p1')).resolves.toBe(claimed);
-    expect(projectStore.updateProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'p1', ownerId: 'user-a' }));
+    await expect(getProjectForIdentity(USER_A, 'p1')).resolves.toEqual({ id: 'p1', ownerId: 'user-a' });
+    expect(projectStore.mutateProject).toHaveBeenCalledWith('p1', expect.any(Function));
   });
 
   it('allows a service identity to read any project', async () => {

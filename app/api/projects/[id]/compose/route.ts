@@ -46,7 +46,9 @@ export async function POST(request: Request, context: RouteContext) {
           ? 422
           : error.code === 'FFMPEG_UNAVAILABLE'
             ? 503
-            : 500;
+            : error.code === 'FFMPEG_TIMEOUT'
+              ? 504
+              : 500;
 
       return NextResponse.json(
         {

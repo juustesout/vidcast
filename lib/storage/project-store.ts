@@ -11,6 +11,7 @@ import { normalizeProject } from '@/lib/projects/normalize-project';
 import { getAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
 import { validateProject } from '@/lib/validation/project-validation';
 import { mediaStore } from '@/lib/storage/media-store';
+import { withKeyedLock } from '@/lib/utils/keyed-mutex';
 import { getProjectAssetsRoot, getProjectJsonPath, getProjectPreviewsRoot, getProjectReferencesRoot, getProjectRoot, getProjectRendersRoot, getProjectsRoot } from './storage-paths';
 
 export interface ProjectSummary {
@@ -69,14 +70,38 @@ async function ensureDirectory(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
 }
 
+export class ProjectReadError extends Error {
+  readonly code = 'PROJECT_READ_FAILED';
+  readonly projectId: string;
+
+  constructor(projectId: string, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'ProjectReadError';
+    this.projectId = projectId;
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT';
+}
+
 async function readProjectFile(projectId: string): Promise<Project | null> {
   const projectJsonPath = getProjectJsonPath(projectId);
 
+  let raw: string;
   try {
-    const raw = await fs.readFile(projectJsonPath, 'utf8');
+    raw = await fs.readFile(projectJsonPath, 'utf8');
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return null;
+    }
+    throw new ProjectReadError(projectId, `Failed to read project ${projectId} from disk.`, { cause: error });
+  }
+
+  try {
     return normalizeProject(JSON.parse(raw) as Project);
-  } catch {
-    return null;
+  } catch (error) {
+    throw new ProjectReadError(projectId, `Project ${projectId} contains invalid or corrupt JSON.`, { cause: error });
   }
 }
 
@@ -103,14 +128,23 @@ async function reconcileAssetStatuses(project: Project): Promise<Project> {
 
 async function writeProjectFile(project: Project): Promise<Project> {
   const normalizedProject = normalizeProject(project);
-  await ensureDirectory(getProjectRoot(project.id));
+  await ensureDirectory(getProjectRoot(normalizedProject.id));
   await ensureDirectory(getProjectAssetsRoot(normalizedProject.id));
   await ensureDirectory(getProjectReferencesRoot(normalizedProject.id));
   await ensureDirectory(getProjectRendersRoot(normalizedProject.id));
   await ensureDirectory(getProjectPreviewsRoot(normalizedProject.id));
 
   const payload = JSON.stringify(normalizedProject, null, 2);
-  await fs.writeFile(getProjectJsonPath(normalizedProject.id), payload, 'utf8');
+  const target = getProjectJsonPath(normalizedProject.id);
+  const temp = `${target}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  try {
+    await fs.writeFile(temp, payload, 'utf8');
+    await fs.rename(temp, target);
+  } catch (error) {
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
 
   return normalizedProject;
 }
@@ -583,11 +617,16 @@ async function writeProject(project: Project): Promise<Project> {
   return writeProjectFile(updatedProject);
 }
 
+function projectLockKey(projectId: string): string {
+  return `project:${projectId}`;
+}
+
 export interface ProjectStore {
   listProjects(ownerId?: string): Promise<ProjectSummary[]>;
   getProject(id: string): Promise<Project | null>;
   createProject(input?: CreateProjectInput, ownerId?: string): Promise<Project>;
   updateProject(project: Project): Promise<Project>;
+  mutateProject(projectId: string, mutator: (current: Project) => Project | Promise<Project>): Promise<Project | null>;
   claimUnownedProjects(ownerId: string): Promise<number>;
   deleteProject(id: string): Promise<void>;
   importAsset(projectId: string, file: File): Promise<Asset>;
@@ -609,7 +648,14 @@ class JsonProjectStore implements ProjectStore {
         continue;
       }
 
-      const project = await readProjectFile(entry.name);
+      let project: Project | null;
+      try {
+        project = await readProjectFile(entry.name);
+      } catch (error) {
+        console.warn(`[project-store] Skipping unreadable project "${entry.name}": ${error instanceof Error ? error.message : 'unknown error'}`);
+        continue;
+      }
+
       if (project && (!ownerId || project.ownerId === ownerId)) {
         projects.push(buildProjectSummary(project));
       }
@@ -632,11 +678,23 @@ class JsonProjectStore implements ProjectStore {
     if (ownerId) {
       project.ownerId = ownerId;
     }
-    return writeProjectFile(project);
+    return withKeyedLock(projectLockKey(project.id), () => writeProjectFile(project));
   }
 
   async updateProject(project: Project): Promise<Project> {
-    return writeProject(project);
+    return withKeyedLock(projectLockKey(project.id), () => writeProject(project));
+  }
+
+  async mutateProject(projectId: string, mutator: (current: Project) => Project | Promise<Project>): Promise<Project | null> {
+    return withKeyedLock(projectLockKey(projectId), async () => {
+      const current = await readProjectFile(projectId);
+      if (!current) {
+        return null;
+      }
+
+      const next = await mutator(cloneProject(current));
+      return writeProject(next);
+    });
   }
 
   async claimUnownedProjects(ownerId: string): Promise<number> {
@@ -655,9 +713,16 @@ class JsonProjectStore implements ProjectStore {
         continue;
       }
 
-      const project = await readProjectFile(entry.name);
+      let project: Project | null;
+      try {
+        project = await readProjectFile(entry.name);
+      } catch (error) {
+        console.warn(`[project-store] Skipping unreadable project "${entry.name}" during claim: ${error instanceof Error ? error.message : 'unknown error'}`);
+        continue;
+      }
+
       if (project && !project.ownerId?.trim()) {
-        await writeProjectFile({ ...project, ownerId: trimmedOwnerId });
+        await withKeyedLock(projectLockKey(project.id), () => writeProjectFile({ ...project, ownerId: trimmedOwnerId }));
         claimed += 1;
       }
     }
@@ -676,8 +741,7 @@ class JsonProjectStore implements ProjectStore {
     }
     const { asset } = await mediaStore.saveAsset(projectId, file);
 
-    project.assets.push(asset);
-    await writeProject(project);
+    await this.mutateProject(projectId, (current) => ({ ...current, assets: [...current.assets, asset] }));
     return asset;
   }
 
@@ -688,8 +752,7 @@ class JsonProjectStore implements ProjectStore {
     }
     const { reference } = await mediaStore.saveReference(projectId, file, name, description, tags);
 
-    project.references.push(reference);
-    await writeProject(project);
+    await this.mutateProject(projectId, (current) => ({ ...current, references: [...current.references, reference] }));
     return reference;
   }
 
@@ -710,8 +773,7 @@ class JsonProjectStore implements ProjectStore {
     }
 
     await mediaStore.deleteAssetFile(projectId, asset);
-    project.assets = project.assets.filter((entry) => entry.id !== assetId);
-    await writeProject(project);
+    await this.mutateProject(projectId, (current) => ({ ...current, assets: current.assets.filter((entry) => entry.id !== assetId) }));
     return { usageSceneIds: [] };
   }
 
@@ -732,8 +794,7 @@ class JsonProjectStore implements ProjectStore {
     }
 
     await mediaStore.deleteReferenceFile(projectId, reference);
-    project.references = project.references.filter((entry) => entry.id !== referenceId);
-    await writeProject(project);
+    await this.mutateProject(projectId, (current) => ({ ...current, references: current.references.filter((entry) => entry.id !== referenceId) }));
     return { usageSceneIds: [] };
   }
 
@@ -743,17 +804,29 @@ class JsonProjectStore implements ProjectStore {
       throw new Error(`Project ${projectId} not found.`);
     }
 
-    const reference = project.references.find((entry) => entry.id === referenceId);
+    const exists = project.references.some((entry) => entry.id === referenceId);
+    if (!exists) {
+      throw new Error(`Reference ${referenceId} not found.`);
+    }
+
+    const updated = await this.mutateProject(projectId, (current) => {
+      const reference = current.references.find((entry) => entry.id === referenceId);
+      if (!reference) {
+        throw new Error(`Reference ${referenceId} not found.`);
+      }
+
+      reference.name = patch.name?.trim() || reference.name;
+      reference.description = patch.description?.trim() ?? reference.description;
+      reference.tags = patch.tags ?? reference.tags;
+      reference.updatedAt = nowIso();
+      return current;
+    });
+
+    const reference = updated?.references.find((entry) => entry.id === referenceId);
     if (!reference) {
       throw new Error(`Reference ${referenceId} not found.`);
     }
 
-    reference.name = patch.name?.trim() || reference.name;
-    reference.description = patch.description?.trim() ?? reference.description;
-    reference.tags = patch.tags ?? reference.tags;
-    reference.updatedAt = nowIso();
-
-    await writeProject(project);
     return reference;
   }
 }

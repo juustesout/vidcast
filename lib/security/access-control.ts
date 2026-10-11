@@ -90,10 +90,23 @@ export async function requireProjectAccess(
 
   const ownerId = project.ownerId?.trim();
   if (!ownerId && options.claimLegacyOwner !== false) {
-    const claimed = await projectStore.updateProject({
-      ...project,
-      ownerId: identity.subject
+    const claimed = await projectStore.mutateProject(projectId, (current) => {
+      if (current.ownerId?.trim()) {
+        return current;
+      }
+      return { ...current, ownerId: identity.subject };
     });
+
+    if (!claimed) {
+      throw new AccessControlError('Project not found.', 'NOT_FOUND', 404);
+    }
+
+    const claimedOwnerId = claimed.ownerId?.trim();
+    if (!claimedOwnerId || claimedOwnerId !== identity.subject) {
+      // A concurrent request claimed the project for another identity.
+      throw new AccessControlError('Project not found.', 'NOT_FOUND', 404);
+    }
+
     return { identity, project: claimed };
   }
 

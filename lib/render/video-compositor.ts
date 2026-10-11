@@ -4,22 +4,36 @@ import path from 'node:path';
 import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
 import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia } from './ffprobe';
+import { getFinalComposeTimeoutMs } from './render-timeouts';
 import { formatVolumeFilter } from './audio-mix';
 import { resolveMusicFade } from './music-mix';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p7';
 
+export type VideoCompositionErrorCode = 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID';
+
 export class VideoCompositionError extends Error {
-  readonly code: 'FFMPEG_UNAVAILABLE' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID';
+  readonly code: VideoCompositionErrorCode;
   readonly details?: string;
 
-  constructor(message: string, code: 'FFMPEG_UNAVAILABLE' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID', details?: string) {
+  constructor(message: string, code: VideoCompositionErrorCode, details?: string) {
     super(message);
     this.name = 'VideoCompositionError';
     this.code = code;
     this.details = details;
   }
+}
+
+function mapComposeProcessError(error: ProcessExecutionError): VideoCompositionError {
+  const details = error.stderr || error.stdout || error.message;
+  if (error.reason === 'spawn_error') {
+    return new VideoCompositionError('FFmpeg could not be started for video composition.', 'FFMPEG_UNAVAILABLE', details);
+  }
+  if (error.reason === 'timeout') {
+    return new VideoCompositionError('FFmpeg timed out while composing project video.', 'FFMPEG_TIMEOUT', details);
+  }
+  return new VideoCompositionError('FFmpeg failed while composing project video.', 'FFMPEG_FAILED', details);
 }
 
 interface ComposeOptions {
@@ -135,7 +149,7 @@ async function normalizeInput(
     inputHasAudio
   });
 
-  await runProcess(runtime.ffmpegPath, args, { timeoutMs: 120_000 });
+  await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
 }
 
 export function buildMusicMixArgs(
@@ -191,7 +205,7 @@ export function buildMusicMixArgs(
 
 async function mixMusic(concatVideoPath: string, musicPath: string, outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<void> {
   const args = buildMusicMixArgs(concatVideoPath, musicPath, outputPath, plan);
-  await runProcess(runtime.ffmpegPath, args, { timeoutMs: 180_000 });
+  await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
 }
 
 async function composeConcat(normalizedPaths: string[], outputPath: string, plan: CompositionPlan, tempDir: string, runtime: FFmpegRuntime): Promise<void> {
@@ -201,7 +215,7 @@ async function composeConcat(normalizedPaths: string[], outputPath: string, plan
 
   const args = buildComposeArgs(listPath, outputPath, plan);
 
-  await runProcess(runtime.ffmpegPath, args, { timeoutMs: 180_000 });
+  await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
 }
 
 async function validateOutput(outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<{ filesize: number; duration: number }> {
@@ -271,7 +285,7 @@ export class LocalFFmpegVideoCompositor {
         throw error;
       }
       if (error instanceof ProcessExecutionError) {
-        throw new VideoCompositionError('FFmpeg failed while composing project video.', error.exitCode === undefined ? 'FFMPEG_UNAVAILABLE' : 'FFMPEG_FAILED', error.stderr || error.stdout || error.message);
+        throw mapComposeProcessError(error);
       }
       throw error;
     } finally {

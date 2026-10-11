@@ -7,6 +7,22 @@ export interface ApplyProjectUpdateResult {
   validation: RenderValidationResult;
 }
 
+/**
+ * Raised when a project mutation must be rejected because the resulting project
+ * fails validation. Used inside `ProjectStore.mutateProject` callbacks so the
+ * read-apply-write cycle runs under the per-project lock without writing an
+ * invalid project.
+ */
+export class ProjectUpdateValidationError extends Error {
+  readonly validation: RenderValidationResult;
+
+  constructor(validation: RenderValidationResult, message = 'Project validation failed.') {
+    super(message);
+    this.name = 'ProjectUpdateValidationError';
+    this.validation = validation;
+  }
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;

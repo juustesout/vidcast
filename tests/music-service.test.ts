@@ -68,7 +68,7 @@ function createDependencies(
   const generatedRequests: Array<{ durationMs: number; model?: string; outputFormat?: string }> = [];
   let createdCount = 0;
 
-  const store: Pick<ProjectStore, 'getProject' | 'updateProject'> = {
+  const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
       return id === state.project.id ? (structuredClone(state.project) as Project) : null;
     },
@@ -78,6 +78,13 @@ function createDependencies(
       }
       state.project = structuredClone(next) as Project;
       return state.project;
+    },
+    async mutateProject(id, mutator) {
+      if (id !== state.project.id) {
+        return null;
+      }
+      const next = await mutator(structuredClone(state.project) as Project);
+      return store.updateProject(next);
     }
   };
 

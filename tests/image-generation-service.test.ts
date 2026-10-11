@@ -92,13 +92,19 @@ function createInMemoryDependencies(project: Project, providerBehavior?: { throw
   const state = { project: structuredClone(project) as Project };
   const fakeProvider = new FakeImageGenerationProvider();
 
-  const store: Pick<ProjectStore, 'getProject' | 'updateProject'> = {
+  const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
       if (id !== state.project.id) return null;
       return structuredClone(state.project) as Project;
     },
     async updateProject(nextProject: Project) {
       state.project = structuredClone(nextProject) as Project;
+      return state.project;
+    },
+    async mutateProject(id, mutator) {
+      if (id !== state.project.id) return null;
+      const next = await mutator(structuredClone(state.project) as Project);
+      state.project = structuredClone(next) as Project;
       return state.project;
     }
   };

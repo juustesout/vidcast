@@ -1,5 +1,6 @@
 import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
-import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
+import { ProcessExecutionError, runProcess, type ProcessFailureReason } from './ffmpeg-executor';
+import { getProbeTimeoutMs } from './render-timeouts';
 
 export interface FFprobeStream {
   codec_type?: string;
@@ -25,31 +26,29 @@ export interface FFprobeResult {
 export class FFprobeError extends Error {
   readonly stderr: string;
   readonly stdout: string;
+  readonly reason?: ProcessFailureReason;
 
-  constructor(message: string, stdout: string, stderr: string) {
+  constructor(message: string, stdout: string, stderr: string, reason?: ProcessFailureReason) {
     super(message);
     this.name = 'FFprobeError';
     this.stdout = stdout;
     this.stderr = stderr;
+    this.reason = reason;
   }
 }
 
 export async function probeMedia(filePath: string, runtime: FFmpegRuntime = createFFmpegRuntime()): Promise<FFprobeResult> {
   try {
-    const result = await runProcess(runtime.ffprobePath, [
-      '-v',
-      'error',
-      '-print_format',
-      'json',
-      '-show_streams',
-      '-show_format',
-      filePath
-    ]);
+    const result = await runProcess(
+      runtime.ffprobePath,
+      ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', filePath],
+      { timeoutMs: getProbeTimeoutMs() }
+    );
 
     return JSON.parse(result.stdout || '{}') as FFprobeResult;
   } catch (error) {
     if (error instanceof ProcessExecutionError) {
-      throw new FFprobeError('ffprobe failed to inspect rendered media.', error.stdout, error.stderr);
+      throw new FFprobeError('ffprobe failed to inspect rendered media.', error.stdout, error.stderr, error.reason);
     }
     throw error;
   }

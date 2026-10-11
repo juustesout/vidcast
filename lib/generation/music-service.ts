@@ -6,7 +6,7 @@ import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/productio
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
-import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec } from '@/lib/types/render';
+import type { Project, ProjectMusicGenerationAttempt } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
 
 const activeMusicLocks = new Set<string>();
@@ -76,7 +76,7 @@ export interface ProjectMusicSelectionResult {
 }
 
 interface MusicServiceDependencies {
-  store: Pick<ProjectStore, 'getProject' | 'updateProject'>;
+  store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedMusic' | 'deleteAssetFile'>;
   registry: MusicRegistry;
 }
@@ -214,10 +214,10 @@ export async function generateProjectMusic(
       createdAt: nowIso()
     };
 
-    const withGenerating: Project = {
-      ...project,
+    const withGenerating = (fresh: Project): Project => ({
+      ...fresh,
       music: {
-        ...existingMusic,
+        ...(fresh.music ?? {}),
         prompt,
         provider: registered.providerId,
         model,
@@ -229,12 +229,12 @@ export async function generateProjectMusic(
         status: 'generating',
         lastAttemptId: attemptId,
         error: undefined,
-        attempts: [...(existingMusic.attempts ?? []), generatingAttempt],
+        attempts: [...(fresh.music?.attempts ?? []), generatingAttempt],
         updatedAt: nowIso()
       }
-    };
+    });
 
-    await dependencies.store.updateProject(withGenerating);
+    await dependencies.store.mutateProject(projectId, withGenerating);
 
     let generated;
     try {
@@ -248,21 +248,20 @@ export async function generateProjectMusic(
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Music provider call failed.';
-      const failed: Project = {
-        ...withGenerating,
+      await dependencies.store.mutateProject(projectId, (fresh) => ({
+        ...fresh,
         music: {
-          ...(withGenerating.music ?? {}),
+          ...(fresh.music ?? {}),
           status: 'failed',
           lastAttemptId: attemptId,
           error: message,
-          attempts: (withGenerating.music?.attempts ?? []).map((attempt) =>
+          attempts: (fresh.music?.attempts ?? []).map((attempt) =>
             attempt.id === attemptId
               ? { ...attempt, status: 'failed' as const, completedAt: nowIso(), error: message }
               : attempt
           )
         }
-      };
-      await dependencies.store.updateProject(failed);
+      }));
 
       if (error instanceof MusicProviderError) {
         throw mapProviderError(error);
@@ -272,21 +271,20 @@ export async function generateProjectMusic(
 
     if (!generated.data || generated.data.byteLength === 0) {
       const message = 'Music provider returned an empty audio result.';
-      const failed: Project = {
-        ...withGenerating,
+      await dependencies.store.mutateProject(projectId, (fresh) => ({
+        ...fresh,
         music: {
-          ...(withGenerating.music ?? {}),
+          ...(fresh.music ?? {}),
           status: 'failed',
           lastAttemptId: attemptId,
           error: message,
-          attempts: (withGenerating.music?.attempts ?? []).map((attempt) =>
+          attempts: (fresh.music?.attempts ?? []).map((attempt) =>
             attempt.id === attemptId
               ? { ...attempt, status: 'failed' as const, completedAt: nowIso(), error: message }
               : attempt
           )
         }
-      };
-      await dependencies.store.updateProject(failed);
+      }));
       throw new ProjectMusicGenerationError(message, 502, 'music.provider.failed');
     }
 
@@ -308,11 +306,11 @@ export async function generateProjectMusic(
       }
     });
 
-    const withGenerated: Project = {
-      ...withGenerating,
-      assets: [...withGenerating.assets, generatedAsset],
+    const withGenerated = (fresh: Project): Project => ({
+      ...fresh,
+      assets: [...fresh.assets, generatedAsset],
       music: {
-        ...(withGenerating.music ?? {}),
+        ...(fresh.music ?? {}),
         assetId: generatedAsset.id,
         provider: generated.provider,
         model: generated.model ?? model,
@@ -325,7 +323,7 @@ export async function generateProjectMusic(
         status: 'generated',
         lastAttemptId: attemptId,
         error: undefined,
-        attempts: (withGenerating.music?.attempts ?? []).map((attempt) =>
+        attempts: (fresh.music?.attempts ?? []).map((attempt) =>
           attempt.id === attemptId
             ? {
                 ...attempt,
@@ -340,10 +338,10 @@ export async function generateProjectMusic(
         ),
         updatedAt: nowIso()
       }
-    };
+    });
 
     try {
-      await dependencies.store.updateProject(withGenerated);
+      await dependencies.store.mutateProject(projectId, withGenerated);
     } catch {
       // The audio file is already on disk; if the project cannot be updated we
       // remove it so no half-registered asset is left behind.
@@ -385,22 +383,21 @@ export async function selectProjectMusic(
     throw new ProjectMusicGenerationError(`Asset ${assetId} is not a music or audio asset.`, 422, 'music.asset.invalidType');
   }
 
-  const existingMusic: ProjectMusicSpec = project.music ?? {};
-  const updated: Project = {
-    ...project,
+  const existingMusic = project.music ?? {};
+
+  await dependencies.store.mutateProject(projectId, (fresh) => ({
+    ...fresh,
     music: {
-      ...existingMusic,
+      ...(fresh.music ?? {}),
       assetId: asset.id,
-      provider: existingMusic.provider ?? asset.generation?.provider,
-      model: existingMusic.model ?? asset.generation?.model,
+      provider: fresh.music?.provider ?? existingMusic.provider ?? asset.generation?.provider,
+      model: fresh.music?.model ?? existingMusic.model ?? asset.generation?.model,
       duration: asset.duration,
       status: 'generated',
       error: undefined,
       updatedAt: nowIso()
     }
-  };
-
-  await dependencies.store.updateProject(updated);
+  }));
 
   return { assetId: asset.id, status: 'generated' };
 }
@@ -416,12 +413,10 @@ export async function clearProjectMusic(
 
   // Clearing only drops the selection reference. The underlying asset stays in
   // project.assets so a replacement can never orphan or delete a shared file.
-  const updated: Project = {
-    ...project,
+  await dependencies.store.mutateProject(projectId, (fresh) => ({
+    ...fresh,
     music: undefined
-  };
-
-  await dependencies.store.updateProject(updated);
+  }));
 
   return { status: 'cleared' };
 }

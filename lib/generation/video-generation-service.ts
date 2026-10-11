@@ -81,7 +81,7 @@ export interface SceneVideoGenerationJobResult {
 }
 
 interface VideoGenerationServiceDependencies {
-  store: Pick<ProjectStore, 'getProject' | 'updateProject'>;
+  store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'exists' | 'readRelativeFile' | 'saveGeneratedVideo'>;
   registry: ReturnType<typeof createVideoGenerationRegistry>;
 }
@@ -289,19 +289,19 @@ export async function submitSceneVideoGeneration(
       createdAt: nowIso()
     };
 
-    const withQueued = updateScene(project, sceneId, (entry) => {
-      ensureGeneratedVideoScene(entry);
-      return {
-        ...entry,
-        visual: {
-          ...entry.visual,
-          generation: queuedAttempt,
-          attempts: [...(entry.visual.attempts ?? []), entry.visual.generation]
-        }
-      };
-    });
-
-    await dependencies.store.updateProject(withQueued);
+    await dependencies.store.mutateProject(projectId, (fresh) =>
+      updateScene(fresh, sceneId, (entry) => {
+        ensureGeneratedVideoScene(entry);
+        return {
+          ...entry,
+          visual: {
+            ...entry.visual,
+            generation: queuedAttempt,
+            attempts: [...(entry.visual.attempts ?? []), entry.visual.generation]
+          }
+        };
+      })
+    );
 
     let submission;
     try {
@@ -330,7 +330,7 @@ export async function submitSceneVideoGeneration(
         assetId: previousAssetId
       };
 
-      const withFailed = updateScene(withQueued, sceneId, (entry) => {
+      const withFailed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => {
         ensureGeneratedVideoScene(entry);
         return {
           ...entry,
@@ -341,7 +341,7 @@ export async function submitSceneVideoGeneration(
           }
         };
       });
-      await dependencies.store.updateProject(withFailed);
+      await dependencies.store.mutateProject(projectId, withFailed);
 
       if (error instanceof VideoGenerationProviderError) {
         throw new SceneVideoGenerationError(error.message, error.status, error.code);
@@ -358,7 +358,7 @@ export async function submitSceneVideoGeneration(
       lastPolledAt: nowIso()
     };
 
-    const withSubmission = updateScene(withQueued, sceneId, (entry) => {
+    const withSubmission = (fresh: Project) => updateScene(fresh, sceneId, (entry) => {
       ensureGeneratedVideoScene(entry);
       return {
         ...entry,
@@ -369,7 +369,7 @@ export async function submitSceneVideoGeneration(
       };
     });
 
-    await dependencies.store.updateProject(withSubmission);
+    await dependencies.store.mutateProject(projectId, withSubmission);
 
     return {
       sceneId,
@@ -467,7 +467,7 @@ export async function refreshVideoGenerationAttempt(
         lastPolledAt: nowIso()
       };
 
-      const withFailed = updateScene(project, scene.id, (entry) => {
+      const withFailed = (fresh: Project) => updateScene(fresh, scene.id, (entry) => {
         ensureGeneratedVideoScene(entry);
         return {
           ...entry,
@@ -479,7 +479,7 @@ export async function refreshVideoGenerationAttempt(
         };
       });
 
-      await dependencies.store.updateProject(withFailed);
+      await dependencies.store.mutateProject(projectId, withFailed);
 
       if (error instanceof VideoGenerationProviderError) {
         throw new SceneVideoGenerationError(error.message, error.status, error.code);
@@ -501,7 +501,9 @@ export async function refreshVideoGenerationAttempt(
       }
     };
 
-    let nextProject = project;
+    let assetIdMode: 'preserve' | 'fallback' | 'explicit' = 'preserve';
+    let explicitAssetId: string | undefined;
+    let appendedAsset: Awaited<ReturnType<typeof dependencies.media.saveGeneratedVideo>> | undefined;
 
     if (providerStatus.status === 'generated') {
       try {
@@ -538,19 +540,9 @@ export async function refreshVideoGenerationAttempt(
           }
         };
 
-        nextProject = updateScene(project, scene.id, (entry) => {
-          ensureGeneratedVideoScene(entry);
-          return {
-            ...entry,
-            visual: {
-              ...entry.visual,
-              generation: nextAttempt,
-              assetId: generatedAsset.id
-            }
-          };
-        });
-
-        nextProject.assets.push(generatedAsset);
+        assetIdMode = 'explicit';
+        explicitAssetId = generatedAsset.id;
+        appendedAsset = generatedAsset;
       } catch (error) {
         const normalized = sanitizeProviderError(error);
         nextAttempt = {
@@ -561,18 +553,7 @@ export async function refreshVideoGenerationAttempt(
           errorCode: normalized.errorCode || 'DOWNLOAD_FAILED',
           errorMessage: normalized.message
         };
-
-        nextProject = updateScene(project, scene.id, (entry) => {
-          ensureGeneratedVideoScene(entry);
-          return {
-            ...entry,
-            visual: {
-              ...entry.visual,
-              generation: nextAttempt,
-              assetId: entry.visual.assetId || attempt.assetId
-            }
-          };
-        });
+        assetIdMode = 'fallback';
       }
     } else if (providerStatus.status === 'failed' || providerStatus.status === 'rejected') {
       nextAttempt = {
@@ -580,32 +561,34 @@ export async function refreshVideoGenerationAttempt(
         completedAt: nowIso(),
         assetId: scene.visual.assetId || attempt.assetId
       };
+      assetIdMode = 'fallback';
+    }
 
-      nextProject = updateScene(project, scene.id, (entry) => {
+    const persisted = await dependencies.store.mutateProject(projectId, (fresh) => {
+      const next = updateScene(fresh, scene.id, (entry) => {
         ensureGeneratedVideoScene(entry);
+        const resolvedAssetId =
+          assetIdMode === 'explicit'
+            ? explicitAssetId
+            : assetIdMode === 'fallback'
+              ? entry.visual.assetId || attempt.assetId
+              : entry.visual.assetId;
         return {
           ...entry,
           visual: {
             ...entry.visual,
             generation: nextAttempt,
-            assetId: entry.visual.assetId || attempt.assetId
+            assetId: resolvedAssetId
           }
         };
       });
-    } else {
-      nextProject = updateScene(project, scene.id, (entry) => {
-        ensureGeneratedVideoScene(entry);
-        return {
-          ...entry,
-          visual: {
-            ...entry.visual,
-            generation: nextAttempt
-          }
-        };
-      });
+      return appendedAsset ? { ...next, assets: [...next.assets, appendedAsset] } : next;
+    });
+
+    if (!persisted) {
+      throw new SceneVideoGenerationError(`Project ${projectId} was removed during generation polling.`, 404, 'generation.project.notFound');
     }
 
-    const persisted = await dependencies.store.updateProject(nextProject);
     const persistedScene = getScene(persisted, scene.id);
     ensureGeneratedVideoScene(persistedScene);
     attempt = persistedScene.visual.generation;

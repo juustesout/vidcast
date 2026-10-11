@@ -45,7 +45,7 @@ export interface SceneImageGenerationExecutionResult {
 }
 
 interface ImageGenerationServiceDependencies {
-  store: Pick<ProjectStore, 'getProject' | 'updateProject'>;
+  store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedImage' | 'exists' | 'readRelativeFile'>;
   registry: ReturnType<typeof createImageGenerationRegistry>;
 }
@@ -205,37 +205,37 @@ export async function generateSceneImage(
       error: undefined
     };
 
-    const withQueued = updateScene(project, sceneId, (entry) => {
-      ensureGeneratedImageScene(entry);
-      return {
-        ...entry,
-        visual: {
-          ...entry.visual,
-          generation: queuedAttempt,
-          attempts: [...(entry.visual.attempts ?? []), entry.visual.generation]
-        }
-      };
-    });
-
-    await dependencies.store.updateProject(withQueued);
+    await dependencies.store.mutateProject(projectId, (fresh) =>
+      updateScene(fresh, sceneId, (entry) => {
+        ensureGeneratedImageScene(entry);
+        return {
+          ...entry,
+          visual: {
+            ...entry.visual,
+            generation: queuedAttempt,
+            attempts: [...(entry.visual.attempts ?? []), entry.visual.generation]
+          }
+        };
+      })
+    );
 
     const generatingAttempt: GenerationAttempt = {
       ...queuedAttempt,
       status: 'generating'
     };
 
-    const withGenerating = updateScene(withQueued, sceneId, (entry) => {
-      ensureGeneratedImageScene(entry);
-      return {
-        ...entry,
-        visual: {
-          ...entry.visual,
-          generation: generatingAttempt
-        }
-      };
-    });
-
-    await dependencies.store.updateProject(withGenerating);
+    await dependencies.store.mutateProject(projectId, (fresh) =>
+      updateScene(fresh, sceneId, (entry) => {
+        ensureGeneratedImageScene(entry);
+        return {
+          ...entry,
+          visual: {
+            ...entry.visual,
+            generation: generatingAttempt
+          }
+        };
+      })
+    );
 
     const request: ImageGenerationRequest = {
       prompt: current.prompt,
@@ -258,7 +258,7 @@ export async function generateSceneImage(
         assetId: previousAssetId
       };
 
-      const withFailed = updateScene(withGenerating, sceneId, (entry) => {
+      const withFailed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => {
         ensureGeneratedImageScene(entry);
         return {
           ...entry,
@@ -270,7 +270,7 @@ export async function generateSceneImage(
         };
       });
 
-      await dependencies.store.updateProject(withFailed);
+      await dependencies.store.mutateProject(projectId, withFailed);
 
       if (error instanceof ImageGenerationProviderError) {
         throw new SceneImageGenerationError(error.message, error.status, error.code);
@@ -310,20 +310,22 @@ export async function generateSceneImage(
       error: undefined
     };
 
-    const withGenerated = updateScene(withGenerating, sceneId, (entry) => {
-      ensureGeneratedImageScene(entry);
-      return {
-        ...entry,
-        visual: {
-          ...entry.visual,
-          generation: generatedAttempt,
-          assetId: generatedAsset.id
-        }
-      };
-    });
+    const withGenerated = (fresh: Project) => {
+      const next = updateScene(fresh, sceneId, (entry) => {
+        ensureGeneratedImageScene(entry);
+        return {
+          ...entry,
+          visual: {
+            ...entry.visual,
+            generation: generatedAttempt,
+            assetId: generatedAsset.id
+          }
+        };
+      });
+      return { ...next, assets: [...next.assets, generatedAsset] };
+    };
 
-    withGenerated.assets.push(generatedAsset);
-    await dependencies.store.updateProject(withGenerated);
+    await dependencies.store.mutateProject(projectId, withGenerated);
 
     return {
       sceneId,

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { planSceneIntentsFromBeats } from '@/lib/explainer/scene-intent-planner';
-import { applyProjectUpdate } from '@/lib/projects/project-update';
+import { applyProjectUpdate, ProjectUpdateValidationError } from '@/lib/projects/project-update';
 import { AccessControlError, requireProjectAccess } from '@/lib/security/access-control';
 import { toAccessControlResponse } from '@/lib/security/http-response';
 import { projectStore } from '@/lib/storage/project-store';
@@ -26,17 +26,39 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json({ message: 'Unexpected project access failure.', code: 'project.unexpected' }, { status: 500 });
   }
 
-  const { project: candidate, validation } = applyProjectUpdate(existing, body.project ?? existing);
-  if (!validation.valid) {
-    return NextResponse.json({ message: 'Project validation failed.', errors: validation.errors, warnings: validation.warnings }, { status: 422 });
+  const initial = applyProjectUpdate(existing, body.project ?? existing);
+  if (!initial.validation.valid) {
+    return NextResponse.json({ message: 'Project validation failed.', errors: initial.validation.errors, warnings: initial.validation.warnings }, { status: 422 });
   }
 
-  const result = planSceneIntentsFromBeats(candidate);
-  const finalValidation = validateProject(result.project);
-  if (!finalValidation.valid) {
-    return NextResponse.json({ message: 'Planned scene intents are invalid.', errors: finalValidation.errors, warnings: finalValidation.warnings }, { status: 422 });
+  let createdIntentIds: string[] = [];
+  let project: Awaited<ReturnType<typeof projectStore.mutateProject>>;
+  try {
+    project = await projectStore.mutateProject(id, (current) => {
+      const { project: candidate, validation } = applyProjectUpdate(current, body.project ?? current);
+      if (!validation.valid) {
+        throw new ProjectUpdateValidationError(validation, 'Project validation failed.');
+      }
+
+      const result = planSceneIntentsFromBeats(candidate);
+      const finalValidation = validateProject(result.project);
+      if (!finalValidation.valid) {
+        throw new ProjectUpdateValidationError(finalValidation, 'Planned scene intents are invalid.');
+      }
+
+      createdIntentIds = result.createdIntentIds;
+      return result.project;
+    });
+  } catch (error) {
+    if (error instanceof ProjectUpdateValidationError) {
+      return NextResponse.json({ message: error.message, errors: error.validation.errors, warnings: error.validation.warnings }, { status: 422 });
+    }
+    throw error;
   }
 
-  const project = await projectStore.updateProject(result.project);
-  return NextResponse.json({ project, createdIntentIds: result.createdIntentIds }, { status: 200 });
+  if (!project) {
+    return NextResponse.json({ message: 'Project not found.', code: 'project.notFound' }, { status: 404 });
+  }
+
+  return NextResponse.json({ project, createdIntentIds }, { status: 200 });
 }
