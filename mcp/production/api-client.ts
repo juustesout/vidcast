@@ -1,4 +1,4 @@
-import type { HeadlessRunLogPage, HeadlessRunSnapshot, RunMode } from '@/lib/production/run-types';
+import type { HeadlessRunLogPage, HeadlessRunSnapshot, RunMode, RunMusicRequest } from '@/lib/production/run-types';
 import type { ProductionActionType } from '@/lib/production/production-planner';
 import { ProductionMcpToolError } from './errors';
 
@@ -27,7 +27,9 @@ export interface StartRunRequestPayload {
     image?: 'fake' | 'openai';
     video?: 'local' | 'openai';
     narration?: 'fake' | 'elevenlabs';
+    music?: 'fake' | 'elevenlabs';
   };
+  music?: RunMusicRequest;
   maxIterations?: number;
   force?: boolean;
   limits?: Partial<Record<ProductionActionType, number>>;

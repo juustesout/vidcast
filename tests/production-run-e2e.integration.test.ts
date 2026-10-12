@@ -289,6 +289,8 @@ describe('production run end-to-end (integration)', () => {
       const composition = compositions[0];
       expect(composition.outputPath).toContain('renders/compositions/final-');
       expect(composition.outputPath.endsWith('.mp4')).toBe(true);
+      // No music opt-in: the composition must not carry a music fingerprint.
+      expect(composition.inputFingerprint?.music).toBeUndefined();
 
       const compositionPath = path.join(getProjectRoot(created.id), composition.outputPath);
       const compositionStat = await fs.stat(compositionPath);
@@ -309,6 +311,108 @@ describe('production run end-to-end (integration)', () => {
       expect(duration).toBeGreaterThan(0);
 
       // 6. Full decode succeeds with no errors.
+      await decodeWithoutErrors(runtime.ffmpegPath, compositionPath);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  }, 180000);
+
+  it('generates opted-in background music and mixes it into the composed MP4', async () => {
+    if (!(await ffmpegAvailable())) {
+      return;
+    }
+
+    const runtime = createFFmpegRuntime();
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'production-run-e2e-music-'));
+
+    try {
+      const created = await projectStore.createProject({ title: 'P34 E2E run with music', durationTarget: 4, fps: FPS });
+      createdProjectIds.push(created.id);
+      const templateScene = created.scenes[0];
+
+      const sceneOne = generatedImageScene(
+        templateScene,
+        {
+          id: 'scene-e2e-music-1',
+          order: 1,
+          duration: 3,
+          narration: { text: 'A single beat with background music.' }
+        },
+        'Deterministic background for the music end-to-end scene.'
+      );
+
+      const project: Project = {
+        ...created,
+        aspectRatio: '16:9',
+        fps: FPS,
+        scenes: [sceneOne],
+        assets: [],
+        references: [],
+        compositions: [],
+        renderSettings: {
+          ...created.renderSettings,
+          aspectRatio: '16:9',
+          fps: FPS,
+          width: WIDTH,
+          height: HEIGHT
+        }
+      };
+      await projectStore.updateProject(project);
+
+      // Real batch runner and real executors; only the mock (`fake`) music
+      // provider is used, so no network or paid request is possible.
+      const service = new HeadlessProductionRunService(buildRunConfig(), {
+        runBatch: async (input) => runProductionBatch(input)
+      });
+
+      const { run } = await service.startOrReuseRun({
+        projectId: created.id,
+        policy: { mode: 'mock', music: { generate: true, prompt: 'calm ambient background', musicLengthMs: 5000 } }
+      });
+      const final = await waitForTerminal(service, run.runId);
+
+      expect(final.status).toBe('completed');
+      expect(final.failedActionIds).toEqual([]);
+
+      const log = service.getRunLog(run.runId, { limit: 250 });
+      const failureEvents = log.items
+        .map((item) => item.event)
+        .filter((event) => event.code === 'action_failed' || event.code === 'run_failed' || event.code === 'composition_failed');
+      expect(failureEvents).toEqual([]);
+
+      const persisted = await projectStore.getProject(created.id);
+      expect(persisted).not.toBeNull();
+      const persistedProject = persisted as Project;
+
+      // The mock music provider produced a real silent WAV asset that is now
+      // the selected project track.
+      const musicAssets = persistedProject.assets.filter((asset) => asset.type === 'music');
+      expect(musicAssets.length).toBeGreaterThanOrEqual(1);
+      const selectedMusic = musicAssets[musicAssets.length - 1];
+      expect(persistedProject.music?.status).toBe('generated');
+      expect(persistedProject.music?.assetId).toBe(selectedMusic.id);
+
+      const musicPath = path.join(getProjectRoot(created.id), selectedMusic.localPath as string);
+      const musicStat = await fs.stat(musicPath);
+      expect(musicStat.size).toBeGreaterThan(0);
+
+      // The composition records the selected music in its fingerprint and the
+      // final MP4 stays a valid, decodable stream with audio.
+      const compositions = persistedProject.compositions ?? [];
+      expect(compositions.length).toBe(1);
+      const composition = compositions[0];
+      expect(composition.inputFingerprint?.music).toBeDefined();
+      expect(composition.inputFingerprint?.music?.assetId).toBe(selectedMusic.id);
+
+      const compositionPath = path.join(getProjectRoot(created.id), composition.outputPath);
+      const probe = await probeMedia(compositionPath, runtime);
+      const video = probe.streams.find((stream) => stream.codec_type === 'video');
+      const audio = probe.streams.find((stream) => stream.codec_type === 'audio');
+      expect(video?.codec_name).toBe('h264');
+      expect(audio?.codec_name).toBe('aac');
+      const duration = parseDurationSeconds(probe.format?.duration);
+      expect(duration).toBeGreaterThan(0);
+
       await decodeWithoutErrors(runtime.ffmpegPath, compositionPath);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });

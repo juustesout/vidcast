@@ -1,10 +1,13 @@
 import { generateSceneImage, SceneImageGenerationError } from '@/lib/generation/image-generation-service';
+import { generateProjectMusic, ProjectMusicGenerationError, selectProjectMusic } from '@/lib/generation/music-service';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
 import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import { isMusicAsset, resolveSelectedMusicAsset } from '@/lib/render/music-mix';
 import { CompositionServiceError, videoCompositionService } from '@/lib/render/video-composition-service';
 import { SceneRenderError } from '@/lib/render/renderer';
 import { sceneRenderService } from '@/lib/render/scene-render-service';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
+import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
@@ -14,7 +17,7 @@ import { assertRunPolicyPreflight, resolveRunPolicy, resolveRunPolicyServerConfi
 import { reconcileInterruptedGenerations } from './run-recovery';
 import { InMemoryRunRegistry } from './run-registry';
 import { FileRunStore, type PersistedRun, type RunStore } from './run-store';
-import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, RunMode, RunProviderSelection } from './run-types';
+import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, RunPolicySnapshot } from './run-types';
 
 export interface StartProductionRunRequest {
   projectId: string;
@@ -100,6 +103,8 @@ interface ServiceDependencies {
   generateNarration: typeof generateSceneNarration;
   renderScene: typeof sceneRenderService.renderScene;
   composeProject: typeof videoCompositionService.composeProject;
+  generateMusic: typeof generateProjectMusic;
+  selectMusic: typeof selectProjectMusic;
   now: () => string;
   delay: (ms: number) => Promise<void>;
 }
@@ -114,6 +119,8 @@ const defaultDependencies: ServiceDependencies = {
   generateNarration: generateSceneNarration,
   renderScene: sceneRenderService.renderScene.bind(sceneRenderService),
   composeProject: videoCompositionService.composeProject.bind(videoCompositionService),
+  generateMusic: generateProjectMusic,
+  selectMusic: selectProjectMusic,
   now: () => new Date().toISOString(),
   delay: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
 };
@@ -222,6 +229,24 @@ function statusFromCompositionCode(code: CompositionServiceError['code']): numbe
     return 504;
   }
   return 500;
+}
+
+// A selected music asset is "usable" when it exists, is a music/audio asset and
+// has a local file — the exact condition composition's `resolveProjectMusic`
+// uses. Such a track is reused without any provider request.
+function resolveUsableMusicAsset(project: Project): Asset | undefined {
+  const asset = resolveSelectedMusicAsset(project);
+  if (!asset || !isMusicAsset(asset) || !asset.localPath) {
+    return undefined;
+  }
+  return asset;
+}
+
+function describeMusicError(error: unknown): string {
+  if (error instanceof ProjectMusicGenerationError) {
+    return `${error.code}: ${error.message}`;
+  }
+  return error instanceof Error ? error.message : 'unknown error';
 }
 
 export interface RunServiceOptions {
@@ -711,7 +736,7 @@ export class HeadlessProductionRunService {
           }
 
           actionExecutionCount += 1;
-          return this.executeAction(run.projectId, action, run.acceptedConfig.policy.providers, run.acceptedConfig.policy.mode);
+          return this.executeAction(run.projectId, action, run.acceptedConfig.policy);
         },
         refreshProject: async () => {
           const refreshed = await this.readProjectWithRetry(run.projectId);
@@ -773,12 +798,63 @@ export class HeadlessProductionRunService {
     }
   }
 
+  // Opt-in, fail-soft background-music step, run immediately before
+  // composition. It never throws: any failure is returned as a diagnostic note
+  // so the run and its composition still complete. Returns undefined when there
+  // is nothing to report (opt-in absent, or an existing usable track was reused
+  // without any provider request).
+  private async prepareRunMusic(projectId: string, policy: RunPolicySnapshot): Promise<string | undefined> {
+    const plan = policy.music;
+    if (!plan) {
+      return undefined;
+    }
+
+    try {
+      const project = await this.dependencies.store.getProject(projectId);
+      if (!project) {
+        return 'Background music skipped: project could not be read.';
+      }
+
+      // Reuse an existing usable track; never issue a new generation request.
+      if (resolveUsableMusicAsset(project)) {
+        return undefined;
+      }
+
+      // A generation is already in flight; do not start another.
+      if (project.music?.status === 'generating') {
+        return 'Background music skipped: generation already in progress.';
+      }
+
+      if (plan.selectAssetId) {
+        await this.dependencies.selectMusic(projectId, plan.selectAssetId);
+        return 'Background music selected from an existing asset.';
+      }
+
+      await this.dependencies.generateMusic(projectId, {
+        prompt: plan.prompt,
+        musicLengthMs: plan.musicLengthMs,
+        instrumental: plan.instrumental,
+        model: plan.model,
+        seed: plan.seed,
+        outputFormat: plan.outputFormat,
+        regenerate: plan.regenerate === true,
+        provider: policy.providers.music,
+        mode: policy.mode
+      });
+      return 'Background music generated.';
+    } catch (error) {
+      // Fail-soft: an optional music failure must never block the video.
+      return `Background music skipped: ${describeMusicError(error)}.`;
+    }
+  }
+
   private async executeAction(
     projectId: string,
     action: ProductionPlannedAction,
-    providers: RunProviderSelection,
-    mode: RunMode
+    policy: RunPolicySnapshot
   ): Promise<ProductionActionExecutionOutcome | void> {
+    const { providers, mode } = policy;
+
     if (!action.execute) {
       return;
     }
@@ -963,10 +1039,11 @@ export class HeadlessProductionRunService {
 
     if (action.type === 'final_compose') {
       const endpoint = `/api/projects/${projectId}/compose`;
+      const musicNote = await this.prepareRunMusic(projectId, policy);
       try {
         const result = await this.dependencies.composeProject(projectId);
         return {
-          message: 'Final composition completed.',
+          message: musicNote ? `Final composition completed. ${musicNote}` : 'Final composition completed.',
           endpoint,
           details: result.artifact.compositionId
         };

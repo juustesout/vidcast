@@ -170,7 +170,8 @@ export class InMemoryRunRegistry {
           mode: entry.acceptedConfig.policy.mode,
           allowRealProviders: entry.acceptedConfig.policy.allowRealProviders,
           providers: { ...entry.acceptedConfig.policy.providers },
-          force: entry.acceptedConfig.policy.force
+          force: entry.acceptedConfig.policy.force,
+          music: entry.acceptedConfig.policy.music ? { ...entry.acceptedConfig.policy.music } : undefined
         },
         limits: {
           maxIterations: entry.acceptedConfig.limits.maxIterations,
@@ -340,7 +341,8 @@ export class InMemoryRunRegistry {
           mode: run.acceptedConfig.policy.mode,
           allowRealProviders: run.acceptedConfig.policy.allowRealProviders,
           providers: { ...run.acceptedConfig.policy.providers },
-          force: run.acceptedConfig.policy.force
+          force: run.acceptedConfig.policy.force,
+          music: run.acceptedConfig.policy.music ? { ...run.acceptedConfig.policy.music } : undefined
         },
         limits: {
           maxIterations: run.acceptedConfig.limits.maxIterations,

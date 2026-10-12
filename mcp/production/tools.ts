@@ -16,7 +16,21 @@ export const runProductionInputSchema = z.object({
     .object({
       image: z.enum(['fake', 'openai']).optional(),
       video: z.enum(['local', 'openai']).optional(),
-      narration: z.enum(['fake', 'elevenlabs']).optional()
+      narration: z.enum(['fake', 'elevenlabs']).optional(),
+      music: z.enum(['fake', 'elevenlabs']).optional()
+    })
+    .optional(),
+  music: z
+    .object({
+      generate: z.boolean().optional(),
+      selectAssetId: z.string().trim().min(1).max(200).optional(),
+      prompt: z.string().trim().min(1).max(2000).optional(),
+      instrumental: z.boolean().optional(),
+      musicLengthMs: z.number().int().positive().max(600_000).optional(),
+      regenerate: z.boolean().optional(),
+      model: z.string().trim().min(1).max(200).optional(),
+      seed: z.number().int().optional(),
+      outputFormat: z.string().trim().min(1).max(40).optional()
     })
     .optional(),
   maxIterations: z.number().int().positive().max(10_000).optional(),
@@ -90,6 +104,7 @@ export function createProductionToolService(apiClient: ProductionApiClient = new
         const result = await apiClient.runProduction(parsed.projectId, {
           mode: parsed.mode,
           providers: parsed.providers,
+          music: parsed.music,
           maxIterations: parsed.maxIterations,
           force: parsed.force,
           limits: parsed.limits

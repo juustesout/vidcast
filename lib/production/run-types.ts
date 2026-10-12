@@ -15,6 +15,36 @@ export interface RunProviderSelection {
   music: MusicRunProvider;
 }
 
+// Explicit opt-in for background music handling before `final_compose`.
+// Absent means the run never touches music (existing behavior). When present,
+// the run either selects an existing project asset or generates a new track,
+// reusing an already usable track without any provider request.
+export interface RunMusicRequest {
+  generate?: boolean;
+  selectAssetId?: string;
+  prompt?: string;
+  instrumental?: boolean;
+  musicLengthMs?: number;
+  regenerate?: boolean;
+  model?: string;
+  seed?: number;
+  outputFormat?: string;
+}
+
+// Normalized, validated form persisted on the run's accepted config. Either
+// `generate` is true (with a prompt) or `selectAssetId` is set, never both.
+export interface RunMusicPlan {
+  generate: boolean;
+  selectAssetId?: string;
+  prompt?: string;
+  instrumental?: boolean;
+  musicLengthMs?: number;
+  regenerate?: boolean;
+  model?: string;
+  seed?: number;
+  outputFormat?: string;
+}
+
 export interface RunPolicySnapshot {
   mode: RunMode;
   allowRealProviders: boolean;
@@ -24,6 +54,10 @@ export interface RunPolicySnapshot {
   // mode even though a real run was requested). Optional for backward
   // compatibility with runs persisted before this field existed.
   force?: boolean;
+  // Optional, explicit background-music handling. Absent keeps existing runs
+  // byte-for-byte unchanged. Optional for backward compatibility with runs
+  // persisted before this field existed.
+  music?: RunMusicPlan;
 }
 
 export interface RunExecutionLimits {

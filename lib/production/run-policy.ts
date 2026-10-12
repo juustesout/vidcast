@@ -7,6 +7,8 @@ import type {
   MusicRunProvider,
   NarrationRunProvider,
   RunMode,
+  RunMusicPlan,
+  RunMusicRequest,
   RunPolicySnapshot,
   RunProviderSelection,
   VideoRunProvider
@@ -18,6 +20,9 @@ export interface RunPolicyRequest {
   // Force a one-time regeneration of outputs the planner would otherwise treat
   // as current (for example mock assets carried into a real run).
   force?: boolean;
+  // Explicit opt-in for pre-compose background music. Absent keeps runs
+  // unchanged and guarantees no music provider is ever called.
+  music?: RunMusicRequest;
 }
 
 export interface RunPolicyServerConfig {
@@ -152,6 +157,73 @@ function isRealProvider(provider: string): boolean {
   return provider === 'openai' || provider === 'elevenlabs';
 }
 
+// Validates and normalizes the explicit run music opt-in. A malformed opt-in is
+// rejected up front (it is an author intent, not an optional runtime failure);
+// runtime provider errors during the actual music step stay fail-soft.
+function normalizeRunMusicRequest(request: RunMusicRequest | undefined): RunMusicPlan | undefined {
+  if (!request) {
+    return undefined;
+  }
+
+  const selectAssetId = typeof request.selectAssetId === 'string' ? request.selectAssetId.trim() : '';
+  const generate = request.generate === true;
+  const prompt = typeof request.prompt === 'string' ? request.prompt.trim() : '';
+
+  if (!generate && !selectAssetId) {
+    throw new RunPolicyError(
+      'Run music opt-in requires either generate=true with a prompt or selectAssetId.',
+      'INVALID_POLICY',
+      400,
+      { field: 'music' }
+    );
+  }
+
+  if (generate && selectAssetId) {
+    throw new RunPolicyError(
+      'Run music opt-in cannot both generate a track and select an asset.',
+      'INVALID_POLICY',
+      400,
+      { field: 'music' }
+    );
+  }
+
+  if (generate && !prompt) {
+    throw new RunPolicyError(
+      'Run music generation requires a non-empty prompt.',
+      'INVALID_POLICY',
+      400,
+      { field: 'music.prompt' }
+    );
+  }
+
+  if (
+    typeof request.musicLengthMs === 'number' &&
+    (!Number.isFinite(request.musicLengthMs) || request.musicLengthMs <= 0)
+  ) {
+    throw new RunPolicyError(
+      'Run music length must be a positive number of milliseconds.',
+      'INVALID_POLICY',
+      400,
+      { field: 'music.musicLengthMs' }
+    );
+  }
+
+  return {
+    generate,
+    selectAssetId: selectAssetId || undefined,
+    prompt: generate ? prompt : undefined,
+    instrumental: typeof request.instrumental === 'boolean' ? request.instrumental : undefined,
+    musicLengthMs: typeof request.musicLengthMs === 'number' ? request.musicLengthMs : undefined,
+    regenerate: generate && request.regenerate === true ? true : undefined,
+    model: typeof request.model === 'string' && request.model.trim() ? request.model.trim() : undefined,
+    seed: typeof request.seed === 'number' && Number.isFinite(request.seed) ? request.seed : undefined,
+    outputFormat:
+      typeof request.outputFormat === 'string' && request.outputFormat.trim()
+        ? request.outputFormat.trim()
+        : undefined
+  };
+}
+
 export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverConfig: RunPolicyServerConfig): RunPolicySnapshot {
   const requestedMode = request?.mode ?? serverConfig.defaultMode;
   if (requestedMode === 'real' && !serverConfig.allowRealProviders) {
@@ -205,6 +277,8 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
     music: musicProvider ?? defaults.music
   };
 
+  const music = normalizeRunMusicRequest(request?.music);
+
   // Provider-vs-mode enforcement for run modalities is intentionally deferred to
   // `assertRunPolicyPreflight`, which knows the project and therefore which
   // modalities the run actually needs. A provider for an unused modality (for
@@ -215,7 +289,8 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
     mode: requestedMode,
     allowRealProviders: serverConfig.allowRealProviders,
     providers,
-    force: request?.force === true
+    force: request?.force === true,
+    music
   };
 }
 
@@ -256,8 +331,11 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
   const needsNarrationGeneration = requiredActionTypes.includes('narration_generate');
 
   // Real/mock enforcement applies only to modalities the run actually executes.
-  // Music is never a run modality (it is managed separately through
-  // `manage_project_music`), so `providers.music` is never checked here.
+  // Music is never a hard-required run modality: it is an optional, fail-soft
+  // pre-compose step (see the run music opt-in), so `providers.music` is not
+  // enforced here. When opted in, the step resolves the provider through
+  // `resolveManualGenerationProvider`, which preserves the mock/real and
+  // credential guarantees before any request is built.
   if (policy.mode === 'real') {
     if (needsImageGeneration && !isRealProvider(policy.providers.image)) {
       throw new RunPolicyError('Real mode requires a real image provider for image generation.', 'PROVIDER_NOT_ALLOWED', 403, {

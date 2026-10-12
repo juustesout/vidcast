@@ -96,6 +96,30 @@ describe('production MCP tool service', () => {
     expect(calls[0]).toMatchObject({ force: true });
   });
 
+  it('passes the music opt-in through the run_production tool', async () => {
+    const calls: unknown[] = [];
+    const service = createProductionToolService(
+      makeClient({
+        runProduction: async (_projectId, payload) => {
+          calls.push(payload);
+          return { run: makeRun('run-music'), reused: false };
+        }
+      })
+    );
+
+    const result = await service.runProduction({
+      projectId: 'project-1',
+      mode: 'mock',
+      music: { generate: true, prompt: 'calm ambient', instrumental: true }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toMatchObject({
+      mode: 'mock',
+      music: { generate: true, prompt: 'calm ambient', instrumental: true }
+    });
+  });
+
   it('returns structured start/status/log payloads', async () => {
     const service = createProductionToolService(makeClient());
 

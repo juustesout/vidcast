@@ -279,3 +279,56 @@ describe('manual generation provider policy', () => {
     expect(override.providers.music).toBe('elevenlabs');
   });
 });
+
+describe('run music opt-in policy', () => {
+  const server = { allowRealProviders: false, defaultMode: 'mock' as const };
+
+  it('leaves the music plan undefined when omitted', () => {
+    expect(resolveRunPolicy({ mode: 'mock' }, server).music).toBeUndefined();
+  });
+
+  it('normalizes a valid generate opt-in', () => {
+    const policy = resolveRunPolicy(
+      { mode: 'mock', music: { generate: true, prompt: '  calm piano  ', instrumental: false, musicLengthMs: 30_000 } },
+      server
+    );
+
+    expect(policy.music).toEqual({
+      generate: true,
+      prompt: 'calm piano',
+      instrumental: false,
+      musicLengthMs: 30_000,
+      selectAssetId: undefined,
+      regenerate: undefined,
+      model: undefined,
+      seed: undefined,
+      outputFormat: undefined
+    });
+  });
+
+  it('normalizes a valid select opt-in', () => {
+    const policy = resolveRunPolicy({ mode: 'mock', music: { selectAssetId: ' asset-1 ' } }, server);
+    expect(policy.music?.generate).toBe(false);
+    expect(policy.music?.selectAssetId).toBe('asset-1');
+  });
+
+  it('rejects an opt-in with neither generate nor selectAssetId', () => {
+    expect(() => resolveRunPolicy({ mode: 'mock', music: {} }, server)).toThrow(RunPolicyError);
+  });
+
+  it('rejects an opt-in that both generates and selects', () => {
+    expect(() =>
+      resolveRunPolicy({ mode: 'mock', music: { generate: true, prompt: 'x', selectAssetId: 'asset-1' } }, server)
+    ).toThrow(/cannot both/i);
+  });
+
+  it('rejects generation without a prompt', () => {
+    expect(() => resolveRunPolicy({ mode: 'mock', music: { generate: true } }, server)).toThrow(/prompt/i);
+  });
+
+  it('rejects a non-positive music length', () => {
+    expect(() =>
+      resolveRunPolicy({ mode: 'mock', music: { generate: true, prompt: 'x', musicLengthMs: 0 } }, server)
+    ).toThrow(/positive/i);
+  });
+});
