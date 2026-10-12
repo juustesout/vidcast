@@ -4,6 +4,7 @@ import Image from 'next/image';
 import React, { type ReactNode } from 'react';
 
 import { deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
+import { resolveTextOverlay, toCssColor } from '@/lib/render/overlay-resolve';
 import type { Project, RenderPlan } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 import { joinProjectAssetUrl, joinProjectFileUrl } from '@/lib/utils/project-files';
@@ -137,11 +138,58 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
     )
   );
 
+  // Browser parity for the FFmpeg drawtext overlay. We reuse the exact
+  // resolution helpers (`resolveTextOverlay`) so defaults, clamps and color
+  // handling match the renderer; only font metrics, wrapping and fade-out are
+  // approximate (see the preview notes rendered at the bottom of the panel).
+  const resolvedOverlay = resolvedScene?.source.kind === 'text'
+    ? null
+    : resolveTextOverlay(scene.overlay, { width: renderPlan.width, height: renderPlan.height, duration: scene.duration });
+
+  const overlayPositionClass =
+    resolvedOverlay?.position === 'top' ? 'items-start' : resolvedOverlay?.position === 'center' ? 'items-center' : 'items-end';
+
+  const overlayMargin = resolvedOverlay ? `${(resolvedOverlay.margin / renderPlan.height) * 100}cqh` : '0cqh';
+
+  const overlayLayer = resolvedOverlay
+    ? React.createElement(
+        'div',
+        {
+          className: `pointer-events-none absolute inset-0 flex justify-center px-6 ${overlayPositionClass}`,
+          style: { paddingTop: overlayMargin, paddingBottom: overlayMargin }
+        },
+        React.createElement(
+          'p',
+          {
+            className: 'max-w-[85%] text-center font-semibold',
+            style: {
+              color: toCssColor(resolvedOverlay.fontColor),
+              fontSize: `${(resolvedOverlay.fontSize / renderPlan.width) * 100}cqw`,
+              lineHeight: 1.15,
+              textShadow: resolvedOverlay.box ? undefined : '0 2px 12px rgba(0, 0, 0, 0.55)',
+              backgroundColor: resolvedOverlay.box ? 'rgba(0, 0, 0, 0.45)' : undefined,
+              padding: resolvedOverlay.box ? '0.35em 0.6em' : undefined,
+              borderRadius: resolvedOverlay.box ? '0.25em' : undefined,
+              animationName: resolvedOverlay.fadeInSeconds > 0 ? 'overlayFadeIn' : undefined,
+              animationDuration: `${resolvedOverlay.fadeInSeconds}s`,
+              animationTimingFunction: 'ease-out',
+              animationFillMode: 'both'
+            }
+          },
+          resolvedOverlay.text
+        )
+      )
+    : null;
+
   const previewVideo = React.createElement(
     'div',
-    { className: 'relative aspect-video overflow-hidden rounded-[24px] border border-slate-700/70 bg-slate-900' },
+    {
+      className: 'relative aspect-video overflow-hidden rounded-[24px] border border-slate-700/70 bg-slate-900',
+      style: { containerType: 'inline-size' }
+    },
     renderMainPreview(mediaUrl, asset?.type, scene, motionClass, placeholder),
     React.createElement('div', { className: 'pointer-events-none absolute inset-0 bg-gradient-to-t from-black/45 via-black/12 to-transparent' }),
+    overlayLayer,
     React.createElement(
       'div',
       { className: 'pointer-events-none absolute inset-x-0 bottom-0 p-5' },
@@ -149,7 +197,6 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
         'div',
         { className: 'max-w-xl space-y-2' },
         React.createElement('p', { className: 'font-mono text-[10px] uppercase tracking-[0.35em] text-slate-200/80' }, 'Browser preview only'),
-        scene.overlay?.text ? React.createElement('p', { className: 'text-2xl font-semibold text-white' }, scene.overlay.text) : null,
         scene.narration?.text ? React.createElement('p', { className: 'max-w-2xl text-sm leading-6 text-slate-100/90' }, scene.narration.text) : null
       )
     )
@@ -221,7 +268,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
           'div',
           null,
           React.createElement('p', { className: 'font-mono text-[10px] uppercase tracking-[0.3em] text-slate-500' }, 'Preview'),
-          React.createElement('p', { className: 'mt-1 text-sm text-slate-300' }, 'Interactive browser preview of the current scene setup. This is not the final rendered MP4.')
+          React.createElement('p', { className: 'mt-1 text-sm text-slate-300' }, 'Interactive browser preview of the current scene setup. This is not the final rendered MP4. The text overlay reuses the renderer defaults, color and fade-in, but fonts, wrapping, exact margins and fade-out timing are approximate.')
         ),
         previewVideo,
         narrationPanel,

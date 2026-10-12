@@ -161,6 +161,35 @@ The **source of truth for production narration is `scene.narration.text`, per sc
 
 A scene with narration text but no audio asset is planned as a `narration_generate` action. A scene with empty narration is blocked (`Narration text is missing.`) until you set `narration.text`.
 
+#### Text overlays are scene-level (`scene.overlay`)
+
+Each scene can draw one text overlay on top of its frame. It is authored inside the same complete scene objects:
+
+```json
+{
+  "type": "title",
+  "text": "50% faster: a quick look",
+  "position": "top",
+  "style": { "fontSize": 72, "color": "#f8fafc", "box": true, "margin": 64 },
+  "timing": { "fadeInSeconds": 0.5, "fadeOutSeconds": 0.4 }
+}
+```
+
+Contract:
+
+- `type`: `"none" | "text" | "title" | "subtitle" | "callout" | "statistic" | "quote"`. The overlay only renders when `type` is not `"none"` **and** `text` is non-blank.
+- `position` (optional): `"top" | "center" | "bottom"`. When omitted a sensible default is derived from `type` (`title` -> top; `statistic`/`quote` -> center; otherwise bottom).
+- `style` (optional): `fontSize` (24-220), `color` (hex `#rgb`/`#rrggbb`, `0xrrggbb`, or FFmpeg named color such as `white`/`black@0.45`), `box` (boolean background plate), `margin` (16-240).
+- `timing` (optional): `fadeInSeconds` / `fadeOutSeconds` (0-600; additionally clamped to the scene duration at render time).
+- All `style`/`timing` fields are optional. Omitted or `null` fields fall back to the renderer defaults (`fadeInSeconds` defaults to `0.4`, `fadeOutSeconds` to `0`; font size and margin derive from the frame size and overlay type). Explicitly present values are validated; out-of-range or wrong-typed values are rejected with `VALIDATION_FAILED` rather than silently clamped.
+- `data` (optional) is retained as free-form metadata.
+- Overlays are **not** drawn on `text` scenes: their whole frame is authored copy, so adding an overlay would duplicate it.
+- Changing any overlay field changes the scene render fingerprint, so an already-rendered scene becomes **stale** and is re-rendered by the next production run.
+
+To disable an overlay, set `type` to `"none"` (or omit `overlay`, which normalizes to `{ "type": "none" }`).
+
+> **`scenes[]` is replaced wholesale.** `update_project` does not merge scenes field-by-field. When you send `scenes`, include every field you want to keep for every scene (`id`, `order`, `type`, `visual`, `render`, `overlay`, `narration`, `referenceIds`, `notes`, and any existing `renders`) — otherwise those fields are lost. There is no nested merge for `overlay.style`/`overlay.timing` either; send the complete overlay object. Fetch the current project/scene first (`get_project` / `get_scene`) and modify the returned objects.
+
 ### Production
 
 | Tool | Arguments | Returns |

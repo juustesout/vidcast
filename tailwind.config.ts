@@ -50,6 +50,10 @@ const config: Config = {
         fadeInPulse: {
           '0%, 100%': { opacity: '0.92' },
           '50%': { opacity: '1' }
+        },
+        overlayFadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' }
         }
       },
       animation: {
@@ -59,7 +63,8 @@ const config: Config = {
         slowPanRight: 'slowPanRight 10s ease-in-out infinite alternate',
         slowPanUp: 'slowPanUp 10s ease-in-out infinite alternate',
         slowPanDown: 'slowPanDown 10s ease-in-out infinite alternate',
-        fadeInPulse: 'fadeInPulse 6s ease-in-out infinite'
+        fadeInPulse: 'fadeInPulse 6s ease-in-out infinite',
+        overlayFadeIn: 'overlayFadeIn 0.4s ease-out both'
       }
     }
   },

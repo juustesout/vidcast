@@ -1,5 +1,5 @@
 import type { AspectRatio } from './types/render';
-import type { MotionPreset, OverlayType, SceneType, TransitionPreset } from './types/scene';
+import type { MotionPreset, OverlayPosition, OverlayType, SceneType, TransitionPreset } from './types/scene';
 import type { AssetProvenance, AssetStatus, AssetType } from './types/asset';
 import type { GenerationProvider, GenerationStatus } from './types/generation';
 
@@ -20,6 +20,22 @@ export const MOTION_PRESETS: MotionPreset[] = [
 export const TRANSITION_PRESETS: TransitionPreset[] = ['none', 'fade', 'crossfade'];
 
 export const OVERLAY_TYPES: OverlayType[] = ['none', 'text', 'title', 'subtitle', 'callout', 'statistic', 'quote'];
+
+export const OVERLAY_POSITIONS: OverlayPosition[] = ['top', 'center', 'bottom'];
+
+// Shared overlay style/timing bounds. Both the renderer (lazy defaults/clamps in
+// lib/render/overlay-resolve.ts) and the authoring validation read from here so
+// the two never drift apart.
+export const OVERLAY_STYLE_LIMITS = {
+  MIN_FONT_SIZE: 24,
+  MAX_FONT_SIZE: 220,
+  MIN_MARGIN: 16,
+  MAX_MARGIN: 240
+} as const;
+
+// Fades are additionally bounded by the scene duration at render time; this is
+// only the absolute upper bound accepted at authoring time.
+export const OVERLAY_MAX_FADE_SECONDS = 600;
 
 export const GENERATION_PROVIDERS: GenerationProvider[] = ['openai', 'gemini', 'local', 'other'];
 

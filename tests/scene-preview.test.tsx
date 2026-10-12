@@ -111,6 +111,17 @@ describe('ScenePreview', () => {
     expect(html).toContain('Existing asset visual is missing an asset id.');
   });
 
+  it('renders the text overlay with resolved position, color and scale', () => {
+    const project = createImageProject();
+    const renderPlan = resolveRenderPlan(project);
+    const html = renderToStaticMarkup(React.createElement(ScenePreview, { project, scene: project.scenes[0], renderPlan }));
+
+    expect(html).toContain('Overlay text');
+    expect(html).toContain('items-end');
+    expect(html).toContain('#f8fafc');
+    expect(html).toContain('cqw');
+  });
+
   it('renders video preview and rendered mp4 section when a current render exists', () => {
     const project = createVideoProject();
     const renderPlan = resolveRenderPlan(project);

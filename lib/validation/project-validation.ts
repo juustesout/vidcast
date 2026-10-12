@@ -1,8 +1,9 @@
-import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
 import type { ExplainerSpec } from '@/lib/types/explainer';
 import type { Project } from '@/lib/types/render';
 import type { RenderIssue, RenderValidationResult } from '@/lib/types/render';
-import type { VisualSpec } from '@/lib/types/scene';
+import type { OverlaySpec, VisualSpec } from '@/lib/types/scene';
 
 function pushIssue(
   target: RenderIssue[],
@@ -12,6 +13,79 @@ function pushIssue(
   message: string
 ): void {
   target.push({ severity, code, path, message });
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/**
+ * Validate the optional `overlay.style` / `overlay.timing` fields introduced in
+ * P29.1. Optional fields may be omitted or `null` (both mean "use the renderer
+ * default"); explicitly present values must be well-typed and within bounds so
+ * the authoring API returns a usable error instead of relying on silent
+ * render-time clamping. `overlay.type` itself is validated by the caller.
+ */
+function validateOverlayStyleTiming(sceneId: string, overlay: OverlaySpec, errors: RenderIssue[]): void {
+  const base = `scenes.${sceneId}.overlay`;
+
+  if (overlay.position !== undefined && overlay.position !== null && !OVERLAY_POSITIONS.includes(overlay.position)) {
+    pushIssue(errors, 'error', 'scene.overlay.position.invalid', `${base}.position`, 'Overlay position is not supported.');
+  }
+
+  if (overlay.text !== undefined && overlay.text !== null && typeof overlay.text !== 'string') {
+    pushIssue(errors, 'error', 'scene.overlay.text.invalid', `${base}.text`, 'Overlay text must be a string.');
+  }
+
+  if (overlay.data !== undefined && overlay.data !== null && !isPlainObject(overlay.data)) {
+    pushIssue(errors, 'error', 'scene.overlay.data.invalid', `${base}.data`, 'Overlay data must be an object.');
+  }
+
+  const style = overlay.style as unknown;
+  if (style !== undefined && style !== null) {
+    if (!isPlainObject(style)) {
+      pushIssue(errors, 'error', 'scene.overlay.style.invalid', `${base}.style`, 'Overlay style must be an object.');
+    } else {
+      const { fontSize, color, box, margin } = style;
+      if (fontSize !== undefined && fontSize !== null) {
+        if (!isFiniteNumber(fontSize) || fontSize < OVERLAY_STYLE_LIMITS.MIN_FONT_SIZE || fontSize > OVERLAY_STYLE_LIMITS.MAX_FONT_SIZE) {
+          pushIssue(errors, 'error', 'scene.overlay.style.fontSize.invalid', `${base}.style.fontSize`, `Overlay font size must be a number between ${OVERLAY_STYLE_LIMITS.MIN_FONT_SIZE} and ${OVERLAY_STYLE_LIMITS.MAX_FONT_SIZE}.`);
+        }
+      }
+      if (margin !== undefined && margin !== null) {
+        if (!isFiniteNumber(margin) || margin < OVERLAY_STYLE_LIMITS.MIN_MARGIN || margin > OVERLAY_STYLE_LIMITS.MAX_MARGIN) {
+          pushIssue(errors, 'error', 'scene.overlay.style.margin.invalid', `${base}.style.margin`, `Overlay margin must be a number between ${OVERLAY_STYLE_LIMITS.MIN_MARGIN} and ${OVERLAY_STYLE_LIMITS.MAX_MARGIN}.`);
+        }
+      }
+      if (color !== undefined && color !== null && !isValidOverlayColor(color)) {
+        pushIssue(errors, 'error', 'scene.overlay.style.color.invalid', `${base}.style.color`, 'Overlay color must be a hex or FFmpeg named color.');
+      }
+      if (box !== undefined && box !== null && typeof box !== 'boolean') {
+        pushIssue(errors, 'error', 'scene.overlay.style.box.invalid', `${base}.style.box`, 'Overlay box must be a boolean.');
+      }
+    }
+  }
+
+  const timing = overlay.timing as unknown;
+  if (timing !== undefined && timing !== null) {
+    if (!isPlainObject(timing)) {
+      pushIssue(errors, 'error', 'scene.overlay.timing.invalid', `${base}.timing`, 'Overlay timing must be an object.');
+    } else {
+      for (const field of ['fadeInSeconds', 'fadeOutSeconds'] as const) {
+        const value = timing[field];
+        if (value === undefined || value === null) {
+          continue;
+        }
+        if (!isFiniteNumber(value) || value < 0 || value > OVERLAY_MAX_FADE_SECONDS) {
+          pushIssue(errors, 'error', `scene.overlay.timing.${field}.invalid`, `${base}.timing.${field}`, `Overlay ${field} must be a number between 0 and ${OVERLAY_MAX_FADE_SECONDS}.`);
+        }
+      }
+    }
+  }
 }
 
 export function validateProject(project: Project): RenderValidationResult {
@@ -184,6 +258,10 @@ export function validateProject(project: Project): RenderValidationResult {
 
     if (scene.overlay && !OVERLAY_TYPES.includes(scene.overlay.type)) {
       pushIssue(errors, 'error', 'scene.overlay.invalid', `scenes.${scene.id}.overlay.type`, 'Overlay type is not supported.');
+    }
+
+    if (scene.overlay) {
+      validateOverlayStyleTiming(scene.id, scene.overlay, errors);
     }
 
     for (const referenceId of scene.referenceIds) {

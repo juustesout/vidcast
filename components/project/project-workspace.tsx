@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { ProductionWorkflow } from '@/components/project/production-workflow';
@@ -14,6 +14,7 @@ import { createProjectCompositionRequest, createSceneNarrationRequest, createSce
 import { deriveGenerationTasks } from '@/lib/projects/generation-tasks';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
 import { getAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
+import { defaultBoxForType, defaultPositionForType } from '@/lib/render/overlay-resolve';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { createId } from '@/lib/utils/ids';
 import { joinProjectAssetUrl, joinProjectReferenceUrl } from '@/lib/utils/project-files';
@@ -453,6 +454,10 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       ...draft,
       scenes: draft.scenes.map((scene) => (scene.id === sceneId ? updater(scene) : scene))
     });
+  }
+
+  function updateOverlay(sceneId: string, updater: (overlay: OverlaySpec) => OverlaySpec): void {
+    updateScene(sceneId, (scene) => ({ ...scene, overlay: updater(scene.overlay ?? { type: 'none' }) }));
   }
 
   function addScene(): void {
@@ -1525,8 +1530,80 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                 <SelectField label="Visual source" value={visualModeOf(selectedScene)} onChange={(value) => setVisualMode(selectedScene, value as VisualMode)} options={['asset', 'generated_image', 'generated_video', 'graphic', 'text', 'blank']} />
                 <SelectField label="Motion" value={selectedScene.render.motion.preset} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, motion: { ...scene.render.motion, preset: value as Scene['render']['motion']['preset'] } } }))} options={MOTION_PRESETS} />
                 <SelectField label="Transition" value={selectedScene.render.transition.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, transition: { ...scene.render.transition, type: value as Scene['render']['transition']['type'] } } }))} options={TRANSITION_PRESETS} />
-                <SelectField label="Overlay type" value={selectedScene.overlay?.type ?? 'none'} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, overlay: { ...(scene.overlay ?? {}), type: value as OverlaySpec['type'] } }))} options={OVERLAY_TYPES} />
-                <Field label="Overlay text" value={selectedScene.overlay?.text ?? ''} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, overlay: { ...(scene.overlay ?? { type: 'text' }), text: String(value) } }))} asTextArea />
+                <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Overlay</p>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-amber-300"
+                        checked={(selectedScene.overlay?.type ?? 'none') !== 'none'}
+                        onChange={(event) => updateOverlay(selectedScene.id, (overlay) => ({
+                          ...overlay,
+                          type: event.target.checked ? (overlay.type && overlay.type !== 'none' ? overlay.type : 'text') : 'none'
+                        }))}
+                      />
+                      Enabled
+                    </label>
+                  </div>
+                  <SelectField label="Overlay type" value={selectedScene.overlay?.type ?? 'none'} onChange={(value) => updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, type: value as OverlaySpec['type'] }))} options={OVERLAY_TYPES} />
+                  {(selectedScene.overlay?.type ?? 'none') !== 'none' ? (
+                    <>
+                      <Field label="Overlay text" value={selectedScene.overlay?.text ?? ''} onChange={(value) => updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, text: String(value) }))} asTextArea />
+                      <SelectField label="Overlay position" value={selectedScene.overlay?.position ?? defaultPositionForType(selectedScene.overlay?.type ?? 'text')} onChange={(value) => updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, position: value as OverlaySpec['position'] }))} options={OVERLAY_POSITIONS} />
+                      <Field label="Overlay color (hex or name)" value={selectedScene.overlay?.style?.color ?? ''} onChange={(value) => updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, style: { ...(overlay.style ?? {}), color: String(value).trim() || undefined } }))} />
+                      <Field
+                        label={`Overlay font size (${OVERLAY_STYLE_LIMITS.MIN_FONT_SIZE}-${OVERLAY_STYLE_LIMITS.MAX_FONT_SIZE})`}
+                        value={selectedScene.overlay?.style?.fontSize ?? ''}
+                        type="number"
+                        step="1"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, style: { ...(overlay.style ?? {}), fontSize: Number.isFinite(next) && next > 0 ? next : undefined } }));
+                        }}
+                      />
+                      <Field
+                        label={`Overlay margin (${OVERLAY_STYLE_LIMITS.MIN_MARGIN}-${OVERLAY_STYLE_LIMITS.MAX_MARGIN})`}
+                        value={selectedScene.overlay?.style?.margin ?? ''}
+                        type="number"
+                        step="1"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, style: { ...(overlay.style ?? {}), margin: Number.isFinite(next) && next > 0 ? next : undefined } }));
+                        }}
+                      />
+                      <label className="flex items-center gap-2 text-xs text-slate-300">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-amber-300"
+                          checked={selectedScene.overlay?.style?.box ?? defaultBoxForType(selectedScene.overlay?.type ?? 'text')}
+                          onChange={(event) => updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, style: { ...(overlay.style ?? {}), box: event.target.checked } }))}
+                        />
+                        Overlay background box
+                      </label>
+                      <Field
+                        label="Overlay fade in (seconds)"
+                        value={selectedScene.overlay?.timing?.fadeInSeconds ?? ''}
+                        type="number"
+                        step="0.1"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, timing: { ...(overlay.timing ?? {}), fadeInSeconds: Number.isFinite(next) && next >= 0 ? next : undefined } }));
+                        }}
+                      />
+                      <Field
+                        label="Overlay fade out (seconds)"
+                        value={selectedScene.overlay?.timing?.fadeOutSeconds ?? ''}
+                        type="number"
+                        step="0.1"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateOverlay(selectedScene.id, (overlay) => ({ ...overlay, timing: { ...(overlay.timing ?? {}), fadeOutSeconds: Number.isFinite(next) && next >= 0 ? next : undefined } }));
+                        }}
+                      />
+                    </>
+                  ) : null}
+                </div>
                 <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Narration</p>
                   <Field

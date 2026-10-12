@@ -54,6 +54,13 @@ function validateSceneShape(scene: unknown, index: number, issues: RenderIssue[]
 
   if ('overlay' in scene && scene.overlay !== undefined && !isPlainObject(scene.overlay)) {
     push(issues, 'scene.overlay.invalid', `${base}.overlay`, 'scene.overlay must be an object.');
+  } else if (isPlainObject(scene.overlay)) {
+    for (const field of ['style', 'timing'] as const) {
+      const value = scene.overlay[field];
+      if (value !== undefined && value !== null && !isPlainObject(value)) {
+        push(issues, `scene.overlay.${field}.invalid`, `${base}.overlay.${field}`, `scene.overlay.${field} must be an object.`);
+      }
+    }
   }
 
   if ('narration' in scene && scene.narration !== undefined) {
