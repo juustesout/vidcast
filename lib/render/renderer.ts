@@ -9,6 +9,7 @@ import { parseDurationSeconds, probeMedia, FFprobeError } from './ffprobe';
 import { buildSceneFadeFilters, createStillSceneSvg, sceneMotionToZoomPan } from './render-source';
 import { createSceneRenderFingerprint } from './render-fingerprint';
 import { getSceneRenderTimeoutMs } from './render-timeouts';
+import { buildSceneOverlayFilter } from './text-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 
 export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
@@ -136,33 +137,33 @@ async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, 
   return rasterizedPath;
 }
 
-function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string): string[] {
+function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, overlayFilter?: string): string[] {
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
   const zoomPan = sceneMotionToZoomPan(scene, frameCount);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
   const filterChain = [
     `zoompan=${zoomPan}:d=${frameCount}:s=${options.sceneWidth}x${options.sceneHeight}:fps=${options.sceneFps}`,
     ...fadeFilters,
+    ...(overlayFilter ? [overlayFilter] : []),
     'format=yuv420p'
   ].join(',');
 
   if (sourcePath === 'color=black') {
-    return [
+    const background = (scene.source.kind === 'blank' ? '#020617' : '#020617').replace('#', '0x');
+    const args = [
       '-y',
       '-f',
       'lavfi',
       '-i',
-      `color=c=${(scene.source.kind === 'blank' ? '#020617' : '#020617').replace('#', '0x')}:s=${options.sceneWidth}x${options.sceneHeight}:r=${options.sceneFps}`,
+      `color=c=${background}:s=${options.sceneWidth}x${options.sceneHeight}:r=${options.sceneFps}`,
       '-t',
-      String(scene.duration),
-      '-c:v',
-      'libx264',
-      '-pix_fmt',
-      'yuv420p',
-      '-movflags',
-      '+faststart',
-      options.outputPath
+      String(scene.duration)
     ];
+    if (overlayFilter) {
+      args.push('-vf', overlayFilter);
+    }
+    args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', options.outputPath);
+    return args;
   }
 
   return [
@@ -185,7 +186,7 @@ function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
   ];
 }
 
-function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, hasAudio: boolean): string[] {
+function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, hasAudio: boolean, overlayFilter?: string): string[] {
   const inputDuration = sourceDuration(scene);
   const extraDuration = Math.max(0, scene.duration - inputDuration);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
@@ -197,6 +198,7 @@ function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
     `crop=${options.sceneWidth}:${options.sceneHeight}`,
     ...fadeFilters,
     `fps=${options.sceneFps}`,
+    ...(overlayFilter ? [overlayFilter] : []),
     'format=yuv420p'
   ].join(',');
 
@@ -315,18 +317,28 @@ export class LocalFFmpegRenderer implements Renderer {
     }
 
     const startedAt = nowIso();
-    await fs.mkdir(options.tempDir, { recursive: true });
-    const sourcePath = await resolveSceneSourcePath(plan, scene, options);
-
     const sourceAssetIds = sceneSourceAssetIds(scene);
     const outputPath = options.outputPath;
     const renderFingerprint = createSceneRenderFingerprint(plan, scene);
 
-    const args = sourceIsVideo(scene)
-      ? await buildVideoPipeline(scene, options, sourcePath, this.runtime)
-      : buildStillArgs(scene, options, sourcePath);
+    // Everything from scratch-directory creation onward runs inside the
+    // try/finally so the per-render temp directory (source rasters, overlay
+    // text files) is removed on success and on every failure path.
+    await fs.mkdir(options.tempDir, { recursive: true });
 
     try {
+      const sourcePath = await resolveSceneSourcePath(plan, scene, options);
+      const overlayFilter = await buildSceneOverlayFilter(scene, {
+        width: options.sceneWidth,
+        height: options.sceneHeight,
+        duration: scene.duration,
+        tempDir: options.tempDir
+      });
+
+      const args = sourceIsVideo(scene)
+        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter)
+        : buildStillArgs(scene, options, sourcePath, overlayFilter);
+
       const command = this.runtime.ffmpegPath;
       await runProcess(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() });
       const validated = await validateOutputFile(outputPath, options.sceneWidth, options.sceneHeight, options.sceneFps, scene.duration, this.runtime);
@@ -361,8 +373,8 @@ export class LocalFFmpegRenderer implements Renderer {
   }
 }
 
-async function buildVideoPipeline(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, runtime: FFmpegRuntime): Promise<string[]> {
+async function buildVideoPipeline(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, runtime: FFmpegRuntime, overlayFilter?: string): Promise<string[]> {
   const probe = await probeMedia(sourcePath, runtime);
   const hasAudio = probe.streams.some((stream) => stream.codec_type === 'audio');
-  return buildVideoArgs(scene, options, sourcePath, hasAudio);
+  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter);
 }

@@ -86,11 +86,29 @@ export interface TransitionSpec {
   duration?: number;
 }
 
+export interface OverlayStyle {
+  // Optional render style overrides for a text overlay.
+  // All fields are additive; when omitted the renderer derives sensible
+  // defaults from the scene dimensions and overlay type.
+  fontSize?: number;
+  color?: string;
+  box?: boolean;
+  margin?: number;
+}
+
+export interface OverlayTiming {
+  // Scene-local timing for the overlay, in seconds.
+  fadeInSeconds?: number;
+  fadeOutSeconds?: number;
+}
+
 export interface OverlaySpec {
   type: OverlayType;
   text?: string;
   position?: OverlayPosition;
   data?: Record<string, unknown>;
+  style?: OverlayStyle;
+  timing?: OverlayTiming;
 }
 
 export interface RenderSpec {
