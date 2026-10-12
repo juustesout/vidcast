@@ -41,6 +41,7 @@ function makeClient(overrides: Partial<AuthoringApiClient> = {}): AuthoringApiCl
       materialized: [{ intentId: 'intent-1', sceneId: 'scene-1' }],
       skipped: []
     }),
+    approveSceneIntents: async () => ({ project: makeProject() as never, approved: ['intent-1'], skipped: [] }),
     manageMusic: async () => ({ action: 'clear', status: 'cleared' }),
     ...overrides
   };
@@ -64,6 +65,7 @@ describe('authoring MCP tool definitions', () => {
       'update_project',
       'plan_scene_intents',
       'materialize_scene_intents',
+      'approve_scene_intents',
       'manage_project_music'
     ]);
     expect(AUTHORING_TOOL_DEFINITIONS.every((entry) => entry.annotations.readOnlyHint === false)).toBe(true);
@@ -95,11 +97,13 @@ describe('authoring MCP tool service', () => {
     const updated = await service.updateProject({ projectId: 'project-1', project: { title: 'Updated' } });
     const planned = await service.planSceneIntents({ projectId: 'project-1' });
     const materialized = await service.materializeSceneIntents({ projectId: 'project-1' });
+    const approved = await service.approveSceneIntents({ projectId: 'project-1', intentIds: ['intent-1'] });
 
     expect(created.ok).toBe(true);
     expect(updated.ok).toBe(true);
     expect(planned.ok).toBe(true);
     expect(materialized.ok).toBe(true);
+    expect(approved.ok).toBe(true);
 
     if (created.ok) {
       expect(created.data).toEqual({ projectId: 'project-1', title: 'Music Test', valid: true });
@@ -109,6 +113,10 @@ describe('authoring MCP tool service', () => {
     }
     if (materialized.ok) {
       expect(materialized.data.materialized).toEqual([{ intentId: 'intent-1', sceneId: 'scene-1' }]);
+    }
+    if (approved.ok) {
+      expect(approved.data.approved).toEqual(['intent-1']);
+      expect(approved.data.skipped).toEqual([]);
     }
   });
 
@@ -216,16 +224,21 @@ describe('authoring HTTP client behavior', () => {
       if (text.endsWith('/scene-intents/plan')) {
         return new Response(JSON.stringify({ project: makeProject(), createdIntentIds: ['intent-1'] }), { status: 200 });
       }
+      if (text.endsWith('/scene-intents/approve')) {
+        return new Response(JSON.stringify({ project: makeProject(), approved: ['intent-1'], skipped: [] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ project: makeProject(), materialized: [{ intentId: 'intent-1', sceneId: 'scene-1' }], skipped: [] }), { status: 200 });
     });
     const client = new HttpAuthoringApiClient({ baseUrl: 'http://127.0.0.1:5555', fetchFn: fetchMock as unknown as typeof fetch });
     const service = createAuthoringToolService(client);
 
     await service.planSceneIntents({ projectId: 'project-1' });
+    await service.approveSceneIntents({ projectId: 'project-1', intentIds: ['intent-1'] });
     await service.materializeSceneIntents({ projectId: 'project-1', intentIds: ['intent-1'] });
 
     expect(posted).toEqual([
       'http://127.0.0.1:5555/api/projects/project-1/scene-intents/plan',
+      'http://127.0.0.1:5555/api/projects/project-1/scene-intents/approve',
       'http://127.0.0.1:5555/api/projects/project-1/scene-intents/materialize'
     ]);
   });

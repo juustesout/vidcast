@@ -138,4 +138,64 @@ describe('applyProjectUpdate', () => {
     const result = applyProjectUpdate(existing, incoming);
     expect(result.project.renderSettings.audio).toEqual({ narrationVolume: 0, musicVolume: 4, effectsVolume: 0.2 });
   });
+
+  it('returns a validation failure instead of throwing for non-array collections', () => {
+    const existing = baseProject();
+
+    for (const incoming of [{ scenes: {} }, { assets: 'x' }, { references: 3 }, { compositions: 'nope' }]) {
+      let result: ReturnType<typeof applyProjectUpdate> | undefined;
+      expect(() => {
+        result = applyProjectUpdate(existing, { ...existing, ...incoming });
+      }).not.toThrow();
+      expect(result?.validation.valid).toBe(false);
+    }
+  });
+
+  it('returns a validation failure for a non-array narration attempts object', () => {
+    const existing = baseProject();
+    const scene = existing.scenes[0];
+
+    const result = applyProjectUpdate(existing, {
+      ...existing,
+      scenes: [{ ...scene, narration: { text: 'scene text', attempts: {} } }]
+    });
+
+    expect(result.validation.valid).toBe(false);
+    expect(result.validation.errors.some((error) => error.code === 'scene.narration.attempts.invalid')).toBe(true);
+  });
+
+  it('does not crash on a scene with a render object that omits motion and transition', () => {
+    const existing = baseProject();
+    const scene = existing.scenes[0];
+
+    let result: ReturnType<typeof applyProjectUpdate> | undefined;
+    expect(() => {
+      result = applyProjectUpdate(existing, { ...existing, scenes: [{ ...scene, render: {} }] });
+    }).not.toThrow();
+    expect(result?.validation).toBeDefined();
+    expect(result?.project.scenes[0].render.motion.preset).toBeDefined();
+  });
+
+  it('flags a non-object overlay via validation rather than throwing', () => {
+    const existing = baseProject();
+    const scene = existing.scenes[0];
+
+    const result = applyProjectUpdate(existing, { ...existing, scenes: [{ ...scene, overlay: {} }] });
+
+    expect(result.validation.valid).toBe(false);
+    expect(result.validation.errors.some((error) => error.code === 'scene.overlay.invalid')).toBe(true);
+  });
+
+  it('applies a well-formed scene narration update', () => {
+    const existing = baseProject();
+    const scene = existing.scenes[0];
+
+    const result = applyProjectUpdate(existing, {
+      ...existing,
+      scenes: [{ ...scene, narration: { text: 'Updated production narration' } }]
+    });
+
+    expect(result.validation.valid).toBe(true);
+    expect(result.project.scenes[0].narration?.text).toBe('Updated production narration');
+  });
 });

@@ -237,7 +237,7 @@ function normalizeNarration(narration: string | NarrationSpec | undefined): Narr
   }
 
   const text = (narration.text ?? '').trim();
-  const attempts = (narration.attempts ?? []).map((attempt, index) => {
+  const attempts = (Array.isArray(narration.attempts) ? narration.attempts : []).map((attempt, index) => {
     const normalized: NarrationGenerationAttempt = {
       id: attempt.id ?? `narration_attempt_${index + 1}`,
       status: attempt.status ?? 'planned',
@@ -286,9 +286,9 @@ export function normalizeScene(scene: LegacyScene, project: Partial<Project>, in
     type: scene.type ?? 'image',
     narration: normalizeNarration(scene.narration as string | NarrationSpec | undefined),
     visual: normalizeLegacyVisual({ ...scene, id: sceneId }, project),
-    render: scene.render ?? {
-      motion: normalizeMotion(scene.motion),
-      transition: normalizeTransition(scene.transition)
+    render: {
+      motion: normalizeMotion(scene.render?.motion ?? scene.motion),
+      transition: normalizeTransition(scene.render?.transition ?? scene.transition)
     },
     overlay: scene.overlay ?? (scene.textOverlay ? { type: 'text', text: scene.textOverlay, position: 'bottom' } : { type: 'none' }),
     referenceIds: scene.referenceIds ?? [],
@@ -326,7 +326,7 @@ function normalizeProjectMusic(music: ProjectMusicSpec | null | undefined): Proj
     return undefined;
   }
 
-  const attempts: ProjectMusicGenerationAttempt[] = (music.attempts ?? []).map((attempt, index) => ({
+  const attempts: ProjectMusicGenerationAttempt[] = (Array.isArray(music.attempts) ? music.attempts : []).map((attempt, index) => ({
     id: attempt.id ?? `music_attempt_${index + 1}`,
     status: normalizeMusicStatus(attempt.status),
     provider: attempt.provider ?? 'unknown',
@@ -371,13 +371,13 @@ export function normalizeProject(project: Project): Project {
     ...project,
     narration: {
       text: project.narration?.text ?? '',
-      segments: project.narration?.segments ?? []
+      segments: Array.isArray(project.narration?.segments) ? project.narration.segments : []
     },
-    scenes: (project.scenes ?? []).map((scene, index) => normalizeScene(scene as LegacyScene, project, index)),
-    assets: (project.assets ?? []).map(normalizeAsset),
-    references: (project.references ?? []).map(normalizeReference),
+    scenes: (Array.isArray(project.scenes) ? project.scenes : []).map((scene, index) => normalizeScene(scene as LegacyScene, project, index)),
+    assets: (Array.isArray(project.assets) ? project.assets : []).map(normalizeAsset),
+    references: (Array.isArray(project.references) ? project.references : []).map(normalizeReference),
     music: normalizeProjectMusic(project.music),
-    compositions: project.compositions ?? [],
+    compositions: Array.isArray(project.compositions) ? project.compositions : [],
     renderSettings: {
       aspectRatio: project.renderSettings?.aspectRatio ?? project.aspectRatio ?? DEFAULT_RENDER_SETTINGS.aspectRatio,
       fps: project.renderSettings?.fps ?? project.fps ?? DEFAULT_RENDER_SETTINGS.fps,

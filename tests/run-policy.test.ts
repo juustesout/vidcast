@@ -57,6 +57,47 @@ function createProjectWithRunningVideoJob(provider: 'openai' | 'local' = 'openai
   };
 }
 
+function createNarrationOnlyProject(): Project {
+  const now = new Date().toISOString();
+  return {
+    id: 'project-narration',
+    title: 'Narration Only',
+    description: '',
+    durationTarget: 15,
+    aspectRatio: '16:9',
+    fps: 30,
+    createdAt: now,
+    updatedAt: now,
+    narration: { text: '', segments: [] },
+    renderSettings: {
+      aspectRatio: '16:9',
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      background: { type: 'color', value: '#000000' },
+      audio: { narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 },
+      subtitlesEnabled: true
+    },
+    assets: [],
+    references: [],
+    compositions: [],
+    scenes: [
+      {
+        id: 'scene-1',
+        order: 1,
+        duration: 5,
+        type: 'blank',
+        narration: { text: 'Single spoken line' },
+        visual: { kind: 'blank' },
+        render: { motion: { preset: 'none' }, transition: { type: 'none' } },
+        overlay: { type: 'none' },
+        referenceIds: [],
+        notes: ''
+      }
+    ]
+  };
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
@@ -71,16 +112,16 @@ describe('run policy', () => {
     ).toThrow(/disabled/i);
   });
 
-  it('rejects real provider overrides in mock mode', () => {
-    expect(() =>
-      resolveRunPolicy(
-        {
-          mode: 'mock',
-          providers: { image: 'openai' }
-        },
-        { allowRealProviders: true, defaultMode: 'mock' }
-      )
-    ).toThrow(/mock mode/i);
+  it('keeps real provider overrides in the snapshot and defers enforcement to preflight', () => {
+    const policy = resolveRunPolicy(
+      {
+        mode: 'mock',
+        providers: { image: 'openai' }
+      },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+
+    expect(policy.providers.image).toBe('openai');
   });
 
   it('blocks mock mode when an active poll would hit a real provider job', () => {
@@ -102,6 +143,40 @@ describe('run policy', () => {
 
     vi.stubEnv('OPENAI_API_KEY', '');
     expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/OPENAI_API_KEY/);
+  });
+
+  it('only enforces providers for modalities the run actually needs', () => {
+    const project = createNarrationOnlyProject();
+    vi.stubEnv('ELEVENLABS_API_KEY', 'xi-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+
+    const policy = resolveRunPolicy(
+      { mode: 'real', providers: { image: 'fake', video: 'local', narration: 'elevenlabs' } },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    // image/video are unused by this project, so their non-real providers are fine.
+    expect(() => assertRunPolicyPreflight(project, policy)).not.toThrow();
+  });
+
+  it('rejects a non-real provider for a modality the run needs in real mode', () => {
+    const project = createNarrationOnlyProject();
+    const policy = resolveRunPolicy(
+      { mode: 'real', providers: { narration: 'fake' } },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/narration/i);
+  });
+
+  it('rejects a real provider for a modality the run needs in mock mode', () => {
+    const project = createNarrationOnlyProject();
+    const policy = resolveRunPolicy(
+      { mode: 'mock', providers: { narration: 'elevenlabs' } },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/narration/i);
   });
 });
 
@@ -183,14 +258,17 @@ describe('manual generation provider policy', () => {
     });
   });
 
-  it('includes music when resolving the full run policy', () => {
+  it('includes music in the snapshot without enforcing it at resolve time', () => {
     const policy = resolveRunPolicy(
       { mode: 'mock' },
       { allowRealProviders: true, defaultMode: 'mock' }
     );
     expect(policy.providers.music).toBe('fake');
-    expect(() =>
-      resolveRunPolicy({ mode: 'mock', providers: { music: 'elevenlabs' } }, { allowRealProviders: true, defaultMode: 'mock' })
-    ).toThrow(/mock mode/i);
+
+    const override = resolveRunPolicy(
+      { mode: 'mock', providers: { music: 'elevenlabs' } },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+    expect(override.providers.music).toBe('elevenlabs');
   });
 });

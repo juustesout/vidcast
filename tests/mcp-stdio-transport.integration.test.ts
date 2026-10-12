@@ -324,6 +324,19 @@ beforeAll(async () => {
       return;
     }
 
+    if (method === 'POST' && url === `/api/projects/${mockRun.projectId}/scene-intents/approve`) {
+      const now = new Date().toISOString();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          project: { id: mockRun.projectId, title: 'STDIO MCP Project', updatedAt: now },
+          approved: ['intent-stdio-1'],
+          skipped: []
+        })
+      );
+      return;
+    }
+
     if (method === 'POST' && url === `/api/projects/${mockRun.projectId}/music`) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ action: 'generate', status: 'generated', assetId: 'asset-stdio-1', provider: 'fake', model: 'mock' }));
@@ -376,6 +389,7 @@ describe('stdio MCP transport integration', () => {
     expect(toolNames).toContain('create_project');
     expect(toolNames).toContain('update_project');
     expect(toolNames).toContain('plan_scene_intents');
+    expect(toolNames).toContain('approve_scene_intents');
     expect(toolNames).toContain('materialize_scene_intents');
     expect(toolNames).toContain('manage_project_music');
     expect(toolNames).toContain('run_production');
@@ -396,6 +410,15 @@ describe('stdio MCP transport integration', () => {
       arguments: { projectId: mockRun.projectId }
     });
     expect(planned.isError).toBeFalsy();
+
+    const approved = await client.callTool({
+      name: 'approve_scene_intents',
+      arguments: { projectId: mockRun.projectId, intentIds: ['intent-stdio-1'] }
+    });
+    expect(approved.isError).toBeFalsy();
+    const approvedContent = approved.structuredContent as { ok: boolean; data?: { approved?: string[] } };
+    expect(approvedContent.ok).toBe(true);
+    expect(approvedContent.data?.approved).toEqual(['intent-stdio-1']);
 
     const materialized = await client.callTool({
       name: 'materialize_scene_intents',

@@ -22,7 +22,7 @@ export function validateProject(project: Project): RenderValidationResult {
   const warnings: RenderIssue[] = [];
   const explainer = project.explainer as ExplainerSpec | undefined;
 
-  if (!project.title.trim()) {
+  if (typeof project.title !== 'string' || !project.title.trim()) {
     pushIssue(errors, 'error', 'project.title.required', 'title', 'Project title is required.');
   }
 
@@ -174,11 +174,11 @@ export function validateProject(project: Project): RenderValidationResult {
       pushIssue(errors, 'error', 'scene.type.invalid', `scenes.${scene.id}.type`, 'Scene type is not supported.');
     }
 
-    if (!MOTION_PRESETS.includes(scene.render.motion.preset)) {
+    if (!MOTION_PRESETS.includes(scene.render?.motion?.preset as (typeof MOTION_PRESETS)[number])) {
       pushIssue(errors, 'error', 'scene.motion.invalid', `scenes.${scene.id}.render.motion.preset`, 'Motion preset is not supported.');
     }
 
-    if (!TRANSITION_PRESETS.includes(scene.render.transition.type)) {
+    if (!TRANSITION_PRESETS.includes(scene.render?.transition?.type as (typeof TRANSITION_PRESETS)[number])) {
       pushIssue(errors, 'error', 'scene.transition.invalid', `scenes.${scene.id}.render.transition.type`, 'Transition preset is not supported.');
     }
 

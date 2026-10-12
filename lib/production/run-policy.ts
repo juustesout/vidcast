@@ -202,36 +202,11 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
     music: musicProvider ?? defaults.music
   };
 
-  if (requestedMode === 'mock') {
-    if (providers.image !== 'fake' || providers.video !== 'local' || providers.narration !== 'fake' || providers.music !== 'fake') {
-      throw new RunPolicyError(
-        'Mock mode only allows fake/local providers.',
-        'PROVIDER_NOT_ALLOWED',
-        403,
-        { mode: requestedMode, providers }
-      );
-    }
-  }
-
-  if (requestedMode === 'real') {
-    if (!serverConfig.allowRealProviders) {
-      throw new RunPolicyError('Real provider mode is disabled on this server.', 'POLICY_DENIED', 403);
-    }
-
-    if (
-      !isRealProvider(providers.image) ||
-      !isRealProvider(providers.video) ||
-      !isRealProvider(providers.narration) ||
-      !isRealProvider(providers.music)
-    ) {
-      throw new RunPolicyError(
-        'Real mode requires explicitly configured real providers.',
-        'PROVIDER_NOT_ALLOWED',
-        403,
-        { mode: requestedMode, providers }
-      );
-    }
-  }
+  // Provider-vs-mode enforcement for run modalities is intentionally deferred to
+  // `assertRunPolicyPreflight`, which knows the project and therefore which
+  // modalities the run actually needs. A provider for an unused modality (for
+  // example `video` on an image-only project) must not force a dummy choice.
+  // `resolveManualGenerationProvider` enforces its single modality separately.
 
   return {
     mode: requestedMode,
@@ -270,16 +245,68 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
   const actionable = plan.actions.filter(isPotentiallyExecutable);
   const requiredActionTypes = Array.from(new Set(actionable.map((action) => action.type)));
 
-  if (policy.mode === 'real') {
-    const needsVisualGeneration = requiredActionTypes.includes('image_generate') || requiredActionTypes.includes('video_submit') || requiredActionTypes.includes('video_poll');
-    const needsNarrationGeneration = requiredActionTypes.includes('narration_generate');
+  const needsImageGeneration = requiredActionTypes.includes('image_generate');
+  const needsVideoGeneration = requiredActionTypes.includes('video_submit') || requiredActionTypes.includes('video_poll');
+  const needsNarrationGeneration = requiredActionTypes.includes('narration_generate');
 
-    if (needsVisualGeneration && (policy.providers.image === 'openai' || policy.providers.video === 'openai')) {
+  // Real/mock enforcement applies only to modalities the run actually executes.
+  // Music is never a run modality (it is managed separately through
+  // `manage_project_music`), so `providers.music` is never checked here.
+  if (policy.mode === 'real') {
+    if (needsImageGeneration && !isRealProvider(policy.providers.image)) {
+      throw new RunPolicyError('Real mode requires a real image provider for image generation.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'image',
+        provider: policy.providers.image
+      });
+    }
+
+    if (needsVideoGeneration && !isRealProvider(policy.providers.video)) {
+      throw new RunPolicyError('Real mode requires a real video provider for video generation.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'video',
+        provider: policy.providers.video
+      });
+    }
+
+    if (needsNarrationGeneration && !isRealProvider(policy.providers.narration)) {
+      throw new RunPolicyError('Real mode requires a real narration provider for narration generation.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'narration',
+        provider: policy.providers.narration
+      });
+    }
+
+    if (needsImageGeneration && policy.providers.image === 'openai') {
+      requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
+    }
+
+    if (needsVideoGeneration && policy.providers.video === 'openai') {
       requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
     }
 
     if (needsNarrationGeneration && policy.providers.narration === 'elevenlabs') {
       requireEnvVar('ELEVENLABS_API_KEY', 'Real narration generation requires ELEVENLABS_API_KEY.');
+    }
+  }
+
+  if (policy.mode === 'mock') {
+    if (needsImageGeneration && policy.providers.image !== 'fake') {
+      throw new RunPolicyError('Mock mode only allows the fake image provider for image generation.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'image',
+        provider: policy.providers.image
+      });
+    }
+
+    if (needsVideoGeneration && policy.providers.video !== 'local') {
+      throw new RunPolicyError('Mock mode only allows the local video provider for video generation.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'video',
+        provider: policy.providers.video
+      });
+    }
+
+    if (needsNarrationGeneration && policy.providers.narration !== 'fake') {
+      throw new RunPolicyError('Mock mode only allows the fake narration provider for narration generation.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'narration',
+        provider: policy.providers.narration
+      });
     }
   }
 
@@ -459,6 +486,23 @@ export function resolveManualGenerationProvider(
 
   const policy = resolveRunPolicy({ mode, providers }, effectiveServerConfig);
   const provider = policy.providers[kind];
+
+  // Single-modality enforcement. Run-level enforcement lives in
+  // `assertRunPolicyPreflight`, which has the project/plan context needed to know
+  // which modalities a run actually executes.
+  if (policy.mode === 'mock' && isRealProvider(provider)) {
+    throw new RunPolicyError('Mock mode only allows fake/local providers.', 'PROVIDER_NOT_ALLOWED', 403, {
+      kind,
+      provider
+    });
+  }
+
+  if (policy.mode === 'real' && !isRealProvider(provider)) {
+    throw new RunPolicyError('Real mode requires an explicitly configured real provider.', 'PROVIDER_NOT_ALLOWED', 403, {
+      kind,
+      provider
+    });
+  }
 
   if (policy.mode === 'real') {
     assertRealProviderCredentials(kind, provider);

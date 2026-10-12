@@ -27,6 +27,12 @@ interface MaterializeSceneIntentsPayload {
   skipped?: Array<{ intentId: string; sceneId: string }>;
 }
 
+interface ApproveSceneIntentsPayload {
+  project?: Project;
+  approved?: string[];
+  skipped?: string[];
+}
+
 interface MusicPayload {
   action?: string;
   status?: string;
@@ -55,6 +61,12 @@ export interface MaterializeSceneIntentsResult {
   skipped: Array<{ intentId: string; sceneId: string }>;
 }
 
+export interface ApproveSceneIntentsResult {
+  project: Project;
+  approved: string[];
+  skipped: string[];
+}
+
 export interface ManageMusicResult {
   action: string;
   status: string;
@@ -69,6 +81,7 @@ export interface AuthoringApiClient {
   updateProject(projectId: string, patch: ProjectPatch): Promise<UpdateProjectResult>;
   planSceneIntents(projectId: string, patch?: ProjectPatch): Promise<PlanSceneIntentsResult>;
   materializeSceneIntents(projectId: string, patch?: ProjectPatch, intentIds?: string[]): Promise<MaterializeSceneIntentsResult>;
+  approveSceneIntents(projectId: string, intentIds?: string[]): Promise<ApproveSceneIntentsResult>;
   manageMusic(projectId: string, input: ManageProjectMusicInput): Promise<ManageMusicResult>;
 }
 
@@ -300,6 +313,20 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
       throw new AuthoringMcpToolError('API_ERROR', 'Invalid scene intent materialization response payload.', { endpoint: path, projectId });
     }
     return { project: payload.project, materialized: payload.materialized, skipped: payload.skipped };
+  }
+
+  async approveSceneIntents(projectId: string, intentIds?: string[]): Promise<ApproveSceneIntentsResult> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/scene-intents/approve`;
+    const body: Record<string, unknown> = {};
+    if (intentIds && intentIds.length > 0) {
+      body.intentIds = intentIds;
+    }
+
+    const payload = (await this.request(path, 'POST', body)) as ApproveSceneIntentsPayload;
+    if (!payload.project || !Array.isArray(payload.approved) || !Array.isArray(payload.skipped)) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid scene intent approval response payload.', { endpoint: path, projectId });
+    }
+    return { project: payload.project, approved: payload.approved, skipped: payload.skipped };
   }
 
   async manageMusic(projectId: string, input: ManageProjectMusicInput): Promise<ManageMusicResult> {

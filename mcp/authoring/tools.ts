@@ -5,6 +5,7 @@ import type { AuthoringApiClient } from './api-client';
 import { HttpAuthoringApiClient } from './api-client';
 import { AuthoringMcpToolError, toFailure, toSuccess } from './errors';
 import type {
+  ApproveSceneIntentsResponse,
   AuthoringMcpResult,
   CreateProjectResponse,
   ManageProjectMusicResponse,
@@ -40,6 +41,11 @@ export const materializeSceneIntentsInputSchema = z.object({
   intentIds: z.array(z.string().trim().min(1).max(200)).max(500).optional()
 });
 
+export const approveSceneIntentsInputSchema = z.object({
+  projectId: projectIdSchema,
+  intentIds: z.array(z.string().trim().min(1).max(200)).max(500).optional()
+});
+
 export const manageProjectMusicInputSchema = z.object({
   projectId: projectIdSchema,
   action: z.enum(['generate', 'regenerate', 'select', 'clear']),
@@ -69,7 +75,7 @@ export const AUTHORING_TOOL_DEFINITIONS = [
   {
     name: 'update_project',
     description:
-      'Update a project (title, description, narration, scenes, story beats, renderSettings, music reference) via PUT /api/projects/{id}. The server validates the merged project; invalid input returns code VALIDATION_FAILED with details.errors and details.warnings. A 403 means the caller does not own the project; 404 means the project does not exist.',
+      'Update a project (title, description, narration, scenes, story beats, renderSettings, music reference) via PUT /api/projects/{id}. The server validates the merged project; invalid input returns code VALIDATION_FAILED with details.errors and details.warnings. Note that project.scenes replaces the entire scenes array (it is not merged field-by-field), and production narration is set per scene in scene.narration.text. A 403 means the caller does not own the project; 404 means the project does not exist.',
     inputSchema: updateProjectInputSchema,
     annotations: {
       title: 'Update Project',
@@ -100,6 +106,17 @@ export const AUTHORING_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: 'approve_scene_intents',
+    description:
+      'Approve drafted scene intents so they can be materialized via POST /api/projects/{id}/scene-intents/approve. Optionally pass explicit intentIds; when omitted, every not-yet-approved intent is approved. Already-approved intents are reported under skipped. An unknown intent id returns NOT_FOUND. This only changes intent status; it never creates scenes. Approval is required before materialize_scene_intents can turn drafts into scenes.',
+    inputSchema: approveSceneIntentsInputSchema,
+    annotations: {
+      title: 'Approve Scene Intents',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
+  },
+  {
     name: 'manage_project_music',
     description:
       'Manage project background music via POST /api/projects/{id}/music. action=select requires assetId; action=clear drops the reference; action=generate/regenerate produces a new track (regenerate overwrites the selection, generate refuses with CONFLICT if one already exists). MUSIC GENERATION IS AN EXPLICIT PAID ACTION when the server runs in real mode; it is executed only on this call and is never retried automatically. Missing credentials return PROVIDER_NOT_CONFIGURED; provider failures return PROVIDER_ERROR; quota returns RATE_LIMITED. In local mock mode no paid provider is called.',
@@ -111,12 +128,12 @@ export const AUTHORING_TOOL_DEFINITIONS = [
     }
   }
 ] as const;
-
 export interface AuthoringToolService {
   createProject(args: unknown): Promise<AuthoringMcpResult<CreateProjectResponse>>;
   updateProject(args: unknown): Promise<AuthoringMcpResult<UpdateProjectResponse>>;
   planSceneIntents(args: unknown): Promise<AuthoringMcpResult<PlanSceneIntentsResponse>>;
   materializeSceneIntents(args: unknown): Promise<AuthoringMcpResult<MaterializeSceneIntentsResponse>>;
+  approveSceneIntents(args: unknown): Promise<AuthoringMcpResult<ApproveSceneIntentsResponse>>;
   manageProjectMusic(args: unknown): Promise<AuthoringMcpResult<ManageProjectMusicResponse>>;
 }
 
@@ -164,6 +181,21 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
           projectId: result.project.id,
           valid: true as const,
           materialized: result.materialized,
+          skipped: result.skipped
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async approveSceneIntents(args: unknown) {
+      try {
+        const parsed = approveSceneIntentsInputSchema.parse(args ?? {});
+        const result = await apiClient.approveSceneIntents(parsed.projectId, parsed.intentIds);
+        return toSuccess({
+          projectId: result.project.id,
+          valid: true as const,
+          approved: result.approved,
           skipped: result.skipped
         });
       } catch (error) {
@@ -292,6 +324,16 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       description: AUTHORING_TOOL_DEFINITIONS[4].description,
       inputSchema: AUTHORING_TOOL_DEFINITIONS[4].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[4].annotations
+    },
+    async (args) => asToolResponse(await service.approveSceneIntents(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[5].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[5].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[5].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[5].annotations
     },
     async (args) => asToolResponse(await service.manageProjectMusic(args))
   );

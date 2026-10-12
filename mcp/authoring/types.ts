@@ -62,6 +62,13 @@ export interface MaterializeSceneIntentsResponse {
   skipped: Array<{ intentId: string; sceneId: string }>;
 }
 
+export interface ApproveSceneIntentsResponse {
+  projectId: string;
+  valid: true;
+  approved: string[];
+  skipped: string[];
+}
+
 export type ProjectMusicAction = 'generate' | 'regenerate' | 'select' | 'clear';
 
 export interface ManageProjectMusicInput {

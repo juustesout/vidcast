@@ -1,4 +1,5 @@
 import { normalizeProject } from '@/lib/projects/normalize-project';
+import { collectProjectPatchShapeIssues } from '@/lib/projects/project-patch-shape';
 import type { Project, RenderValidationResult } from '@/lib/types/render';
 import { validateProject } from '@/lib/validation/project-validation';
 
@@ -34,6 +35,21 @@ export function applyProjectUpdate(existingProject: Project, incomingPayload: un
   const incoming = asRecord(incomingPayload);
   if (!incoming) {
     throw new Error('Invalid project payload.');
+  }
+
+  // Reject structurally malformed patches before normalization so a bad shape
+  // (non-array `scenes`, non-object `scene.render`, non-array `attempts`, ...)
+  // becomes an ordinary validation failure instead of an uncaught TypeError/500.
+  const shapeIssues = collectProjectPatchShapeIssues(incoming);
+  if (shapeIssues.length > 0) {
+    return {
+      project: existingProject,
+      validation: {
+        valid: false,
+        errors: shapeIssues,
+        warnings: []
+      }
+    };
   }
 
   const candidate = normalizeProject({

@@ -21,7 +21,8 @@ createReadOnlyMcpServer()
                                  // get_validation_report, get_production_plan,
                                  // get_project_compositions
   -> registerAuthoringTools()    // create_project, update_project,
-                                 // plan_scene_intents, materialize_scene_intents,
+                                 // plan_scene_intents, approve_scene_intents,
+                                 // materialize_scene_intents,
                                  // manage_project_music
   -> registerProductionTools()   // run_production, get_run_status, get_run_log
 ```
@@ -76,6 +77,7 @@ Authoring (P16):
 | `create_project` | `POST /api/projects` | yes |
 | `update_project` | `PUT /api/projects/{id}` | yes |
 | `plan_scene_intents` | `POST /api/projects/{id}/scene-intents/plan` | yes |
+| `approve_scene_intents` | `POST /api/projects/{id}/scene-intents/approve` | yes |
 | `materialize_scene_intents` | `POST /api/projects/{id}/scene-intents/materialize` | yes |
 | `manage_project_music` | `POST /api/projects/{id}/music` | yes (generate/regenerate may be paid) |
 
@@ -94,26 +96,29 @@ A typical author-and-produce flow, all through MCP:
                              } }
 
 3. plan_scene_intents      { "projectId": "<id>" }
-   -> { createdIntentIds: [ ... ] }
+   -> { createdIntentIds: [ ... ] }        // new intents start as "draft"
 
-4. materialize_scene_intents { "projectId": "<id>" }
+4. approve_scene_intents   { "projectId": "<id>" }
+   -> { approved: [ ... ], skipped: [ ... ] }   // required before materialize
+
+5. materialize_scene_intents { "projectId": "<id>" }
    -> { materialized: [ { intentId, sceneId } ], skipped: [] }
 
-5. get_validation_report   { "projectId": "<id>" }        // inspect blockers
+6. get_validation_report   { "projectId": "<id>" }        // inspect blockers
 
-6. manage_project_music    { "projectId": "<id>", "action": "generate",
+7. manage_project_music    { "projectId": "<id>", "action": "generate",
                              "prompt": "calm ambient", "mode": "mock" }
 
-7. run_production          { "projectId": "<id>", "mode": "mock" }
+8. run_production          { "projectId": "<id>", "mode": "mock" }
    -> { run: { runId, status } }
 
-8. get_run_status          { "runId": "<runId>" }
-9. get_run_log             { "runId": "<runId>", "cursor": 0 }
+9. get_run_status          { "runId": "<runId>" }
+10. get_run_log            { "runId": "<runId>", "cursor": 0 }
 
-10. get_project_compositions { "projectId": "<id>" }
+11. get_project_compositions { "projectId": "<id>" }
     -> { available: true, latest: { compositionId, downloadPath } }
 
-11. GET <downloadPath> with the same bearer token to download the MP4 bytes.
+12. GET <downloadPath> with the same bearer token to download the MP4 bytes.
 ```
 
 ## Tool contracts
@@ -128,7 +133,8 @@ A typical author-and-produce flow, all through MCP:
 ### `update_project`
 
 - Arguments: `{ projectId, project }` where `project` is a partial project patch (title, description, narration, scenes, `explainer.story.beats`, `renderSettings`, music reference).
-- The server merges the patch and validates the merged project.
+- The server merges the patch and validates the merged project. **`project.scenes` is replaced wholesale, not merged** — when sending `scenes`, include every field you want to keep for each scene.
+- Production narration is authored per scene in `scene.narration.text`; there is no project-level narration fallback.
 - Returns: `{ projectId, valid: true }`.
 - Errors: `INVALID_ARGUMENT`, `VALIDATION_FAILED` (with `details.errors` and `details.warnings`), `NOT_FOUND`, `FORBIDDEN`, `UNAUTHENTICATED`.
 
@@ -139,9 +145,18 @@ A typical author-and-produce flow, all through MCP:
 - Returns: `{ projectId, valid: true, createdIntentIds }`.
 - Errors: `INVALID_ARGUMENT`, `VALIDATION_FAILED`, `NOT_FOUND`, `FORBIDDEN`, `UNAUTHENTICATED`.
 
+### `approve_scene_intents`
+
+- Arguments: `{ projectId, intentIds? }`. Omit `intentIds` to approve every intent; pass a subset to approve only those.
+- Moves intents from `draft` to `approved`. Approval is **required** before `materialize_scene_intents` will create scenes; drafts are never auto-approved.
+- Already-approved ids are reported under `skipped` (idempotent). An unknown id returns `NOT_FOUND`. It never creates scenes.
+- Returns: `{ projectId, valid: true, approved: [ ... ], skipped: [ ... ] }`.
+- Errors: `INVALID_ARGUMENT`, `VALIDATION_FAILED`, `NOT_FOUND` (unknown intent), `FORBIDDEN`, `UNAUTHENTICATED`.
+
 ### `materialize_scene_intents`
 
 - Arguments: `{ projectId, project?, intentIds? }`.
+- Only **approved** intents materialize. Requesting a draft intent explicitly raises an error.
 - Idempotent: already-materialized intents are reported under `skipped`.
 - Returns: `{ projectId, valid: true, materialized: [{ intentId, sceneId }], skipped: [...] }`.
 - Errors: `INVALID_ARGUMENT`, `VALIDATION_FAILED`, `NOT_FOUND` (unknown intent), `FORBIDDEN`, `UNAUTHENTICATED`.
@@ -204,5 +219,5 @@ The MCP surface covers authoring + production + composition metadata. These rema
 ## Known environment blockers
 
 - **No FFmpeg/ffprobe**: this environment has no `ffmpeg`/`ffprobe` on `PATH`, so `scene_render`/`final_compose` fail with `FFMPEG_UNAVAILABLE` (HTTP 503). The two pre-existing render tests (`tests/fake-image-provider-render.test.ts`, `tests/local-ffmpeg-renderer.test.ts`) fail for the same reason.
-- **Real-mode credentials**: real provider runs need `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true`, `OPENAI_API_KEY`, and `ELEVENLABS_API_KEY`, plus a correctly configured `EXPLAINER_API_TOKEN`.
+- **Real-mode credentials**: real provider runs need `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true`, plus credentials only for the modalities the run actually executes (`OPENAI_API_KEY` for image/video, `ELEVENLABS_API_KEY` for narration), plus a correctly configured `EXPLAINER_API_TOKEN`.
 - **Base URL/port**: remember `next dev` is on port `3000`, while the MCP default is `5555`.
