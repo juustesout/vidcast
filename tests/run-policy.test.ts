@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertRunPolicyPreflight, resolveManualGenerationProvider, resolveRunPolicy, RunPolicyError } from '@/lib/production/run-policy';
 import type { Project } from '@/lib/types/render';
 
-function createProjectWithRunningVideoJob(provider: 'openai' | 'local' = 'openai'): Project {
+function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' = 'openai'): Project {
   const now = new Date().toISOString();
   return {
     id: 'project-policy',
@@ -280,9 +280,80 @@ describe('manual generation provider policy', () => {
   });
 });
 
+describe('FAL video provider policy', () => {
+  const mockServer = { allowRealProviders: false, defaultMode: 'mock' as const };
+  const realServer = { allowRealProviders: true, defaultMode: 'real' as const };
+
+  it('accepts fal as a real run video provider when FAL_KEY is present', () => {
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    const project = createProjectWithRunningVideoJob('fal');
+    const policy = resolveRunPolicy(
+      { mode: 'real', providers: { video: 'fal' } },
+      realServer
+    );
+
+    expect(policy.providers.video).toBe('fal');
+    expect(() => assertRunPolicyPreflight(project, policy)).not.toThrow();
+  });
+
+  it('rejects fal for a real video run without FAL_KEY', () => {
+    vi.stubEnv('FAL_KEY', '');
+    const project = createProjectWithRunningVideoJob('openai');
+    const policy = resolveRunPolicy(
+      { mode: 'real', providers: { video: 'fal' } },
+      realServer
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/FAL_KEY/);
+  });
+
+  it('rejects fal for a video run in mock mode', () => {
+    const project = createProjectWithRunningVideoJob('local');
+    const policy = resolveRunPolicy(
+      { mode: 'mock', providers: { video: 'fal' } },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/mock mode only allows the local video provider/i);
+  });
+
+  it('resolves the fal provider for manual calls only in real mode', () => {
+    expect(() => resolveManualGenerationProvider('video', 'fal', { serverConfig: mockServer })).toThrow(/mock mode/i);
+
+    vi.stubEnv('FAL_KEY', '');
+    expect(() => resolveManualGenerationProvider('video', 'fal', { serverConfig: realServer })).toThrow(/FAL_KEY/);
+
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    expect(resolveManualGenerationProvider('video', 'fal', { serverConfig: realServer })).toEqual({
+      mode: 'real',
+      provider: 'fal'
+    });
+  });
+
+  it('matches an active fal poll job against the locked video provider', () => {
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    const project = createProjectWithRunningVideoJob('fal');
+
+    const matching = resolveRunPolicy({ mode: 'real', providers: { video: 'fal' } }, realServer);
+    expect(() => assertRunPolicyPreflight(project, matching)).not.toThrow();
+
+    const mismatched = resolveRunPolicy({ mode: 'real', providers: { video: 'openai' } }, realServer);
+    expect(() => assertRunPolicyPreflight(project, mismatched)).toThrow(/does not match locked run provider policy/i);
+  });
+
+  it('refuses to poll an active fal job from mock mode', () => {
+    const project = createProjectWithRunningVideoJob('fal');
+    const policy = resolveRunPolicy(
+      { mode: 'mock', providers: { video: 'local' } },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/does not match locked run provider policy/i);
+  });
+});
+
 describe('run music opt-in policy', () => {
   const server = { allowRealProviders: false, defaultMode: 'mock' as const };
-
   it('leaves the music plan undefined when omitted', () => {
     expect(resolveRunPolicy({ mode: 'mock' }, server).music).toBeUndefined();
   });

@@ -1,0 +1,308 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { FalVideoGenerationProvider, encodeFalJobId } from '@/lib/ai/video-generation/fal-provider';
+import {
+  refreshVideoGenerationAttempt,
+  SceneVideoGenerationError,
+  submitSceneVideoGeneration
+} from '@/lib/generation/video-generation-service';
+import type { MediaStore } from '@/lib/storage/media-store';
+import type { ProjectStore } from '@/lib/storage/project-store';
+import type { Project } from '@/lib/types/render';
+
+const BASE_URL = 'https://queue.test';
+const ENDPOINT = 'minimax/h3-max-turbo/text-to-video';
+const VIDEO_BYTES = Buffer.from('000000186674797069736F6D0000020069736F6D69736F32', 'hex');
+
+function createProject(): Project {
+  const now = new Date().toISOString();
+  return {
+    id: 'project-fal-service',
+    title: 'FAL service test',
+    description: 'desc',
+    durationTarget: 20,
+    aspectRatio: '16:9',
+    fps: 30,
+    createdAt: now,
+    updatedAt: now,
+    narration: { text: '', segments: [] },
+    renderSettings: {
+      aspectRatio: '16:9',
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      background: { type: 'color', value: '#000' },
+      audio: { narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 },
+      subtitlesEnabled: true
+    },
+    assets: [],
+    references: [],
+    scenes: [
+      {
+        id: 'scene-fal-1',
+        order: 1,
+        duration: 5,
+        type: 'video',
+        narration: { text: '' },
+        visual: {
+          kind: 'generated_video',
+          generation: {
+            id: 'gen-fal-current',
+            kind: 'video',
+            status: 'generated',
+            provider: 'fal',
+            model: ENDPOINT,
+            prompt: 'a lighthouse at dusk',
+            referenceIds: [],
+            aspectRatio: '16:9',
+            duration: 5,
+            createdAt: now,
+            completedAt: now
+          },
+          attempts: []
+        },
+        render: { motion: { preset: 'none' }, transition: { type: 'none' } },
+        overlay: { type: 'none' },
+        referenceIds: [],
+        notes: ''
+      }
+    ]
+  };
+}
+
+interface Harness {
+  store: Pick<ProjectStore, 'getProject' | 'mutateProject' | 'updateProject'>;
+  media: Pick<MediaStore, 'saveGeneratedVideo' | 'exists' | 'readRelativeFile'>;
+  registry: { getProvider(id: string): unknown };
+  state: { project: Project };
+  submitCalls: () => number;
+  savedAssets: () => number;
+}
+
+function createHarness(project: Project, opts: { failSubmit?: boolean; failStatus?: boolean } = {}): Harness {
+  const state = { project: structuredClone(project) as Project };
+  let submitCalls = 0;
+  let savedAssets = 0;
+
+  const store = {
+    async getProject(id: string) {
+      return id === state.project.id ? (structuredClone(state.project) as Project) : null;
+    },
+    async updateProject(next: Project) {
+      state.project = structuredClone(next) as Project;
+      return state.project;
+    },
+    async mutateProject(id: string, mutator: (p: Project) => Project | Promise<Project>) {
+      if (id !== state.project.id) return null;
+      const next = await mutator(structuredClone(state.project) as Project);
+      state.project = structuredClone(next) as Project;
+      return state.project;
+    }
+  };
+
+  const media = {
+    async saveGeneratedVideo(input: { mimeType: string; data: Buffer; sceneOrder: number }) {
+      savedAssets += 1;
+      const now = new Date().toISOString();
+      return {
+        id: `asset-fal-${savedAssets}`,
+        type: 'video' as const,
+        status: 'available' as const,
+        provenance: 'generated' as const,
+        filename: `scene-${input.sceneOrder}-generated.mp4`,
+        localPath: `assets/scene-${input.sceneOrder}-generated.mp4`,
+        mimeType: input.mimeType,
+        filesize: input.data.byteLength,
+        metadata: {},
+        createdAt: now,
+        updatedAt: now
+      };
+    },
+    async exists() {
+      return false;
+    },
+    async readRelativeFile() {
+      return Buffer.from('');
+    }
+  };
+
+  let pollCount = 0;
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (method === 'POST') {
+      submitCalls += 1;
+      if (opts.failSubmit) {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        throw error;
+      }
+      return new Response(JSON.stringify({ request_id: 'req-service-1', status: 'IN_QUEUE' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    if (url.endsWith('/status?logs=1')) {
+      if (opts.failStatus) {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        throw error;
+      }
+      pollCount += 1;
+      const status = pollCount === 1 ? 'IN_QUEUE' : pollCount === 2 ? 'IN_PROGRESS' : 'COMPLETED';
+      return new Response(JSON.stringify({ status }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+
+    if (url.endsWith('/requests/req-service-1')) {
+      return new Response(JSON.stringify({ video: { url: 'https://v3.fal.media/clip.mp4', content_type: 'video/mp4' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    if (url === 'https://v3.fal.media/clip.mp4') {
+      return new Response(new Uint8Array(VIDEO_BYTES), { status: 200, headers: { 'content-type': 'video/mp4' } });
+    }
+
+    return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } });
+  };
+
+  const provider = new FalVideoGenerationProvider({
+    apiKey: 'fal-test-key',
+    baseUrl: BASE_URL,
+    endpoint: ENDPOINT,
+    fetchImpl
+  });
+
+  const registry = {
+    getProvider(id: string) {
+      expect(id).toBe('fal');
+      return provider;
+    }
+  };
+
+  return {
+    store,
+    media,
+    registry,
+    state,
+    submitCalls: () => submitCalls,
+    savedAssets: () => savedAssets
+  };
+}
+
+beforeEach(() => {
+  vi.stubEnv('FAL_KEY', 'fal-test-key');
+  vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+function depsOf(harness: Harness) {
+  return {
+    store: harness.store,
+    media: harness.media,
+    registry: harness.registry as never
+  };
+}
+
+describe('FAL video generation through the scene service', () => {
+  it('persists fal provider identity and endpoint across submit and poll', async () => {
+    const harness = createHarness(createProject());
+
+    const submission = await submitSceneVideoGeneration(
+      'project-fal-service',
+      'scene-fal-1',
+      { regenerate: true, provider: 'fal', mode: 'real' },
+      depsOf(harness)
+    );
+
+    expect(submission.provider).toBe('fal');
+    expect(submission.providerJobId).toBe(encodeFalJobId(ENDPOINT, 'req-service-1'));
+
+    const persisted = harness.state.project.scenes[0];
+    if (persisted.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(persisted.visual.generation.provider).toBe('fal');
+    expect(persisted.visual.generation.providerJobId).toBe(encodeFalJobId(ENDPOINT, 'req-service-1'));
+
+    // Poll until complete. The composite job id carries the endpoint, so the
+    // registry's freshly constructed provider polls the same model.
+    let poll = await refreshVideoGenerationAttempt('project-fal-service', submission.generationAttemptId, depsOf(harness), {
+      mode: 'real'
+    });
+    expect(poll.status).toBe('queued');
+    poll = await refreshVideoGenerationAttempt('project-fal-service', submission.generationAttemptId, depsOf(harness), {
+      mode: 'real'
+    });
+    expect(poll.status).toBe('generating');
+    poll = await refreshVideoGenerationAttempt('project-fal-service', submission.generationAttemptId, depsOf(harness), {
+      mode: 'real'
+    });
+
+    expect(poll.status).toBe('generated');
+    expect(poll.provider).toBe('fal');
+    expect(poll.assetId).toBeDefined();
+    expect(harness.savedAssets()).toBe(1);
+  });
+
+  it('never resolves fal in mock mode (policy blocks before any provider call)', async () => {
+    const harness = createHarness(createProject());
+    const getProvider = vi.spyOn(harness.registry, 'getProvider');
+
+    await expect(
+      submitSceneVideoGeneration(
+        'project-fal-service',
+        'scene-fal-1',
+        { regenerate: true, provider: 'fal', mode: 'mock' },
+        depsOf(harness)
+      )
+    ).rejects.toThrow(/mock mode/i);
+
+    expect(getProvider).not.toHaveBeenCalled();
+    expect(harness.submitCalls()).toBe(0);
+  });
+
+  it('does not resubmit after a submit timeout and records a failed attempt', async () => {
+    const harness = createHarness(createProject(), { failSubmit: true });
+
+    await expect(
+      submitSceneVideoGeneration(
+        'project-fal-service',
+        'scene-fal-1',
+        { regenerate: true, provider: 'fal', mode: 'real' },
+        depsOf(harness)
+      )
+    ).rejects.toMatchObject({ code: 'PROVIDER_FAILED' });
+
+    expect(harness.submitCalls()).toBe(1);
+
+    const persisted = harness.state.project.scenes[0];
+    if (persisted.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(persisted.visual.generation.status).toBe('failed');
+    expect(persisted.visual.generation.providerJobId).toBeUndefined();
+  });
+
+  it('keeps the job id after a poll timeout so the job remains resumable', async () => {
+    const harness = createHarness(createProject(), { failStatus: true });
+
+    const submission = await submitSceneVideoGeneration(
+      'project-fal-service',
+      'scene-fal-1',
+      { regenerate: true, provider: 'fal', mode: 'real' },
+      depsOf(harness)
+    );
+
+    await expect(
+      refreshVideoGenerationAttempt('project-fal-service', submission.generationAttemptId, depsOf(harness), { mode: 'real' })
+    ).rejects.toBeInstanceOf(SceneVideoGenerationError);
+
+    const persisted = harness.state.project.scenes[0];
+    if (persisted.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(persisted.visual.generation.status).toBe('failed');
+    // Identity is preserved, so a later run/recovery can still resolve the job.
+    expect(persisted.visual.generation.providerJobId).toBe(encodeFalJobId(ENDPOINT, 'req-service-1'));
+    expect(persisted.visual.generation.providerJobId).toContain(ENDPOINT);
+  });
+});

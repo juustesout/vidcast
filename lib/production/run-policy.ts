@@ -127,7 +127,7 @@ function parseVideoProvider(value: string | undefined): VideoRunProvider | undef
   if (!value) {
     return undefined;
   }
-  if (value === 'local' || value === 'openai') {
+  if (value === 'local' || value === 'openai' || value === 'fal') {
     return value;
   }
   return undefined;
@@ -154,7 +154,7 @@ function parseMusicProvider(value: string | undefined): MusicRunProvider | undef
 }
 
 function isRealProvider(provider: string): boolean {
-  return provider === 'openai' || provider === 'elevenlabs';
+  return provider === 'openai' || provider === 'elevenlabs' || provider === 'fal';
 }
 
 // Validates and normalizes the explicit run music opt-in. A malformed opt-in is
@@ -366,6 +366,10 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
       requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
     }
 
+    if (needsVideoGeneration && policy.providers.video === 'fal') {
+      requireEnvVar('FAL_KEY', 'Real FAL video generation requires FAL_KEY.');
+    }
+
     if (needsNarrationGeneration && policy.providers.narration === 'elevenlabs') {
       requireEnvVar('ELEVENLABS_API_KEY', 'Real narration generation requires ELEVENLABS_API_KEY.');
     }
@@ -476,6 +480,9 @@ function normalizeRequestedProvider(
     if (value === 'openai') {
       return 'openai';
     }
+    if (value === 'fal') {
+      return 'fal';
+    }
     if (value === 'local' || value === 'fake') {
       return 'local';
     }
@@ -508,6 +515,10 @@ function assertRealProviderCredentials(kind: GenerationModality, provider: strin
 
   if ((kind === 'image' || kind === 'video') && provider === 'openai') {
     requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
+  }
+
+  if (kind === 'video' && provider === 'fal') {
+    requireEnvVar('FAL_KEY', 'Real FAL video generation requires FAL_KEY.');
   }
 }
 

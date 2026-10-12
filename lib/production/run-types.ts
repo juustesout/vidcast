@@ -4,7 +4,7 @@ import type { ProductionRunnerEvent, ProductionRunnerResultStatus } from './prod
 export type RunMode = 'mock' | 'real';
 
 export type ImageRunProvider = 'fake' | 'openai';
-export type VideoRunProvider = 'local' | 'openai';
+export type VideoRunProvider = 'local' | 'openai' | 'fal';
 export type NarrationRunProvider = 'fake' | 'elevenlabs';
 export type MusicRunProvider = 'fake' | 'elevenlabs';
 

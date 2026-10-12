@@ -1,6 +1,6 @@
 import type { AspectRatio } from './render';
 
-export type GenerationProvider = 'openai' | 'gemini' | 'local' | 'other';
+export type GenerationProvider = 'openai' | 'gemini' | 'fal' | 'local' | 'other';
 
 export type GenerationKind = 'image' | 'video';
 

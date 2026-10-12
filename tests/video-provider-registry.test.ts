@@ -18,6 +18,14 @@ describe('Video provider registry', () => {
     expect(provider.providerId).toBe('fake');
   });
 
+  it('resolves the fal provider', () => {
+    const registry = createVideoGenerationRegistry();
+    const provider = registry.getProvider('fal');
+    expect(provider.providerId).toBe('fal');
+    expect(typeof provider.submit).toBe('function');
+    expect(typeof provider.getStatus).toBe('function');
+  });
+
   it('fails cleanly for unknown provider', () => {
     const registry = createVideoGenerationRegistry();
     expect(() => registry.getProvider('unknown-provider')).toThrow(VideoGenerationProviderError);
@@ -26,6 +34,7 @@ describe('Video provider registry', () => {
   it('reports provider configuration status', () => {
     const status = getVideoGenerationConfigurationStatus();
     expect(typeof status.openaiConfigured).toBe('boolean');
+    expect(typeof status.falConfigured).toBe('boolean');
     expect(status.defaultProvider).toBe('local');
   });
 });

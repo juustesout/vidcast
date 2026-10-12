@@ -35,6 +35,9 @@ function normalizeProviderNameForGeneration(providerId: string): GenerationProvi
   if (providerId === 'gemini') {
     return 'gemini';
   }
+  if (providerId === 'fal') {
+    return 'fal';
+  }
   if (providerId === 'fake') {
     return 'local';
   }

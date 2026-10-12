@@ -29,6 +29,8 @@ function sanitizeText(value: string): string {
   const flattened = value.replace(/[\r\n\t]+/g, ' ').trim();
   return flattened
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+    // FAL credentials use `Authorization: Key <token>` (not `Bearer`).
+    .replace(/Authorization:\s*Key\s+\S+/gi, 'Authorization: Key [redacted]')
     .replace(/sk-[A-Za-z0-9_-]{10,}/g, '[redacted]');
 }
 

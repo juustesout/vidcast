@@ -208,6 +208,28 @@ describe('reconcileInterruptedGenerations', () => {
     expect(result.notes.some((note) => note.actionType === 'video_poll')).toBe(true);
   });
 
+  it('leaves a fal video attempt with a composite job id for polling', () => {
+    const scene: Scene = {
+      ...imageScene(1, 'generating'),
+      visual: {
+        kind: 'generated_video',
+        generation: generation({
+          id: 'gen-v',
+          kind: 'video',
+          status: 'generating',
+          provider: 'fal',
+          providerJobId: 'fal:minimax/h3-max-turbo/text-to-video:req-123'
+        })
+      }
+    };
+
+    const result = reconcileInterruptedGenerations(project('p', [scene]), 'real');
+
+    expect(result.updatedProject).toBeNull();
+    expect(result.suppressedActionIds).toEqual([]);
+    expect(result.notes.some((note) => note.actionType === 'video_poll')).toBe(true);
+  });
+
   it('fails an interrupted video submit without a job id and suppresses it in real mode', () => {
     const scene: Scene = {
       ...imageScene(1, 'generating'),

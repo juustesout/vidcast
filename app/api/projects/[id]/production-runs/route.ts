@@ -14,7 +14,7 @@ const startRunSchema = z.object({
   providers: z
     .object({
       image: z.enum(['fake', 'openai']).optional(),
-      video: z.enum(['local', 'openai']).optional(),
+      video: z.enum(['local', 'openai', 'fal']).optional(),
       narration: z.enum(['fake', 'elevenlabs']).optional(),
       music: z.enum(['fake', 'elevenlabs']).optional()
     })

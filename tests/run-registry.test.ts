@@ -99,4 +99,27 @@ describe('in-memory run registry', () => {
     expect(message).not.toContain('secret-token');
     expect(message).not.toContain('sk-abcdef123456');
   });
+
+  it('redacts FAL-style Authorization: Key credentials', () => {
+    const registry = new InMemoryRunRegistry({
+      maxEventsPerRun: 100,
+      retentionMs: 60_000,
+      maxLogPageLimit: 100
+    });
+
+    registry.createRun({ runId: 'run-fal-redact', projectId: 'project-1', acceptedConfig });
+    registry.appendEvent('run-fal-redact', {
+      timestamp: new Date().toISOString(),
+      iteration: 1,
+      code: 'action_failed',
+      status: 'failed',
+      message: 'upstream rejected Authorization: Key fal-secret-key-123456',
+      actionId: 'a-1',
+      actionType: 'video_submit'
+    });
+
+    const message = registry.getLogPage('run-fal-redact', { cursor: 0, limit: 10 })?.items[0]?.event.message ?? '';
+    expect(message).toContain('Authorization: Key [redacted]');
+    expect(message).not.toContain('fal-secret-key-123456');
+  });
 });
