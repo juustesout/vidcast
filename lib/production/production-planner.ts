@@ -60,7 +60,12 @@ export interface DeriveProductionPlanOptions {
   runtime?: ProductionPlannerRuntime;
   failedActionIds?: string[];
   skippedActionIds?: string[];
+  completedActionIds?: string[];
   compositionAttempted?: boolean;
+  // Force a one-time regeneration of outputs that would otherwise be treated as
+  // current. An action is only forced until it completes in the current run, so
+  // forcing does not loop and downstream actions (render/compose) still settle.
+  force?: boolean;
 }
 
 function actionId(type: ProductionActionType, sceneId?: string): string {
@@ -117,6 +122,9 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
   const runtime = options.runtime ?? {};
   const failedActionIds = new Set(options.failedActionIds ?? []);
   const skippedActionIds = new Set(options.skippedActionIds ?? []);
+  const completedActionIds = new Set(options.completedActionIds ?? []);
+  const force = options.force === true;
+  const forceRegenerate = (id: string): boolean => force && !completedActionIds.has(id);
 
   const renderPlan = resolveRenderPlan(project);
   const validation = validateProject(project);
@@ -162,7 +170,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
         actionStatus = 'running';
         execute = false;
         reason = 'Image generation is currently running.';
-      } else if (status === 'generated' && usableAsset) {
+      } else if (status === 'generated' && usableAsset && !forceRegenerate(id)) {
         actionStatus = 'current';
         execute = false;
         reason = 'Generated image asset is current.';
@@ -214,7 +222,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
         submitStatus = 'running';
         submitExecute = false;
         submitReason = 'Video generation job is already running.';
-      } else if (status === 'generated' && usableAsset) {
+      } else if (status === 'generated' && usableAsset && !forceRegenerate(submitId)) {
         submitStatus = 'current';
         submitExecute = false;
         submitReason = 'Generated video asset is current.';
@@ -282,9 +290,15 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       narrationExecute = false;
       narrationReason = 'Narration text is missing.';
     } else if (narrationState.state === 'current') {
-      narrationStatus = 'current';
-      narrationExecute = false;
-      narrationReason = 'Narration audio is current.';
+      if (forceRegenerate(narrationId)) {
+        narrationStatus = 'ready';
+        narrationMode = 'regenerate';
+        narrationReason = 'Forced regeneration of current narration audio.';
+      } else {
+        narrationStatus = 'current';
+        narrationExecute = false;
+        narrationReason = 'Narration audio is current.';
+      }
     } else if (narrationState.state === 'failed') {
       narrationStatus = 'ready';
       narrationMode = 'retry';
@@ -333,7 +347,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       renderActionStatus = 'running';
       renderExecute = false;
       renderReason = 'Scene render is currently running.';
-    } else if (renderStatus.status === 'rendered') {
+    } else if (renderStatus.status === 'rendered' && !forceRegenerate(renderId)) {
       renderActionStatus = 'current';
       renderExecute = false;
       renderReason = 'Scene render is current.';
@@ -402,7 +416,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
     composeStatus = 'running';
     composeExecute = false;
     composeReason = 'Final composition is currently running.';
-  } else if (compositionStatus.status === 'current') {
+  } else if (compositionStatus.status === 'current' && !forceRegenerate(composeId)) {
     composeStatus = 'current';
     composeExecute = false;
     composeReason = 'Final composition is current.';

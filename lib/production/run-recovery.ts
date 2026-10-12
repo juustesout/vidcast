@@ -94,6 +94,9 @@ export function reconcileInterruptedGenerations(project: Project, mode: RunMode)
           if (mode === 'real') {
             suppressedActionIds.push(sceneActionId(actionType, scene.id));
           }
+          // Record a reason so a recovered failure is never opaque. Without this
+          // the scene would show `status: "failed"` with no error/code, which is
+          // impossible to diagnose (the live provider failure path always sets one).
           nextScene = {
             ...nextScene,
             visual: {
@@ -101,7 +104,10 @@ export function reconcileInterruptedGenerations(project: Project, mode: RunMode)
               assetId,
               generation: {
                 ...generation,
-                status: 'failed' as const
+                status: 'failed' as const,
+                error: 'Interrupted by process restart.',
+                errorMessage: 'Interrupted by process restart.',
+                errorCode: 'INTERNAL' as const
               }
             }
           };

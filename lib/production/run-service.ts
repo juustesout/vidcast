@@ -682,7 +682,11 @@ export class HeadlessProductionRunService {
 
       const result = await this.dependencies.runBatch({
         initialProject: initial.project,
-        derivePlan: this.dependencies.derivePlan,
+        derivePlan: (project, options) =>
+          this.dependencies.derivePlan(project, {
+            ...options,
+            force: run.acceptedConfig.policy.force === true
+          }),
         config: {
           maxIterations: run.acceptedConfig.limits.maxIterations,
           limits: run.acceptedConfig.limits.perActionConcurrency

@@ -19,6 +19,11 @@ export interface RunPolicySnapshot {
   mode: RunMode;
   allowRealProviders: boolean;
   providers: RunProviderSelection;
+  // When set, the planner treats already-current outputs as stale so the run
+  // regenerates them once (used to refresh assets that were produced in mock
+  // mode even though a real run was requested). Optional for backward
+  // compatibility with runs persisted before this field existed.
+  force?: boolean;
 }
 
 export interface RunExecutionLimits {

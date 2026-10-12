@@ -15,6 +15,9 @@ import type {
 export interface RunPolicyRequest {
   mode?: RunMode;
   providers?: Partial<RunProviderSelection>;
+  // Force a one-time regeneration of outputs the planner would otherwise treat
+  // as current (for example mock assets carried into a real run).
+  force?: boolean;
 }
 
 export interface RunPolicyServerConfig {
@@ -211,7 +214,8 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
   return {
     mode: requestedMode,
     allowRealProviders: serverConfig.allowRealProviders,
-    providers
+    providers,
+    force: request?.force === true
   };
 }
 
@@ -241,7 +245,9 @@ function requireEnvVar(name: string, message: string): void {
 }
 
 export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnapshot): RunPolicyPreflightResult {
-  const plan = deriveProductionPlan(project);
+  // Force-aware: a forced run will regenerate current outputs, so those
+  // modalities must be validated up front instead of appearing unnecessary.
+  const plan = deriveProductionPlan(project, { force: policy.force === true });
   const actionable = plan.actions.filter(isPotentiallyExecutable);
   const requiredActionTypes = Array.from(new Set(actionable.map((action) => action.type)));
 

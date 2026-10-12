@@ -19,6 +19,7 @@ const startRunSchema = z.object({
     })
     .optional(),
   maxIterations: z.number().int().positive().max(10_000).optional(),
+  force: z.boolean().optional(),
   limits: z
     .object({
       image_generate: z.number().int().positive().max(128).optional(),
@@ -69,7 +70,8 @@ export async function POST(request: Request, context: RouteContext) {
       projectId: id,
       policy: {
         mode: parsed.data.mode,
-        providers: parsed.data.providers
+        providers: parsed.data.providers,
+        force: parsed.data.force
       },
       maxIterations: parsed.data.maxIterations,
       limits: parsed.data.limits

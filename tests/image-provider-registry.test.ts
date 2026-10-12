@@ -20,5 +20,7 @@ describe('Image provider registry', () => {
     const status = getImageGenerationConfigurationStatus();
     expect(typeof status.openaiConfigured).toBe('boolean');
     expect(status.defaultProvider).toBe('fake');
+    expect(typeof status.model).toBe('string');
+    expect(status.model.length).toBeGreaterThan(0);
   });
 });

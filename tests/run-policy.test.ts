@@ -124,6 +124,13 @@ describe('run policy', () => {
     expect(policy.providers.image).toBe('openai');
   });
 
+  it('defaults force to false and records an explicit force request', () => {
+    const server = { allowRealProviders: true, defaultMode: 'mock' as const };
+
+    expect(resolveRunPolicy({ mode: 'mock' }, server).force).toBe(false);
+    expect(resolveRunPolicy({ mode: 'mock', force: true }, server).force).toBe(true);
+  });
+
   it('blocks mock mode when an active poll would hit a real provider job', () => {
     const project = createProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(

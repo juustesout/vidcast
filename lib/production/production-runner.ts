@@ -289,6 +289,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
     const plan = input.derivePlan(project, {
       skippedActionIds: Array.from(skippedActionIds),
       failedActionIds: Array.from(failedActionIds),
+      completedActionIds: Array.from(completedActionIds),
       compositionAttempted
     });
 
@@ -499,6 +500,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
       const finalPlan = input.derivePlan(project, {
         skippedActionIds: Array.from(skippedActionIds),
         failedActionIds: Array.from(failedActionIds),
+        completedActionIds: Array.from(completedActionIds),
         compositionAttempted
       });
       const unresolvedActions = finalPlan.actions.filter((action) => action.status !== 'current' && action.status !== 'skipped');
@@ -531,6 +533,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
   const finalPlan = input.derivePlan(project, {
     skippedActionIds: Array.from(skippedActionIds),
     failedActionIds: Array.from(failedActionIds),
+    completedActionIds: Array.from(completedActionIds),
     compositionAttempted
   });
   const unresolvedActions = finalPlan.actions.filter((action) => action.status !== 'current' && action.status !== 'skipped');

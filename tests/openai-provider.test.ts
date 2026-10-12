@@ -133,4 +133,27 @@ describe('OpenAI provider adapter', () => {
     expect(bodies[0]).not.toHaveProperty('response_format');
     expect(bodies[1]).toHaveProperty('response_format', 'b64_json');
   });
+
+  it('maps aspect ratios to model-specific sizes', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify({ data: [{ b64_json: PNG_BASE64 }] }), { status: 200 });
+      })
+    );
+
+    await new OpenAiImageGenerationProvider({ apiKey: 'k', model: 'gpt-image-1' }).generateImage({ prompt: 'test', aspectRatio: '16:9' });
+    await new OpenAiImageGenerationProvider({ apiKey: 'k', model: 'dall-e-3' }).generateImage({ prompt: 'test', aspectRatio: '16:9' });
+    await new OpenAiImageGenerationProvider({ apiKey: 'k', model: 'dall-e-3' }).generateImage({ prompt: 'test', aspectRatio: '9:16' });
+    await new OpenAiImageGenerationProvider({ apiKey: 'k', model: 'dall-e-3' }).generateImage({ prompt: 'test', aspectRatio: '1:1' });
+    await new OpenAiImageGenerationProvider({ apiKey: 'k', model: 'dall-e-2' }).generateImage({ prompt: 'test', aspectRatio: '16:9' });
+
+    expect(bodies[0].size).toBe('1536x1024');
+    expect(bodies[1].size).toBe('1792x1024');
+    expect(bodies[2].size).toBe('1024x1792');
+    expect(bodies[3].size).toBe('1024x1024');
+    expect(bodies[4].size).toBe('1024x1024');
+  });
 });

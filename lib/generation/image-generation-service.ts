@@ -8,7 +8,7 @@ import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/productio
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
-import type { GenerationAttempt, GenerationProvider, GenerationRecord } from '@/lib/types/generation';
+import type { GenerationAttempt, GenerationErrorCode, GenerationProvider, GenerationRecord } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { Scene } from '@/lib/types/scene';
@@ -123,6 +123,38 @@ function sanitizeProviderError(error: unknown): string {
   }
 
   return 'Image generation failed.';
+}
+
+// Projects the image provider's fine-grained internal code onto the persisted
+// `GenerationErrorCode` vocabulary so a failed scene carries a machine-readable
+// reason instead of only a free-text message.
+function mapProviderErrorCode(error: unknown): GenerationErrorCode {
+  if (!(error instanceof ImageGenerationProviderError)) {
+    return 'INTERNAL';
+  }
+
+  switch (error.code) {
+    case 'provider.notConfigured':
+      return 'NOT_CONFIGURED';
+    case 'provider.aspectRatio.unsupported':
+      return 'UNSUPPORTED';
+    case 'provider.request.unauthorized':
+      return 'PROVIDER_AUTH';
+    case 'provider.request.rateLimited':
+      return 'PROVIDER_RATE_LIMIT';
+    case 'provider.request.rejected':
+      return 'PROVIDER_REJECTED';
+    case 'provider.request.timeout':
+    case 'provider.request.unreachable':
+    case 'provider.request.failed':
+      return 'PROVIDER_FAILED';
+    case 'provider.response.invalid':
+    case 'provider.response.missingImage':
+    case 'provider.response.invalidImage':
+      return 'MEDIA_INVALID';
+    default:
+      return 'INTERNAL';
+  }
 }
 
 function mapRunPolicyError(error: RunPolicyError): SceneImageGenerationError {
@@ -252,11 +284,14 @@ export async function generateSceneImage(
     try {
       generated = await provider.generateImage(request);
     } catch (error) {
+      const errorMessage = sanitizeProviderError(error);
       const failedAttempt: GenerationAttempt = {
         ...generatingAttempt,
         status: 'failed',
         completedAt: nowIso(),
-        error: sanitizeProviderError(error),
+        error: errorMessage,
+        errorMessage,
+        errorCode: mapProviderErrorCode(error),
         assetId: previousAssetId
       };
 

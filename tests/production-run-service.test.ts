@@ -283,6 +283,68 @@ describe('headless production run service', () => {
     await waitForStatus(service, second.run.runId, ['completed']);
   });
 
+  it('injects the requested force flag into the production plan', async () => {
+    const project = createProject('project-force');
+    project.assets = [{ id: 'asset-1', type: 'image', status: 'available' }] as unknown as Project['assets'];
+    project.scenes[0].visual = {
+      kind: 'generated_image',
+      assetId: 'asset-1',
+      generation: {
+        id: 'gen-1',
+        kind: 'image',
+        status: 'generated',
+        provider: 'local',
+        prompt: 'A scene prompt',
+        referenceIds: [],
+        aspectRatio: '16:9',
+        assetId: 'asset-1',
+        createdAt: project.createdAt
+      }
+    };
+
+    let forcedStatus: string | undefined;
+
+    const service = new HeadlessProductionRunService(
+      {
+        maxConcurrentRuns: 1,
+        runner: {
+          maxIterations: 5,
+          maxActionExecutions: 5,
+          maxVideoPolls: 5,
+          limits: { image_generate: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
+        },
+        registry: { maxEventsPerRun: 100, retentionMs: 60_000, maxLogPageLimit: 100 },
+        policy: { allowRealProviders: true, defaultMode: 'mock' }
+      },
+      {
+        store: {
+          async getProject(projectId: string) {
+            return projectId === project.id ? project : null;
+          }
+        },
+        runBatch: async (input) => {
+          const forcedPlan = input.derivePlan(project, {});
+          forcedStatus = forcedPlan.actions.find((action) => action.id === 'scene:scene-1:image_generate')?.status;
+          return {
+            status: 'completed',
+            project: input.initialProject,
+            iterations: 1,
+            completedActionIds: [],
+            failedActionIds: [],
+            unresolvedActions: [],
+            events: []
+          };
+        }
+      }
+    );
+
+    const started = await service.startOrReuseRun({ projectId: project.id, policy: { mode: 'mock', force: true } });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    // Without the injected force flag the action would be `current`.
+    expect(forcedStatus).toBe('ready');
+  });
+
   it('returns NOT_FOUND when run state is missing (restart/expiry)', () => {
     const service = new HeadlessProductionRunService();
 

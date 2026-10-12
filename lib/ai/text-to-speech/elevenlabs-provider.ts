@@ -1,7 +1,7 @@
 import { mediaMetadataReader } from '@/lib/media/metadata-reader';
 import { TextToSpeechProviderError, type TextToSpeechFormat, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 interface ElevenLabsTextToSpeechProviderOptions {
   apiKey?: string;

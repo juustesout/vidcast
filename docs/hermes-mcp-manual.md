@@ -165,7 +165,7 @@ A scene with narration text but no audio asset is planned as a `narration_genera
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `run_production` | `{ projectId, mode? ("mock"\|"real"), providers? { image? ("fake"\|"openai"), video? ("local"\|"openai"), narration? ("fake"\|"elevenlabs") }, maxIterations? (≤10000), limits? { image_generate, video_submit, video_poll, narration_generate, scene_render, final_compose (each 1-128) } }` | `{ run, reused }` |
+| `run_production` | `{ projectId, mode? ("mock"\|"real"), providers? { image? ("fake"\|"openai"), video? ("local"\|"openai"), narration? ("fake"\|"elevenlabs") }, force? (boolean), maxIterations? (≤10000), limits? { image_generate, video_submit, video_poll, narration_generate, scene_render, final_compose (each 1-128) } }` | `{ run, reused }` |
 | `get_run_status` | `{ runId }` | `{ run }` |
 | `get_run_log` | `{ runId, cursor?, limit? (≤2000) }` | `{ log }` |
 
@@ -176,6 +176,9 @@ Notes:
 - Poll `get_run_status` until `run.status` is terminal: `completed`, `partial`, `failed`, or `unresolved`. Read `get_run_log` (paginated via `log.nextCursor` / `log.hasMore`) for per-action detail.
 - `mode: "real"` requires the app server to run with `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true`. Credentials are required **only for the modalities the run actually executes**: if the plan needs image generation and/or video generation with the `openai` provider, the app server needs `OPENAI_API_KEY`; if it needs narration with `elevenlabs`, it needs `ELEVENLABS_API_KEY`. Unused modalities do not force a choice — an image-only project may leave `video` at `"local"` (or omit `video` entirely) without affecting the run. Missing real-provider mode returns `POLICY_DENIED`; a non-real provider for a needed modality returns `PROVIDER_NOT_ALLOWED`; missing credentials return `PROVIDER_NOT_CONFIGURED`. Default is mock; keep mock unless a paid run is explicitly intended.
 - `mode: "real"` does **not** mean every modality makes a paid call — only the actions in the production plan that are `ready`/`running` run, and only their providers are validated.
+- By default a run **reuses existing outputs**: an action whose asset is already `current` is skipped with `already current` in the log, even in real mode. So a real run over mock-generated assets may complete with `0 action(s) completed`. Pass `force: true` to regenerate the current outputs once (image/video/narration regeneration cascades into re-render and re-compose). Forcing does not loop: each action is forced only until it completes in that run.
+- **Image model**: the OpenAI image model defaults to `gpt-image-1` and can be set with `OPENAI_IMAGE_MODEL`, or per scene at `scenes[].visual.generation.model`. `dall-e-3` and `dall-e-2` are supported with their own valid sizes. `gpt-image-1` is often rejected (`provider.request.unauthorized` / `provider.request.rejected`) for organizations that are not verified for it — switch to `dall-e-3` if that happens.
+- **Failure detail**: a failed generation records `status: "failed"` plus `error`/`errorMessage` and a machine-readable `errorCode` (e.g. `PROVIDER_AUTH`, `PROVIDER_RATE_LIMIT`, `PROVIDER_REJECTED`, `MEDIA_INVALID`, `NOT_CONFIGURED`). A generation marked failed by recovery after a process restart carries `error: "Interrupted by process restart."`.
 
 ## 7. Typical end-to-end flow (all via MCP)
 

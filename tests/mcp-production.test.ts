@@ -79,6 +79,23 @@ describe('production MCP tool service', () => {
     expect(log.ok).toBe(false);
   });
 
+  it('passes force through the run_production tool', async () => {
+    const calls: unknown[] = [];
+    const service = createProductionToolService(
+      makeClient({
+        runProduction: async (_projectId, payload) => {
+          calls.push(payload);
+          return { run: makeRun('run-force'), reused: false };
+        }
+      })
+    );
+
+    const result = await service.runProduction({ projectId: 'project-1', force: true });
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toMatchObject({ force: true });
+  });
+
   it('returns structured start/status/log payloads', async () => {
     const service = createProductionToolService(makeClient());
 
@@ -170,6 +187,23 @@ describe('production HTTP API client behavior', () => {
     expect((startCall[1] as RequestInit)?.method).toBe('POST');
     expect((statusCall[1] as RequestInit)?.method).toBe('GET');
     expect((logCall[1] as RequestInit)?.method).toBe('GET');
+  });
+
+  it('forwards force in the run start body', async () => {
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ run: makeRun('run-1'), reused: false }), { status: 202 });
+    });
+
+    const client = new HttpProductionApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: fetchMock as unknown as typeof fetch
+    });
+
+    await client.runProduction('project-1', { mode: 'real', force: true });
+
+    expect(bodies[0]).toMatchObject({ mode: 'real', force: true });
   });
 
   it('forwards bearer token when EXPLAINER_API_TOKEN is configured', async () => {

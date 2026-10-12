@@ -20,6 +20,7 @@ export const runProductionInputSchema = z.object({
     })
     .optional(),
   maxIterations: z.number().int().positive().max(10_000).optional(),
+  force: z.boolean().optional(),
   limits: z
     .object({
       image_generate: z.number().int().positive().max(128).optional(),
@@ -90,6 +91,7 @@ export function createProductionToolService(apiClient: ProductionApiClient = new
           mode: parsed.mode,
           providers: parsed.providers,
           maxIterations: parsed.maxIterations,
+          force: parsed.force,
           limits: parsed.limits
         });
 

@@ -2,7 +2,7 @@ import { imageSize } from 'image-size';
 
 import { ImageGenerationProviderError, type ImageGenerationProvider, type ImageGenerationRequest, type ImageGenerationResult } from './provider';
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 90_000;
 
 // The 8-byte magic number starting every PNG file. Used to reject non-PNG or
 // truncated provider output before it can be persisted as a scene asset.
@@ -15,9 +15,30 @@ interface OpenAiProviderOptions {
   timeoutMs?: number;
 }
 
-function mapAspectRatioToSize(aspectRatio?: string): string | undefined {
+// OpenAI image models accept different, mutually exclusive size sets. Sending a
+// size that a model does not support is rejected with a 400, so the mapping has
+// to be model-aware. `gpt-image-1` supports landscape/portrait/auto; `dall-e-3`
+// uses a different (1792px) landscape/portrait pair; `dall-e-2` is square-only.
+function mapAspectRatioToSize(aspectRatio: string | undefined, model: string): string | undefined {
   if (!aspectRatio) {
     return undefined;
+  }
+
+  if (model.startsWith('dall-e-2')) {
+    return '1024x1024';
+  }
+
+  if (model.startsWith('dall-e-3')) {
+    if (aspectRatio === '16:9') {
+      return '1792x1024';
+    }
+    if (aspectRatio === '9:16') {
+      return '1024x1792';
+    }
+    if (aspectRatio === '1:1') {
+      return '1024x1024';
+    }
+    throw new ImageGenerationProviderError(`Unsupported aspect ratio: ${aspectRatio}`, 422, 'provider.aspectRatio.unsupported');
   }
 
   if (aspectRatio === '16:9') {
@@ -163,9 +184,9 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       throw new ImageGenerationProviderError('OpenAI image generation is not configured. Set OPENAI_API_KEY on the server.', 409, 'provider.notConfigured');
     }
 
-    const size = request.width && request.height ? `${request.width}x${request.height}` : mapAspectRatioToSize(request.aspectRatio);
-    const prompt = request.negativePrompt ? `${request.prompt}\n\nNegative prompt: ${request.negativePrompt}` : request.prompt;
     const model = request.model || this.model;
+    const size = request.width && request.height ? `${request.width}x${request.height}` : mapAspectRatioToSize(request.aspectRatio, model);
+    const prompt = request.negativePrompt ? `${request.prompt}\n\nNegative prompt: ${request.negativePrompt}` : request.prompt;
 
     const { signal, cleanup } = createRequestSignal(options?.signal, this.timeoutMs);
 

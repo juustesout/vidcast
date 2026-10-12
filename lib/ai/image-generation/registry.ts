@@ -28,10 +28,11 @@ export function createImageGenerationRegistry(): ImageGenerationRegistry {
   return new DefaultImageGenerationRegistry();
 }
 
-export function getImageGenerationConfigurationStatus(): { openaiConfigured: boolean; defaultProvider: string } {
+export function getImageGenerationConfigurationStatus(): { openaiConfigured: boolean; defaultProvider: string; model: string } {
   const { defaultMode } = resolveRunPolicyServerConfig();
   return {
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
-    defaultProvider: resolveProviderDefaults(defaultMode).image
+    defaultProvider: resolveProviderDefaults(defaultMode).image,
+    model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'
   };
 }

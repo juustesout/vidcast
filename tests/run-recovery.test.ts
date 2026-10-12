@@ -230,6 +230,20 @@ describe('reconcileInterruptedGenerations', () => {
     expect(result.suppressedActionIds).toEqual([]);
   });
 
+  it('records a diagnosable reason (error/code) when an interrupted image is marked failed', () => {
+    const result = reconcileInterruptedGenerations(project('p', [imageScene(1, 'generating')]), 'real');
+
+    const generation = result.updatedProject?.scenes[0].visual;
+    expect(generation).toMatchObject({
+      generation: {
+        status: 'failed',
+        error: 'Interrupted by process restart.',
+        errorMessage: 'Interrupted by process restart.',
+        errorCode: 'INTERNAL'
+      }
+    });
+  });
+
   it('restores an interrupted image generation when a usable asset exists', () => {
     const assets = [{ id: 'asset-1', status: 'available' }] as unknown as Project['assets'];
     const scene = imageScene(1, 'generating', 'asset-1');

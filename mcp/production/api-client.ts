@@ -29,6 +29,7 @@ export interface StartRunRequestPayload {
     narration?: 'fake' | 'elevenlabs';
   };
   maxIterations?: number;
+  force?: boolean;
   limits?: Partial<Record<ProductionActionType, number>>;
 }
 

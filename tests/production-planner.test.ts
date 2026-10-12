@@ -85,6 +85,45 @@ function createProject(): Project {
 }
 
 describe('deriveProductionPlan', () => {
+  function currentImageProject(): Project {
+    const project = createProject();
+    const now = project.updatedAt;
+    project.assets = [{ id: 'asset-1', type: 'image', status: 'available' }] as unknown as Project['assets'];
+    project.scenes[0].visual = {
+      kind: 'generated_image',
+      assetId: 'asset-1',
+      generation: {
+        id: 'gen-1',
+        kind: 'image',
+        status: 'generated',
+        provider: 'local',
+        prompt: 'Prompt 1',
+        referenceIds: [],
+        aspectRatio: '16:9',
+        assetId: 'asset-1',
+        createdAt: now
+      }
+    };
+    return project;
+  }
+
+  it('honours force by regenerating current outputs exactly once', () => {
+    const project = currentImageProject();
+    const imageId = 'scene:scene-1:image_generate';
+
+    expect(deriveProductionPlan(project).actions.find((action) => action.id === imageId)?.status).toBe('current');
+
+    const forced = deriveProductionPlan(project, { force: true });
+    const forcedImage = forced.actions.find((action) => action.id === imageId);
+    expect(forcedImage?.status).toBe('ready');
+    expect(forcedImage?.execute).toBe(true);
+    expect(forcedImage?.payload).toMatchObject({ regenerate: true });
+
+    const afterComplete = deriveProductionPlan(project, { force: true, completedActionIds: [imageId] });
+    expect(afterComplete.actions.find((action) => action.id === imageId)?.status).toBe('current');
+  });
+
+
   it('marks current outputs as current and skips resubmission of running video', () => {
     const project = createProject();
     const plan = deriveProductionPlan(project);

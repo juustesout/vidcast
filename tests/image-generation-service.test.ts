@@ -221,6 +221,8 @@ describe('image generation service', () => {
     if (scene.visual && scene.visual.kind === 'generated_image') {
       expect(scene.visual.assetId).toBe('asset-old');
       expect(scene.visual.generation.status).toBe('failed');
+      expect(scene.visual.generation.errorMessage).toBe('provider failed');
+      expect(scene.visual.generation.errorCode).toBe('INTERNAL');
     }
 
     expect(deps.state.project.assets.length).toBe(1);
