@@ -14,10 +14,20 @@ import {
 // https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=minimax/h3-max-turbo/text-to-video
 // and https://fal.ai/docs/documentation/model-apis/inference/queue):
 //   - auth header `Authorization: Key $FAL_KEY`
-//   - submit   POST  {base}/{endpoint}                         -> { request_id, status? , ... }
-//   - status   GET   {base}/{endpoint}/requests/{id}/status?logs=1 -> { status, ... }
-//   - result   GET   {base}/{endpoint}/requests/{id}           -> model output ({ video: { url } })
-//   - cancel   PUT   {base}/{endpoint}/requests/{id}/cancel
+//   - submit   POST  {base}/{endpoint}                         -> { request_id, status?, response_url, status_url, cancel_url, ... }
+//   - status   GET   {base}/{queuePath}/requests/{id}/status?logs=1 -> { status, ... }
+//   - result   GET   {base}/{queuePath}/requests/{id}          -> model output ({ video: { url } })
+//   - cancel   PUT   {base}/{queuePath}/requests/{id}/cancel
+//
+// The submit model id and the queue resource path are NOT always the same. For a
+// multi-segment model id such as `minimax/h3-max-turbo/text-to-video`, the queue
+// lives under `minimax/h3-max-turbo` (the endpoint sub-path is dropped), so
+// polling the full model id returns HTTP 405. The authoritative queue path is the
+// one FAL returns in `response_url`/`status_url`/`cancel_url`, so submit derives
+// and persists it (see `resolveQueuePath`) and all later calls rebuild the URL from
+// it. Returned URLs are only used to learn the path; they are validated to be on
+// the configured queue host, and the API key is never sent to any other host.
+//
 // Media URLs returned by FAL are public but expire, so the result is downloaded
 // immediately during the `generated` poll (see video-generation-service).
 export const DEFAULT_FAL_VIDEO_ENDPOINT = 'minimax/h3-max-turbo/text-to-video';
@@ -59,7 +69,9 @@ export interface FalVideoProviderOptions {
 }
 
 interface FalJobIdentity {
-  endpoint: string;
+  // The queue resource path (the segment(s) before `/requests/{id}`), e.g.
+  // `minimax/h3-max-turbo` for the model `minimax/h3-max-turbo/text-to-video`.
+  queuePath: string;
   requestId: string;
 }
 
@@ -126,15 +138,69 @@ function resolveDuration(value: number | undefined): number | undefined {
   return rounded;
 }
 
-// Composite, durable job identity. The registry constructs a fresh provider per
-// call and `getStatus`/`download` receive only the provider job id, so the
-// endpoint must travel with the request id or a restart could poll the wrong
-// model. Format: `fal:{endpoint}:{request_id}`.
-export function encodeFalJobId(endpoint: string, requestId: string): string {
-  return `${JOB_ID_PREFIX}:${endpoint}:${requestId}`;
+// Resolves the queue resource path from the URLs FAL returns on submit. The
+// model id used for `submit` is not necessarily the queue path (see the header
+// comment), so the response is the authoritative source. Only URLs that are
+// absolute, match the configured queue origin (protocol + host) and contain this
+// request's `/requests/{id}` marker are trusted; anything else is ignored so a
+// tampered/foreign URL can never influence where the API key is sent. Returns
+// `undefined` when no candidate is usable, letting the caller fall back.
+function resolveQueuePath(requestId: string, candidates: unknown[], baseUrl: string): string | undefined {
+  let expected: URL;
+  try {
+    expected = new URL(baseUrl);
+  } catch {
+    return undefined;
+  }
+
+  const marker = `/requests/${requestId}`;
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') {
+      continue;
+    }
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      continue;
+    }
+
+    if (parsed.protocol !== expected.protocol || parsed.host !== expected.host) {
+      continue;
+    }
+
+    const index = parsed.pathname.indexOf(marker);
+    if (index <= 0) {
+      continue;
+    }
+
+    const queuePath = parsed.pathname.slice(0, index).replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!queuePath || !ENDPOINT_PATTERN.test(queuePath)) {
+      continue;
+    }
+    return queuePath;
+  }
+
+  return undefined;
 }
 
-export function decodeFalJobId(jobId: string, fallbackEndpoint?: string): FalJobIdentity {
+// Composite, durable job identity. The registry constructs a fresh provider per
+// call and `getStatus`/`download` receive only the provider job id, so the queue
+// resource path must travel with the request id or a restart could poll the wrong
+// location. Format: `fal:{queuePath}:{request_id}`. The format is unchanged from
+// the original `fal:{endpoint}:{request_id}`; only the meaning of the middle
+// segment is now "queue path" (for a two-segment app id it is identical to the
+// model id). Legacy ids still decode and behave exactly as before the fix.
+export function encodeFalJobId(queuePath: string, requestId: string): string {
+  return `${JOB_ID_PREFIX}:${queuePath}:${requestId}`;
+}
+
+export function decodeFalJobId(jobId: string, fallbackQueuePath?: string): FalJobIdentity {
   const trimmed = (jobId || '').trim();
   if (!trimmed) {
     throw new VideoGenerationProviderError('A FAL video job id is required.', 400, 'INVALID_REQUEST');
@@ -144,18 +210,19 @@ export function decodeFalJobId(jobId: string, fallbackEndpoint?: string): FalJob
     const rest = trimmed.slice(JOB_ID_PREFIX.length + 1);
     const separator = rest.lastIndexOf(':');
     if (separator > 0 && separator < rest.length - 1) {
-      const endpoint = rest.slice(0, separator);
+      const queuePath = rest.slice(0, separator);
       const requestId = rest.slice(separator + 1);
-      if (ENDPOINT_PATTERN.test(endpoint) && requestId) {
-        return { endpoint, requestId };
+      if (ENDPOINT_PATTERN.test(queuePath) && requestId) {
+        return { queuePath, requestId };
       }
     }
     throw new VideoGenerationProviderError('Malformed FAL video job id.', 400, 'INVALID_REQUEST');
   }
 
-  // Legacy/raw request id: fall back to the configured endpoint.
-  const endpoint = fallbackEndpoint ? resolveEndpoint(fallbackEndpoint) : DEFAULT_FAL_VIDEO_ENDPOINT;
-  return { endpoint, requestId: trimmed };
+  // Legacy/raw request id: fall back to the configured endpoint. Old multi-segment
+  // model ids encoded before the queue-path fix keep their (previous) behaviour.
+  const queuePath = fallbackQueuePath ? resolveEndpoint(fallbackQueuePath) : DEFAULT_FAL_VIDEO_ENDPOINT;
+  return { queuePath, requestId: trimmed };
 }
 
 function mapFalStatus(status: unknown): VideoGenerationStatusResult {
@@ -345,6 +412,9 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
       const body = (await response.json().catch(() => ({}))) as {
         request_id?: unknown;
         status?: unknown;
+        response_url?: unknown;
+        status_url?: unknown;
+        cancel_url?: unknown;
       };
 
       if (!response.ok) {
@@ -356,9 +426,15 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
         throw new VideoGenerationProviderError('FAL did not return a request id.', 502, 'PROVIDER_FAILED');
       }
 
+      // Prefer the queue path FAL reports in its own URLs; fall back to the
+      // submitted endpoint when the response omits them (older/edge responses).
+      const queuePath =
+        resolveQueuePath(requestId, [body.response_url, body.status_url, body.cancel_url], this.baseUrl) ??
+        endpoint;
+
       const mapped = mapFalStatus(body.status);
       return {
-        providerJobId: encodeFalJobId(endpoint, requestId),
+        providerJobId: encodeFalJobId(queuePath, requestId),
         status: mapped.status === 'generating' ? 'generating' : 'queued',
         providerStatus: mapped.providerStatus
       };
@@ -370,13 +446,13 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
   async getStatus(providerJobId: string): Promise<VideoGenerationStatusResult> {
     this.assertConfigured();
 
-    const { endpoint, requestId } = decodeFalJobId(providerJobId, this.endpoint);
+    const { queuePath, requestId } = decodeFalJobId(providerJobId, this.endpoint);
     const { signal, cleanup } = createRequestSignal(this.timeoutMs);
     try {
       let response: Response;
       try {
         response = await this.fetchImpl(
-          `${this.baseUrl}/${endpoint}/requests/${encodeURIComponent(requestId)}/status?logs=1`,
+          `${this.baseUrl}/${queuePath}/requests/${encodeURIComponent(requestId)}/status?logs=1`,
           {
             method: 'GET',
             headers: { Authorization: `Key ${this.apiKey}` },
@@ -419,12 +495,12 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
   async download(providerJobId: string): Promise<VideoGenerationDownload> {
     this.assertConfigured();
 
-    const { endpoint, requestId } = decodeFalJobId(providerJobId, this.endpoint);
+    const { queuePath, requestId } = decodeFalJobId(providerJobId, this.endpoint);
     const { signal, cleanup } = createRequestSignal(this.timeoutMs);
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(`${this.baseUrl}/${endpoint}/requests/${encodeURIComponent(requestId)}`, {
+        response = await this.fetchImpl(`${this.baseUrl}/${queuePath}/requests/${encodeURIComponent(requestId)}`, {
           method: 'GET',
           headers: { Authorization: `Key ${this.apiKey}` },
           signal
@@ -480,7 +556,7 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
         data: bytes,
         metadata: {
           providerRequestId: requestId,
-          endpoint
+          queuePath
         }
       };
     } finally {
@@ -491,13 +567,13 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
   async cancel(providerJobId: string): Promise<void> {
     this.assertConfigured();
 
-    const { endpoint, requestId } = decodeFalJobId(providerJobId, this.endpoint);
+    const { queuePath, requestId } = decodeFalJobId(providerJobId, this.endpoint);
     const { signal, cleanup } = createRequestSignal(this.timeoutMs);
     try {
       let response: Response;
       try {
         response = await this.fetchImpl(
-          `${this.baseUrl}/${endpoint}/requests/${encodeURIComponent(requestId)}/cancel`,
+          `${this.baseUrl}/${queuePath}/requests/${encodeURIComponent(requestId)}/cancel`,
           {
             method: 'PUT',
             headers: { Authorization: `Key ${this.apiKey}` },

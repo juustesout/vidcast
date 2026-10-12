@@ -242,7 +242,7 @@ describe('FalVideoGenerationProvider', () => {
 
     expect(download.mimeType).toBe('video/mp4');
     expect(download.data.equals(media)).toBe(true);
-    expect(download.metadata).toEqual({ providerRequestId: 'req-1', endpoint: ENDPOINT });
+    expect(download.metadata).toEqual({ providerRequestId: 'req-1', queuePath: ENDPOINT });
 
     expect(calls).toHaveLength(2);
     expect(calls[0].headers.authorization).toBe('Key test-key');
@@ -313,9 +313,107 @@ describe('FalVideoGenerationProvider', () => {
   });
 
   it('validates composite job ids', () => {
-    expect(decodeFalJobId(encodeFalJobId(ENDPOINT, 'req-1'))).toEqual({ endpoint: ENDPOINT, requestId: 'req-1' });
-    expect(decodeFalJobId('req-raw', ENDPOINT)).toEqual({ endpoint: ENDPOINT, requestId: 'req-raw' });
+    expect(decodeFalJobId(encodeFalJobId(ENDPOINT, 'req-1'))).toEqual({ queuePath: ENDPOINT, requestId: 'req-1' });
+    expect(decodeFalJobId('req-raw', ENDPOINT)).toEqual({ queuePath: ENDPOINT, requestId: 'req-raw' });
     expect(() => decodeFalJobId('')).toThrow(/required/i);
     expect(() => decodeFalJobId('fal:bad endpoint:req-1')).toThrow(/malformed/i);
+  });
+
+  it('derives the queue path from the submit response for a multi-segment model', async () => {
+    // FAL reports the queue resource as `minimax/h3-max-turbo/requests/{id}`,
+    // dropping the `text-to-video` endpoint sub-path (P38 finding).
+    const { fetchImpl, calls } = recordingFetch(() =>
+      jsonResponse({
+        request_id: 'req-3seg',
+        status: 'IN_QUEUE',
+        response_url: `${BASE_URL}/minimax/h3-max-turbo/requests/req-3seg`,
+        status_url: `${BASE_URL}/minimax/h3-max-turbo/requests/req-3seg/status`,
+        cancel_url: `${BASE_URL}/minimax/h3-max-turbo/requests/req-3seg/cancel`
+      })
+    );
+    const fal = provider(fetchImpl);
+
+    const submission = await fal.submit({ prompt: 'a scene' });
+    expect(submission.providerJobId).toBe(encodeFalJobId('minimax/h3-max-turbo', 'req-3seg'));
+
+    // Status must use the returned queue path, not the full model id.
+    await fal.getStatus(submission.providerJobId);
+    expect(calls[1].url).toBe(`${BASE_URL}/minimax/h3-max-turbo/requests/req-3seg/status?logs=1`);
+    expect(calls[1].headers.authorization).toBe('Key test-key');
+    expect(calls.some((call) => call.url.includes('/minimax/h3-max-turbo/text-to-video/requests/'))).toBe(false);
+  });
+
+  it('prefers the validated response_url and ignores a foreign-hosted status_url', async () => {
+    const { fetchImpl, calls } = recordingFetch(() =>
+      jsonResponse({
+        request_id: 'req-mixed',
+        status: 'IN_QUEUE',
+        // Tampered/foreign status_url must be ignored; response_url is valid.
+        status_url: 'https://evil.example.com/minimax/h3-max-turbo/requests/req-mixed/status',
+        response_url: `${BASE_URL}/minimax/h3-max-turbo/requests/req-mixed`
+      })
+    );
+    const fal = provider(fetchImpl);
+
+    const submission = await fal.submit({ prompt: 'a scene' });
+    expect(submission.providerJobId).toBe(encodeFalJobId('minimax/h3-max-turbo', 'req-mixed'));
+
+    await fal.getStatus(submission.providerJobId);
+    expect(calls.every((call) => call.url.startsWith(BASE_URL))).toBe(true);
+    expect(calls.some((call) => call.url.includes('evil.example.com'))).toBe(false);
+  });
+
+  it('falls back to the submitted endpoint when no response URL is usable', async () => {
+    const { fetchImpl, calls } = recordingFetch(() =>
+      jsonResponse({
+        request_id: 'req-evil',
+        status: 'IN_QUEUE',
+        response_url: 'https://evil.example.com/minimax/h3-max-turbo/requests/req-evil'
+      })
+    );
+    const fal = provider(fetchImpl);
+
+    const submission = await fal.submit({ prompt: 'a scene' });
+    expect(submission.providerJobId).toBe(encodeFalJobId(ENDPOINT, 'req-evil'));
+    // Only the configured queue host was ever contacted.
+    expect(calls.map((call) => call.url)).toEqual([`${BASE_URL}/${ENDPOINT}`]);
+  });
+
+  it('polls and downloads the queue path after a fresh provider instance is built', async () => {
+    const media = Buffer.from('fake-mp4-bytes');
+    const queuePath = 'minimax/h3-max-turbo';
+    const jobId = encodeFalJobId(queuePath, 'req-resume');
+
+    const statusFetch = recordingFetch(() => jsonResponse({ status: 'COMPLETED' }));
+    const status = await provider(statusFetch.fetchImpl).getStatus(jobId);
+    expect(status.status).toBe('generated');
+    expect(statusFetch.calls[0].url).toBe(`${BASE_URL}/${queuePath}/requests/req-resume/status?logs=1`);
+
+    const downloadFetch = recordingFetch((call) => {
+      if (call.url === `${BASE_URL}/${queuePath}/requests/req-resume`) {
+        return jsonResponse({ video: { url: 'https://v3.fal.media/clip.mp4', content_type: 'video/mp4' } });
+      }
+      return bytesResponse(media);
+    });
+    const download = await provider(downloadFetch.fetchImpl).download(jobId);
+    expect(download.data.equals(media)).toBe(true);
+    expect(download.metadata).toEqual({ providerRequestId: 'req-resume', queuePath });
+  });
+
+  it('cancels through the queue path encoded in the job id', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ success: true }));
+    const fal = provider(fetchImpl);
+
+    await fal.cancel(encodeFalJobId('minimax/h3-max-turbo', 'req-1'));
+    expect(calls[0].method).toBe('PUT');
+    expect(calls[0].url).toBe(`${BASE_URL}/minimax/h3-max-turbo/requests/req-1/cancel`);
+  });
+
+  it('keeps decoding legacy fal:{endpoint}:{request_id} job ids unchanged', () => {
+    expect(decodeFalJobId('fal:minimax/h3-max-turbo/text-to-video:old-1')).toEqual({
+      queuePath: 'minimax/h3-max-turbo/text-to-video',
+      requestId: 'old-1'
+    });
+    expect(decodeFalJobId('raw-legacy-id', 'some/app')).toEqual({ queuePath: 'some/app', requestId: 'raw-legacy-id' });
   });
 });
