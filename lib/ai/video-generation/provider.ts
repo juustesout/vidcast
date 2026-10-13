@@ -1,12 +1,19 @@
 import type { GenerationErrorCode, GenerationStatus } from '@/lib/types/generation';
 import type { AspectRatio } from '@/lib/types/render';
 
+// Reference roles are explicit and mutually exclusive:
+//  - `reference`: a general/style reference image (default; used by providers
+//    that accept reference conditioning).
+//  - `start_frame`: the image that seeds the first frame of an image-to-video clip.
+//  - `end_frame`: an optional image that seeds the last frame of the clip.
+export type VideoReferenceRole = 'reference' | 'start_frame' | 'end_frame';
+
 export interface VideoReferenceInput {
   id: string;
   mimeType: string;
   data: Buffer;
   filename?: string;
-  role?: 'reference' | 'start_frame';
+  role?: VideoReferenceRole;
 }
 
 export interface VideoGenerationRequest {

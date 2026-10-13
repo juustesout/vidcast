@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import type { VideoGenerationRequest } from '@/lib/ai/video-generation/provider';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
@@ -92,6 +93,7 @@ function createProject(): Project {
 function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?: boolean; failOnStatus?: boolean; failOnDownload?: boolean }) {
   const state = { project: structuredClone(project) as Project };
   let createdAssetCount = 0;
+  const submitRequests: VideoGenerationRequest[] = [];
 
   const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
@@ -140,7 +142,7 @@ function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?
       };
     },
     async exists(_projectId: string, localPath: string) {
-      return localPath === 'references/ref.png';
+      return localPath.startsWith('references/');
     },
     async readRelativeFile() {
       return Buffer.from('ref-bytes');
@@ -151,10 +153,11 @@ function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?
     getProvider() {
       return {
         providerId: 'fake',
-        async submit() {
+        async submit(request: VideoGenerationRequest) {
           if (behavior?.failOnSubmit) {
             throw new Error('submit failed');
           }
+          submitRequests.push(request);
           return {
             providerJobId: 'job-1',
             status: 'queued' as const,
@@ -184,7 +187,7 @@ function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?
     }
   };
 
-  return { state, store, media, registry };
+  return { state, store, media, registry, submitRequests };
 }
 
 describe('video generation service', () => {
@@ -283,5 +286,93 @@ describe('video generation service', () => {
       media: deps.media,
       registry: deps.registry as never
     });
+  });
+
+  function addReference(project: Project, id: string): void {
+    project.references.push({
+      id,
+      name: id,
+      description: '',
+      filePath: `references/${id}.png`,
+      tags: [],
+      metadata: { mimeType: 'image/png' },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  function setFrames(project: Project, frames: { start?: string; end?: string; referenceIds?: string[] }): void {
+    const scene = project.scenes[0];
+    if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    scene.visual.generation = {
+      ...scene.visual.generation,
+      ...(frames.referenceIds ? { referenceIds: frames.referenceIds } : {}),
+      startFrameReferenceId: frames.start,
+      endFrameReferenceId: frames.end
+    };
+    if (frames.referenceIds) {
+      scene.referenceIds = frames.referenceIds;
+    }
+  }
+
+  function submit(deps: ReturnType<typeof createInMemoryDependencies>) {
+    return submitSceneVideoGeneration('project-video-1', 'scene-video-1', { regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+  }
+
+  it('maps designated keyframes to start_frame/end_frame and leaves other references plain', async () => {
+    const project = createProject();
+    addReference(project, 'ref-2');
+    setFrames(project, { start: 'ref-1', end: 'ref-2', referenceIds: ['ref-1', 'ref-2'] });
+    const deps = createInMemoryDependencies(project);
+
+    await submit(deps);
+
+    expect(deps.submitRequests).toHaveLength(1);
+    expect(deps.submitRequests[0].references?.map((reference) => [reference.id, reference.role])).toEqual([
+      ['ref-1', 'start_frame'],
+      ['ref-2', 'end_frame']
+    ]);
+  });
+
+  it('keeps references plain when no keyframes are designated', async () => {
+    const deps = createInMemoryDependencies(createProject());
+
+    await submit(deps);
+
+    expect(deps.submitRequests[0].references?.map((reference) => reference.role)).toEqual(['reference']);
+  });
+
+  it('rejects a designated frame that is not part of the scene references', async () => {
+    const project = createProject();
+    setFrames(project, { start: 'ref-missing' });
+    const deps = createInMemoryDependencies(project);
+
+    await expect(submit(deps)).rejects.toMatchObject({ code: 'generation.reference.startFrameInvalid' });
+    expect(deps.submitRequests).toHaveLength(0);
+  });
+
+  it('rejects identical start and end frame references', async () => {
+    const project = createProject();
+    setFrames(project, { start: 'ref-1', end: 'ref-1' });
+    const deps = createInMemoryDependencies(project);
+
+    await expect(submit(deps)).rejects.toMatchObject({ code: 'generation.reference.frameConflict' });
+    expect(deps.submitRequests).toHaveLength(0);
+  });
+
+  it('persists the keyframe designations on the accepted attempt', async () => {
+    const project = createProject();
+    setFrames(project, { start: 'ref-1' });
+    const deps = createInMemoryDependencies(project);
+
+    await submit(deps);
+
+    const scene = deps.state.project.scenes[0];
+    if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(scene.visual.generation.startFrameReferenceId).toBe('ref-1');
   });
 });

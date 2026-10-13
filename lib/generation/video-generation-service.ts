@@ -170,7 +170,48 @@ function getReferenceById(project: Project, referenceId: string): ReferenceImage
   return reference;
 }
 
-async function resolveReferenceInputs(project: Project, referenceIds: string[], media: VideoGenerationServiceDependencies['media']): Promise<VideoReferenceInput[]> {
+interface FrameReferenceDesignation {
+  startFrameReferenceId?: string;
+  endFrameReferenceId?: string;
+}
+
+// Validates that explicitly designated keyframe references are usable before any
+// provider call: both frames must be distinct and must be part of the scene's
+// effective reference set. A missing/unknown frame is a request error, not a
+// silently ignored input.
+function assertFrameReferences(referenceIds: string[], frames: FrameReferenceDesignation): void {
+  const { startFrameReferenceId, endFrameReferenceId } = frames;
+
+  if (startFrameReferenceId && endFrameReferenceId && startFrameReferenceId === endFrameReferenceId) {
+    throw new SceneVideoGenerationError(
+      'The start frame and end frame must reference different images.',
+      400,
+      'generation.reference.frameConflict'
+    );
+  }
+
+  const entries: Array<[label: string, id: string | undefined]> = [
+    ['start', startFrameReferenceId],
+    ['end', endFrameReferenceId]
+  ];
+
+  for (const [label, id] of entries) {
+    if (id && !referenceIds.includes(id)) {
+      throw new SceneVideoGenerationError(
+        `The ${label} frame reference ${id} is not part of the scene references.`,
+        400,
+        `generation.reference.${label}FrameInvalid`
+      );
+    }
+  }
+}
+
+async function resolveReferenceInputs(
+  project: Project,
+  referenceIds: string[],
+  media: VideoGenerationServiceDependencies['media'],
+  frames: FrameReferenceDesignation = {}
+): Promise<VideoReferenceInput[]> {
   const references: VideoReferenceInput[] = [];
 
   for (const referenceId of referenceIds) {
@@ -183,12 +224,21 @@ async function resolveReferenceInputs(project: Project, referenceIds: string[], 
     const bytes = await media.readRelativeFile(project.id, reference.filePath!);
     const mimeType = typeof reference.metadata?.mimeType === 'string' ? reference.metadata.mimeType : 'image/png';
 
+    // Plain references stay `reference`; only explicitly designated keyframes are
+    // marked, so text-to-video and existing reference behaviour is unchanged.
+    const role: VideoReferenceInput['role'] =
+      reference.id === frames.startFrameReferenceId
+        ? 'start_frame'
+        : reference.id === frames.endFrameReferenceId
+          ? 'end_frame'
+          : 'reference';
+
     references.push({
       id: reference.id,
       mimeType,
       data: bytes,
       filename: path.basename(reference.filePath!),
-      role: 'reference'
+      role
     });
   }
 
@@ -268,7 +318,8 @@ export async function submitSceneVideoGeneration(
     const providerKey = resolveVideoProvider(options.provider, options.mode);
     const provider = dependencies.registry.getProvider(providerKey);
     const referenceIds = current.referenceIds && current.referenceIds.length > 0 ? current.referenceIds : scene.referenceIds;
-    const references = await resolveReferenceInputs(project, referenceIds, dependencies.media);
+    assertFrameReferences(referenceIds, current);
+    const references = await resolveReferenceInputs(project, referenceIds, dependencies.media, current);
     const previousAssetId = scene.visual.assetId || current.assetId;
     const attemptId = createId('generation_attempt');
 

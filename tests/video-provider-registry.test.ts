@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createVideoGenerationRegistry, getVideoGenerationConfigurationStatus } from '@/lib/ai/video-generation/registry';
 import { VideoGenerationProviderError } from '@/lib/ai/video-generation/provider';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe('Video provider registry', () => {
   it('resolves openai provider', () => {
@@ -24,6 +28,16 @@ describe('Video provider registry', () => {
     expect(provider.providerId).toBe('fal');
     expect(typeof provider.submit).toBe('function');
     expect(typeof provider.getStatus).toBe('function');
+  });
+
+  it('reflects the configured fal endpoint in the resolved provider capabilities', () => {
+    const registry = createVideoGenerationRegistry();
+
+    vi.stubEnv('FAL_VIDEO_ENDPOINT', 'minimax/h3-max-turbo/image-to-video');
+    expect(registry.getProvider('fal').getCapabilities().supportsImageToVideo).toBe(true);
+
+    vi.stubEnv('FAL_VIDEO_ENDPOINT', 'minimax/h3-max-turbo/text-to-video');
+    expect(registry.getProvider('fal').getCapabilities().supportsImageToVideo).toBe(false);
   });
 
   it('fails cleanly for unknown provider', () => {

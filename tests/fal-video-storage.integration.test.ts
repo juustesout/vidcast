@@ -12,6 +12,7 @@ import { mediaStore } from '@/lib/storage/media-store';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 
 const ENDPOINT = 'minimax/h3-max-turbo/text-to-video';
+const I2V_ENDPOINT = 'minimax/h3-max-turbo/image-to-video';
 
 async function ffmpegAvailable(): Promise<boolean> {
   try {
@@ -44,6 +45,30 @@ async function createFixtureVideo(outputPath: string): Promise<void> {
   );
 }
 
+function createFalFetchImpl(fixtureBytes: Buffer): (url: string) => Promise<Response> {
+  return async (url: string): Promise<Response> => {
+    if (url.endsWith('/status?logs=1')) {
+      return new Response(JSON.stringify({ status: 'COMPLETED' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    if (url.endsWith('/requests/req-media-1')) {
+      return new Response(
+        JSON.stringify({ video: { url: 'https://v3.fal.media/generated.mp4', content_type: 'video/mp4' } }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (url === 'https://v3.fal.media/generated.mp4') {
+      return new Response(new Uint8Array(fixtureBytes), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' }
+      });
+    }
+    return new Response('{}', { status: 404 });
+  };
+}
+
 describe('FAL video storage integration', () => {
   const createdProjectIds: string[] = [];
 
@@ -65,27 +90,7 @@ describe('FAL video storage integration', () => {
     const fixtureBytes = await fs.readFile(fixturePath);
 
     try {
-      const fetchImpl = async (url: string): Promise<Response> => {
-        if (url.endsWith('/status?logs=1')) {
-          return new Response(JSON.stringify({ status: 'COMPLETED' }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' }
-          });
-        }
-        if (url.endsWith('/requests/req-media-1')) {
-          return new Response(
-            JSON.stringify({ video: { url: 'https://v3.fal.media/generated.mp4', content_type: 'video/mp4' } }),
-            { status: 200, headers: { 'content-type': 'application/json' } }
-          );
-        }
-        if (url === 'https://v3.fal.media/generated.mp4') {
-          return new Response(new Uint8Array(fixtureBytes), {
-            status: 200,
-            headers: { 'content-type': 'video/mp4' }
-          });
-        }
-        return new Response('{}', { status: 404 });
-      };
+      const fetchImpl = createFalFetchImpl(fixtureBytes);
 
       const provider = new FalVideoGenerationProvider({
         apiKey: 'fal-test-key',
@@ -141,6 +146,67 @@ describe('FAL video storage integration', () => {
       const probe = await probeMedia(storedPath);
       const videoStream = probe.streams.find((stream) => stream.codec_type === 'video');
       expect(videoStream).toBeDefined();
+      expect(videoStream?.width).toBe(160);
+      expect(videoStream?.height).toBe(120);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+    }
+  }, 60_000);
+
+  it('stores an image-to-video download using the shortened queue path', async () => {
+    if (!(await ffmpegAvailable())) {
+      return;
+    }
+
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'fal-video-i2v-storage-'));
+    const fixturePath = path.join(tempRoot, 'fixture.mp4');
+    await createFixtureVideo(fixturePath);
+    const fixtureBytes = await fs.readFile(fixturePath);
+
+    try {
+      const provider = new FalVideoGenerationProvider({
+        apiKey: 'fal-test-key',
+        baseUrl: 'https://queue.test',
+        endpoint: I2V_ENDPOINT,
+        fetchImpl: createFalFetchImpl(fixtureBytes)
+      });
+
+      // Submit records the app queue path (not the endpoint sub-path) in the composite
+      // job id; here we construct that resolved form directly to exercise poll/download.
+      const jobId = encodeFalJobId('minimax/h3-max-turbo', 'req-media-1');
+      expect(jobId).not.toContain('image-to-video');
+      expect((await provider.getStatus(jobId)).status).toBe('generated');
+
+      const download = await provider.download(jobId);
+      expect(download.mimeType).toBe('video/mp4');
+
+      const projectId = `test-fal-i2v-asset-${Date.now().toString(36)}`;
+      createdProjectIds.push(projectId);
+
+      const asset = await mediaStore.saveGeneratedVideo({
+        projectId,
+        sceneOrder: 1,
+        attemptId: 'attempt-fal-i2v-1',
+        mimeType: download.mimeType,
+        data: download.data,
+        generation: {
+          generationId: 'gen-fal-i2v-1',
+          provider: 'fal',
+          model: I2V_ENDPOINT,
+          prompt: 'animate the start frame',
+          referenceIds: [],
+          providerJobId: jobId
+        }
+      });
+
+      expect(asset.metadata?.providerJobId).toBe(jobId);
+
+      const storedPath = path.join(getProjectRoot(projectId), asset.localPath ?? '');
+      await runProcess('ffmpeg', ['-v', 'error', '-i', storedPath, '-f', 'null', '-'], { timeoutMs: 30_000 });
+      const probe = await probeMedia(storedPath);
+      const videoStream = probe.streams.find((stream) => stream.codec_type === 'video');
       expect(videoStream?.width).toBe(160);
       expect(videoStream?.height).toBe(120);
     } finally {

@@ -27,6 +27,13 @@ export interface GenerationSpec {
   referenceIds?: string[];
   aspectRatio?: AspectRatio;
   duration?: number;
+  // Image-to-video keyframes. Each id, when set, must be one of the effective
+  // `referenceIds` (the generation's own list, or the scene's fallback list) and
+  // selects which reference image seeds the first / last frame of the clip. Kept
+  // optional and separate from `referenceIds` so plain references and keyframes
+  // remain explicitly distinguished. Only meaningful for video generation.
+  startFrameReferenceId?: string;
+  endFrameReferenceId?: string;
   metadata?: Record<string, unknown>;
 }
 

@@ -54,6 +54,48 @@ function baseProject(): Project {
   });
 }
 
+function generatedVideoProject(startFrameReferenceId?: string): Project {
+  const project = baseProject();
+  const now = new Date().toISOString();
+  return normalizeProject({
+    ...project,
+    references: [
+      {
+        id: 'ref-1',
+        name: 'ref-1',
+        description: '',
+        filePath: 'references/ref-1.png',
+        tags: [],
+        metadata: { mimeType: 'image/png' },
+        createdAt: now,
+        updatedAt: now
+      }
+    ],
+    scenes: [
+      {
+        ...project.scenes[0],
+        type: 'video',
+        referenceIds: ['ref-1'],
+        visual: {
+          kind: 'generated_video',
+          generation: {
+            id: 'gen-1',
+            kind: 'video',
+            status: 'planned',
+            provider: 'fal',
+            model: 'minimax/h3-max-turbo/image-to-video',
+            prompt: 'animate the start frame',
+            referenceIds: ['ref-1'],
+            aspectRatio: '16:9',
+            startFrameReferenceId,
+            createdAt: now
+          }
+        }
+      }
+    ]
+  });
+}
+
 describe('applyProjectUpdate', () => {
   it('normalizes explainer payload and keeps core invariants', () => {
     const existing = baseProject();
@@ -197,5 +239,23 @@ describe('applyProjectUpdate', () => {
 
     expect(result.validation.valid).toBe(true);
     expect(result.project.scenes[0].narration?.text).toBe('Updated production narration');
+  });
+
+  it('preserves image-to-video keyframe designations through normalization', () => {
+    const project = generatedVideoProject('ref-1');
+    const visual = project.scenes[0].visual;
+    if (visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(visual.generation.startFrameReferenceId).toBe('ref-1');
+  });
+
+  it('accepts an image-to-video keyframe that resolves to a reference', () => {
+    const result = applyProjectUpdate(baseProject(), generatedVideoProject('ref-1'));
+    expect(result.validation.valid).toBe(true);
+  });
+
+  it('flags an image-to-video keyframe that does not resolve to a reference', () => {
+    const result = applyProjectUpdate(baseProject(), generatedVideoProject('ref-missing'));
+    expect(result.validation.valid).toBe(false);
+    expect(result.validation.errors.some((error) => error.code === 'scene.visual.generation.frameReference.missing')).toBe(true);
   });
 });

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertRunPolicyPreflight, resolveManualGenerationProvider, resolveRunPolicy, RunPolicyError } from '@/lib/production/run-policy';
 import type { Project } from '@/lib/types/render';
 
-function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' = 'openai'): Project {
+function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' = 'openai', model?: string): Project {
   const now = new Date().toISOString();
   return {
     id: 'project-policy',
@@ -45,7 +45,8 @@ function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' =
             referenceIds: [],
             aspectRatio: '16:9',
             providerJobId: 'job-1',
-            createdAt: now
+            createdAt: now,
+            ...(model ? { model } : {})
           }
         },
         render: { motion: { preset: 'none' }, transition: { type: 'none' } },
@@ -299,6 +300,17 @@ describe('FAL video provider policy', () => {
   it('rejects fal for a real video run without FAL_KEY', () => {
     vi.stubEnv('FAL_KEY', '');
     const project = createProjectWithRunningVideoJob('openai');
+    const policy = resolveRunPolicy(
+      { mode: 'real', providers: { video: 'fal' } },
+      realServer
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/FAL_KEY/);
+  });
+
+  it('requires FAL_KEY for an image-to-video scene model (no per-scene model bypass)', () => {
+    vi.stubEnv('FAL_KEY', '');
+    const project = createProjectWithRunningVideoJob('fal', 'minimax/h3-max-turbo/image-to-video');
     const policy = resolveRunPolicy(
       { mode: 'real', providers: { video: 'fal' } },
       realServer

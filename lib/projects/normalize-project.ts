@@ -166,6 +166,8 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
       prompt,
       negativePrompt,
       referenceIds,
+      startFrameReferenceId: legacyVisual?.generation?.startFrameReferenceId,
+      endFrameReferenceId: legacyVisual?.generation?.endFrameReferenceId,
       aspectRatio,
       duration: legacyVisual?.generation?.duration ?? scene.duration,
       assetId: legacyVisual?.generation?.assetId ?? assetId,

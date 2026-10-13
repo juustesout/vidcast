@@ -227,6 +227,17 @@ export function validateProject(project: Project): RenderValidationResult {
         }
       }
 
+      // Image-to-video keyframes are references too; validate they resolve so a
+      // typo surfaces at project validation instead of at provider submit time.
+      for (const [field, frameReferenceId] of [
+        ['startFrameReferenceId', visual.generation.startFrameReferenceId],
+        ['endFrameReferenceId', visual.generation.endFrameReferenceId]
+      ] as const) {
+        if (frameReferenceId && !referenceIds.has(frameReferenceId)) {
+          pushIssue(errors, 'error', 'scene.visual.generation.frameReference.missing', `scenes.${sceneId}.visual.generation.${field}`, `Referenced generation frame ${frameReferenceId} does not exist.`);
+        }
+      }
+
       if (visual.generation.status === 'generated' && !(visual.assetId ?? visual.generation.assetId)) {
         pushIssue(errors, 'error', 'scene.visual.generation.asset.required', `scenes.${sceneId}.visual.assetId`, 'Generated visuals require an asset id when status is generated.');
       }

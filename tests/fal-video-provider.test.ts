@@ -417,3 +417,151 @@ describe('FalVideoGenerationProvider', () => {
     expect(decodeFalJobId('raw-legacy-id', 'some/app')).toEqual({ queuePath: 'some/app', requestId: 'raw-legacy-id' });
   });
 });
+
+describe('FalVideoGenerationProvider image-to-video', () => {
+  const I2V_ENDPOINT = 'minimax/h3-max-turbo/image-to-video';
+
+  function frame(role: 'start_frame' | 'end_frame' | 'reference', bytes: string, mimeType = 'image/png') {
+    return { id: `ref-${role}`, mimeType, data: Buffer.from(bytes), role };
+  }
+
+  function dataUri(bytes: string, mimeType = 'image/png'): string {
+    return `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
+  }
+
+  it('advertises image-to-video capabilities when configured for the i2v endpoint', () => {
+    const { fetchImpl } = recordingFetch(() => jsonResponse({}));
+    const capabilities = provider(fetchImpl, { endpoint: I2V_ENDPOINT }).getCapabilities();
+
+    expect(capabilities.supportsTextToVideo).toBe(true);
+    expect(capabilities.supportsImageToVideo).toBe(true);
+    expect(capabilities.supportsReferences).toBe(false);
+    expect(capabilities.supportsCancellation).toBe(true);
+  });
+
+  it('submits a start frame as image_url, forces sync_mode false and omits aspect_ratio', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'req-i2v', status: 'IN_QUEUE' }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    const submission = await fal.submit({
+      prompt: 'animate this still',
+      aspectRatio: '16:9',
+      durationSeconds: 5,
+      references: [frame('start_frame', 'start-bytes')]
+    });
+
+    expect(submission.providerJobId).toBe(encodeFalJobId(I2V_ENDPOINT, 'req-i2v'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(`${BASE_URL}/${I2V_ENDPOINT}`);
+
+    const body = JSON.parse(calls[0].body ?? '{}');
+    expect(body).toEqual({
+      prompt: 'animate this still',
+      prompt_expansion_mode: 'disabled',
+      sync_mode: false,
+      image_url: dataUri('start-bytes'),
+      duration: 5
+    });
+    expect(body).not.toHaveProperty('aspect_ratio');
+    expect(body).not.toHaveProperty('end_image_url');
+  });
+
+  it('submits a start and end frame together', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'req-i2v', status: 'IN_QUEUE' }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    await fal.submit({
+      prompt: 'interpolate',
+      references: [frame('start_frame', 'first'), frame('end_frame', 'last')]
+    });
+
+    const body = JSON.parse(calls[0].body ?? '{}');
+    expect(body.image_url).toBe(dataUri('first'));
+    expect(body.end_image_url).toBe(dataUri('last'));
+    expect(body.sync_mode).toBe(false);
+  });
+
+  it('submits an end-only frame as end_image_url', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'req-i2v', status: 'IN_QUEUE' }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    await fal.submit({ prompt: 'end only', references: [frame('end_frame', 'last')] });
+
+    const body = JSON.parse(calls[0].body ?? '{}');
+    expect(body).not.toHaveProperty('image_url');
+    expect(body.end_image_url).toBe(dataUri('last'));
+  });
+
+  it('uses the per-request model override to select the i2v endpoint', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'req-i2v', status: 'IN_QUEUE' }));
+    // Configured default is text-to-video; the scene overrides to i2v.
+    const fal = provider(fetchImpl);
+
+    await fal.submit({ prompt: 'x', model: I2V_ENDPOINT, references: [frame('start_frame', 's')] });
+
+    expect(calls[0].url).toBe(`${BASE_URL}/${I2V_ENDPOINT}`);
+    const body = JSON.parse(calls[0].body ?? '{}');
+    expect(body.image_url).toBe(dataUri('s'));
+  });
+
+  it('rejects image-to-video without a start or end frame', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'x' }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    await expect(fal.submit({ prompt: 'no frame' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects plain references on the image-to-video endpoint', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'x' }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    await expect(
+      fal.submit({ prompt: 'x', references: [frame('reference', 'plain')] })
+    ).rejects.toMatchObject({ code: 'REFERENCE_ERROR' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects multiple start frames and non-image/empty frames', async () => {
+    const { fetchImpl } = recordingFetch(() => jsonResponse({ request_id: 'x' }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    await expect(
+      fal.submit({ prompt: 'x', references: [frame('start_frame', 'a'), frame('start_frame', 'b')] })
+    ).rejects.toMatchObject({ code: 'REFERENCE_ERROR' });
+
+    await expect(
+      fal.submit({ prompt: 'x', references: [frame('start_frame', 'a', 'video/mp4')] })
+    ).rejects.toMatchObject({ code: 'REFERENCE_ERROR' });
+
+    await expect(
+      fal.submit({ prompt: 'x', references: [{ id: 'r', mimeType: 'image/png', data: Buffer.alloc(0), role: 'start_frame' }] })
+    ).rejects.toMatchObject({ code: 'REFERENCE_ERROR' });
+  });
+
+  it('still rejects a start frame on the text-to-video endpoint', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'x' }));
+    const fal = provider(fetchImpl);
+
+    await expect(
+      fal.submit({ prompt: 'x', references: [frame('start_frame', 'a')] })
+    ).rejects.toMatchObject({ code: 'REFERENCE_ERROR' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('does not leak frame bytes or the key into submit error messages', async () => {
+    const secretBytes = 'super-secret-frame-bytes';
+    const { fetchImpl } = recordingFetch(() => jsonResponse({ detail: 'nope' }, { status: 500 }));
+    const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });
+
+    try {
+      await fal.submit({ prompt: 'x', references: [frame('start_frame', secretBytes)] });
+      throw new Error('expected rejection');
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).not.toContain(secretBytes);
+      expect(message).not.toContain(Buffer.from(secretBytes).toString('base64'));
+      expect(message).not.toContain('test-key');
+    }
+  });
+});

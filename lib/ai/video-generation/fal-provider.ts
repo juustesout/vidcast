@@ -7,7 +7,8 @@ import {
   type VideoGenerationProvider,
   type VideoGenerationRequest,
   type VideoGenerationStatusResult,
-  type VideoGenerationSubmission
+  type VideoGenerationSubmission,
+  type VideoReferenceInput
 } from './provider';
 
 // Official FAL.ai queue contract (verified against
@@ -33,6 +34,10 @@ import {
 export const DEFAULT_FAL_VIDEO_ENDPOINT = 'minimax/h3-max-turbo/text-to-video';
 export const DEFAULT_FAL_VIDEO_BASE_URL = 'https://queue.fal.run';
 export const DEFAULT_FAL_VIDEO_PROMPT_EXPANSION_MODE = 'disabled';
+
+// Image-to-video variant. Same queue transport and job lifecycle as text-to-video;
+// only the input contract differs (keyframe image fields instead of aspect_ratio).
+export const FAL_IMAGE_TO_VIDEO_ENDPOINT_SUFFIX = 'image-to-video';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const JOB_ID_PREFIX = 'fal';
@@ -136,6 +141,65 @@ function resolveDuration(value: number | undefined): number | undefined {
     );
   }
   return rounded;
+}
+
+// The selected endpoint decides whether the adapter speaks text-to-video or
+// image-to-video. Kept private and derived from the resolved endpoint so the
+// configured default (env) and a per-request model override share one rule.
+function isImageToVideoEndpoint(endpoint: string): boolean {
+  const segments = endpoint.split('/');
+  return segments[segments.length - 1] === FAL_IMAGE_TO_VIDEO_ENDPOINT_SUFFIX;
+}
+
+// Maps the explicit frame roles to the two i2v image fields. Exactly the
+// designated keyframes are accepted; a plain `reference` (or a duplicate frame)
+// is rejected so unsupported inputs are never silently dropped.
+function resolveFrameReferences(references: VideoReferenceInput[]): {
+  startFrame?: VideoReferenceInput;
+  endFrame?: VideoReferenceInput;
+} {
+  let startFrame: VideoReferenceInput | undefined;
+  let endFrame: VideoReferenceInput | undefined;
+
+  for (const reference of references) {
+    if (reference.role === 'start_frame') {
+      if (startFrame) {
+        throw new VideoGenerationProviderError('FAL image-to-video accepts at most one start frame.', 422, 'REFERENCE_ERROR');
+      }
+      startFrame = reference;
+    } else if (reference.role === 'end_frame') {
+      if (endFrame) {
+        throw new VideoGenerationProviderError('FAL image-to-video accepts at most one end frame.', 422, 'REFERENCE_ERROR');
+      }
+      endFrame = reference;
+    } else {
+      throw new VideoGenerationProviderError(
+        'FAL image-to-video only accepts start/end frame images, not plain references.',
+        422,
+        'REFERENCE_ERROR'
+      );
+    }
+  }
+
+  if (!startFrame && !endFrame) {
+    throw new VideoGenerationProviderError('FAL image-to-video requires a start and/or end frame image.', 400, 'INVALID_REQUEST');
+  }
+
+  return { startFrame, endFrame };
+}
+
+// Encodes a local frame as a base64 data URI so the only authenticated request is
+// the queue submit; no public asset URL is created and the key never leaves the
+// queue host. Never logged or returned in error messages.
+function toImageDataUri(reference: VideoReferenceInput, label: 'start' | 'end'): string {
+  const mimeType = (reference.mimeType || '').trim().toLowerCase();
+  if (!mimeType.startsWith('image/')) {
+    throw new VideoGenerationProviderError(`FAL image-to-video ${label} frame must be an image.`, 422, 'REFERENCE_ERROR');
+  }
+  if (!reference.data || reference.data.byteLength === 0) {
+    throw new VideoGenerationProviderError(`FAL image-to-video ${label} frame is empty.`, 422, 'REFERENCE_ERROR');
+  }
+  return `data:${mimeType};base64,${reference.data.toString('base64')}`;
 }
 
 // Resolves the queue resource path from the URLs FAL returns on submit. The
@@ -344,9 +408,14 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
   }
 
   getCapabilities(): VideoGenerationCapabilities {
+    const imageToVideo = isImageToVideoEndpoint(this.endpoint);
     return {
       supportsTextToVideo: true,
-      supportsImageToVideo: false,
+      // Reflects the configured default endpoint; a per-request `model` override
+      // is the authority at submit time (see `submit`).
+      supportsImageToVideo: imageToVideo,
+      // Generic reference conditioning is not supported; image-to-video consumes
+      // only the explicitly designated start/end keyframes.
       supportsReferences: false,
       supportedAspectRatios: SUPPORTED_ASPECT_RATIOS,
       supportsCancellation: true
@@ -361,27 +430,42 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
       throw new VideoGenerationProviderError('Prompt is required.', 400, 'INVALID_REQUEST');
     }
 
-    // Phase 1 is text-to-video only. An unsupported input combination is
-    // rejected explicitly rather than silently dropped.
-    if (request.references && request.references.length > 0) {
-      throw new VideoGenerationProviderError(
-        'FAL text-to-video does not support reference images.',
-        422,
-        'REFERENCE_ERROR'
-      );
-    }
-
     const endpoint = resolveEndpoint(request.model?.trim() || this.endpoint);
-    const aspectRatio = resolveAspectRatio(request.aspectRatio);
+    const references = request.references ?? [];
     const duration = resolveDuration(request.durationSeconds);
 
     const payload: Record<string, unknown> = {
       prompt,
       prompt_expansion_mode: this.promptExpansionMode
     };
-    if (aspectRatio) {
-      payload.aspect_ratio = aspectRatio;
+
+    if (isImageToVideoEndpoint(endpoint)) {
+      const { startFrame, endFrame } = resolveFrameReferences(references);
+      // The i2v endpoint has no aspect_ratio field: the output canvas follows the
+      // frame image. `sync_mode` is explicitly false so the completed job exposes
+      // a CDN URL the download path can fetch (true would inline base64 media).
+      payload.sync_mode = false;
+      if (startFrame) {
+        payload.image_url = toImageDataUri(startFrame, 'start');
+      }
+      if (endFrame) {
+        payload.end_image_url = toImageDataUri(endFrame, 'end');
+      }
+    } else if (references.length > 0) {
+      // Text-to-video has no image input: an unsupported combination is rejected
+      // explicitly rather than silently dropped.
+      throw new VideoGenerationProviderError(
+        'FAL text-to-video does not support reference images.',
+        422,
+        'REFERENCE_ERROR'
+      );
+    } else {
+      const aspectRatio = resolveAspectRatio(request.aspectRatio);
+      if (aspectRatio) {
+        payload.aspect_ratio = aspectRatio;
+      }
     }
+
     if (duration !== undefined) {
       payload.duration = duration;
     }
