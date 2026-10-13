@@ -7,6 +7,8 @@ import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
 import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia, FFprobeError } from './ffprobe';
 import { buildSceneFadeFilters, createStillSceneSvg, sceneMotionToZoomPan } from './render-source';
+import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
+import type { RenderFit } from '@/lib/types/render';
 import { createSceneRenderFingerprint } from './render-fingerprint';
 import { getSceneRenderTimeoutMs } from './render-timeouts';
 import { buildSceneOverlayFilter } from './text-overlay';
@@ -23,6 +25,9 @@ export interface SceneRenderOptions {
   sceneWidth: number;
   sceneHeight: number;
   sceneFps: number;
+  // Scale policy for non-canvas-aspect sources. Defaults to `cover` (the
+  // historical center-crop) so existing renders are unchanged.
+  fit?: RenderFit;
 }
 
 export interface Renderer {
@@ -141,7 +146,13 @@ function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
   const zoomPan = sceneMotionToZoomPan(scene, frameCount);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
+  // Normalize the still source to the canvas using the same scale policy as the
+  // video path (cover = center-crop, contain = letterbox). For sources already
+  // rasterized to the canvas size this is a no-op; for a mismatched still image
+  // it prevents the silent stretch that zoompan would otherwise apply.
+  const fitFilter = buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT);
   const filterChain = [
+    fitFilter,
     `zoompan=${zoomPan}:d=${frameCount}:s=${options.sceneWidth}x${options.sceneHeight}:fps=${options.sceneFps}`,
     ...fadeFilters,
     ...(overlayFilter ? [overlayFilter] : []),
@@ -194,8 +205,7 @@ function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
     `trim=duration=${scene.duration}`,
     'setpts=PTS-STARTPTS',
     `tpad=stop_mode=clone:stop_duration=${extraDuration}`,
-    `scale=${options.sceneWidth}:${options.sceneHeight}:force_original_aspect_ratio=increase`,
-    `crop=${options.sceneWidth}:${options.sceneHeight}`,
+    buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT),
     ...fadeFilters,
     `fps=${options.sceneFps}`,
     ...(overlayFilter ? [overlayFilter] : []),

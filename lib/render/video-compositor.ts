@@ -7,6 +7,7 @@ import { parseDurationSeconds, probeMedia } from './ffprobe';
 import { getFinalComposeTimeoutMs } from './render-timeouts';
 import { formatVolumeFilter } from './audio-mix';
 import { resolveMusicFade } from './music-mix';
+import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p8';
@@ -102,7 +103,7 @@ export function buildNormalizeArgs(
   return [
     ...baseArgs,
     '-vf',
-    `scale=${plan.width}:${plan.height}:force_original_aspect_ratio=increase,crop=${plan.width}:${plan.height},fps=${plan.fps},format=yuv420p`,
+    `${buildVideoScaleFilter(plan.width, plan.height, plan.fit ?? DEFAULT_RENDER_FIT)},fps=${plan.fps},format=yuv420p`,
     '-filter_complex',
     filterComplex,
     '-map',

@@ -504,6 +504,19 @@ describe('FalVideoGenerationProvider image-to-video', () => {
     expect(body.image_url).toBe(dataUri('s'));
   });
 
+  it('rejects a syntactically invalid per-request model before any request is made', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'x' }));
+    const fal = provider(fetchImpl);
+
+    await expect(fal.submit({ prompt: 'x', model: 'https://evil.example.com/model?x=1' })).rejects.toMatchObject({
+      code: 'INVALID_REQUEST'
+    });
+    await expect(fal.submit({ prompt: 'x', model: '../traversal' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(fal.submit({ prompt: 'x', model: 'has space' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+
+    expect(calls).toHaveLength(0);
+  });
+
   it('rejects image-to-video without a start or end frame', async () => {
     const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ request_id: 'x' }));
     const fal = provider(fetchImpl, { endpoint: I2V_ENDPOINT });

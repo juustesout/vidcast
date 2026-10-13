@@ -8,6 +8,7 @@ import type { CompositionArtifact, CompositionPlan, CompositionResult, Compositi
 import { createId } from '@/lib/utils/ids';
 import { createCompositionPaths, ensureCompositionDirectories } from './composition-artifacts';
 import { normalizeAudioMix } from './audio-mix';
+import { resolveRenderFit } from './fit-policy';
 import {
   MUSIC_FADE_IN_SECONDS,
   MUSIC_FADE_OUT_SECONDS,
@@ -199,6 +200,7 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
     width: project.renderSettings.width,
     height: project.renderSettings.height,
     fps: project.renderSettings.fps,
+    fit: resolveRenderFit(project.renderSettings.fit),
     totalDuration: items.reduce((sum, item) => sum + item.duration, 0),
     transition,
     audio: normalizeAudioMix(project.renderSettings.audio),

@@ -5,6 +5,10 @@ import type { ReferenceImage } from './reference';
 
 export type AspectRatio = '16:9' | '1:1' | '9:16';
 
+// Scale policy for mapping a non-canvas-aspect source onto the canvas. See
+// lib/render/fit-policy.ts. `cover` is the historical center-crop default.
+export type RenderFit = 'cover' | 'contain';
+
 export interface AudioMixSettings {
   narrationVolume: number;
   musicVolume: number;
@@ -16,6 +20,9 @@ export interface RenderSettings {
   fps: number;
   width: number;
   height: number;
+  // Optional project-level scale policy for non-canvas-aspect sources. Absent
+  // means the historical `cover` (center-crop) default.
+  fit?: RenderFit;
   background: {
     type: 'color';
     value: string;
@@ -194,6 +201,9 @@ export interface CompositionPlan {
   transition: CompositionTransition;
   audio?: AudioMixSettings;
   music?: CompositionMusic;
+  // Scale policy applied when a normalized scene segment is not already the
+  // canvas aspect ratio. Defaults to `cover` (historical center-crop).
+  fit?: RenderFit;
 }
 
 export interface CompositionArtifact {
@@ -241,6 +251,8 @@ export interface RenderPlan {
   fps: number;
   width: number;
   height: number;
+  // Scale policy resolved from project render settings; `cover` when unset.
+  fit?: RenderFit;
   background?: {
     type: 'color';
     value: string;

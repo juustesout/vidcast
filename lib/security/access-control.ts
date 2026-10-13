@@ -126,6 +126,7 @@ export function enforceThrottle(
     | 'run_log'
     | 'generate_image'
     | 'generate_video'
+    | 'cancel_video'
     | 'generate_narration'
     | 'generate_music'
     | 'video_poll'
@@ -154,6 +155,10 @@ export function enforceThrottle(
     generate_video: {
       limit: envInt('API_THROTTLE_GENERATE_VIDEO_LIMIT', 12, 1, 10_000),
       windowMs: envInt('API_THROTTLE_GENERATE_VIDEO_WINDOW_MS', 60_000, 1_000, 24 * 60 * 60 * 1000)
+    },
+    cancel_video: {
+      limit: envInt('API_THROTTLE_CANCEL_VIDEO_LIMIT', 12, 1, 10_000),
+      windowMs: envInt('API_THROTTLE_CANCEL_VIDEO_WINDOW_MS', 60_000, 1_000, 24 * 60 * 60 * 1000)
     },
     generate_narration: {
       limit: envInt('API_THROTTLE_GENERATE_NARRATION_LIMIT', 20, 1, 10_000),

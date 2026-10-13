@@ -1,9 +1,9 @@
 'use client';
 
 import Image from 'next/image';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
-import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { ASPECT_RATIOS, FAL_VIDEO_MODEL_ENDPOINTS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { ProductionWorkflow } from '@/components/project/production-workflow';
@@ -12,6 +12,7 @@ import { ScenePreview } from '@/components/preview/scene-preview';
 import { ValidationPanel } from '@/components/project/validation-panel';
 import { createProjectCompositionRequest, createSceneNarrationRequest, createSceneRenderRequest } from '@/lib/client/render-client';
 import { deriveGenerationTasks } from '@/lib/projects/generation-tasks';
+import { resolveVideoProviderForwarding } from '@/lib/generation/video-provider-forwarding';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
 import { getAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
 import { defaultBoxForType, defaultPositionForType } from '@/lib/render/overlay-resolve';
@@ -456,6 +457,65 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     });
   }
 
+  // The generation service prefers `generation.referenceIds` (a per-attempt
+  // snapshot) and only falls back to `scene.referenceIds`. The inspector edits the
+  // scene-level list, so this keeps both in sync and drops any start/end frame
+  // designation whose reference has been removed (which would otherwise be
+  // rejected later as `frameInvalid`).
+  function setSceneReferences(sceneId: string, nextReferenceIds: string[]): void {
+    updateScene(sceneId, (scene) => {
+      const visual = scene.visual;
+      let nextVisual = visual;
+      if (visual && (visual.kind === 'generated_image' || visual.kind === 'generated_video')) {
+        const generation = visual.generation;
+        const startFrameReferenceId = generation.startFrameReferenceId;
+        const endFrameReferenceId = generation.endFrameReferenceId;
+        nextVisual = {
+          ...visual,
+          generation: {
+            ...generation,
+            referenceIds: nextReferenceIds,
+            startFrameReferenceId: startFrameReferenceId && nextReferenceIds.includes(startFrameReferenceId) ? startFrameReferenceId : undefined,
+            endFrameReferenceId: endFrameReferenceId && nextReferenceIds.includes(endFrameReferenceId) ? endFrameReferenceId : undefined
+          }
+        };
+      }
+      return { ...scene, referenceIds: nextReferenceIds, visual: nextVisual };
+    });
+  }
+
+  function setSceneFrame(sceneId: string, role: 'start' | 'end', referenceId: string): void {
+    updateScene(sceneId, (scene) => {
+      if (!scene.visual || scene.visual.kind !== 'generated_video') {
+        return scene;
+      }
+      const generation = scene.visual.generation;
+      // `scene.referenceIds` is the canonical, user-visible selection. The
+      // generation snapshot can be stale, so it must never be used as the base
+      // here: doing so could drop references (and the frames that use them). This
+      // only ever adds the chosen reference and otherwise mirrors the scene list.
+      const base = scene.referenceIds;
+      const nextReferenceIds = referenceId && !base.includes(referenceId) ? [...base, referenceId] : base;
+      return {
+        ...scene,
+        referenceIds: nextReferenceIds,
+        visual: {
+          ...scene.visual,
+          generation: {
+            ...generation,
+            referenceIds: nextReferenceIds,
+            startFrameReferenceId: role === 'start' ? referenceId || undefined : generation.startFrameReferenceId,
+            endFrameReferenceId: role === 'end' ? referenceId || undefined : generation.endFrameReferenceId
+          }
+        }
+      };
+    });
+  }
+
+  function referenceName(referenceId: string): string {
+    return draft.references.find((entry) => entry.id === referenceId)?.name ?? referenceId;
+  }
+
   function updateOverlay(sceneId: string, updater: (overlay: OverlaySpec) => OverlaySpec): void {
     updateScene(sceneId, (scene) => ({ ...scene, overlay: updater(scene.overlay ?? { type: 'none' }) }));
   }
@@ -582,12 +642,19 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
 
     if (action.type === 'video_submit' && action.sceneId) {
       const regenerate = Boolean(action.payload?.regenerate);
+      // The client batch runner must honour the scene's explicit video provider
+      // (and model) so automated generation matches a manual submit, while never
+      // forwarding the mock sentinel or forcing a mock/real mismatch. The server
+      // remains the authority and re-validates the forwarded selection.
+      const scene = draft.scenes.find((entry) => entry.id === action.sceneId);
+      const videoGeneration = scene?.visual && scene.visual.kind === 'generated_video' ? scene.visual.generation : undefined;
+      const { provider, model } = resolveVideoProviderForwarding(videoGeneration);
       setGeneratingSceneId(action.sceneId);
       const endpoint = `/api/projects/${draft.id}/scenes/${action.sceneId}/generate-video`;
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ regenerate })
+        body: JSON.stringify({ regenerate, provider, model })
       });
       const body = (await response.json().catch(() => ({}))) as { message?: string; code?: string; status?: string; providerStatus?: string; generationAttemptId?: string };
       setGeneratingSceneId(null);
@@ -875,10 +942,20 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     setGeneratingSceneId(sceneId);
     setGenerationMessage(regenerate ? 'Submitting video regeneration job...' : 'Submitting video generation job...');
 
+    // Forward the selection explicitly so a stored `fal`/`openai` provider is not
+    // ignored. The mock sentinel `local` (and any other non-real value) is left
+    // unset so the server keeps its existing mode-aware default (mock -> local,
+    // real -> a real provider). This preserves the behaviour of pre-existing
+    // scenes whose stored provider is the default `local` while still honouring an
+    // explicit real selection and never silently downgrading a real provider.
+    const scene = draft.scenes.find((entry) => entry.id === sceneId);
+    const videoGeneration = scene?.visual && scene.visual.kind === 'generated_video' ? scene.visual.generation : undefined;
+    const { provider, model } = resolveVideoProviderForwarding(videoGeneration);
+
     const response = await fetch(`/api/projects/${draft.id}/scenes/${sceneId}/generate-video`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ regenerate })
+      body: JSON.stringify({ regenerate, provider, model })
     });
 
     const body = (await response.json().catch(() => ({}))) as {
@@ -909,6 +986,35 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     }
 
     setGenerationMessage(`Video job submitted (${body.provider ?? 'provider'}${body.model ? ` / ${body.model}` : ''}) • ${body.status ?? 'queued'}.`);
+    await refreshProject();
+    setGeneratingSceneId(null);
+  }
+
+  async function cancelVideoGeneration(sceneId: string): Promise<void> {
+    setGeneratingSceneId(sceneId);
+    setGenerationMessage('Cancelling video generation job...');
+
+    const response = await fetch(`/api/projects/${draft.id}/scenes/${sceneId}/cancel-video`, {
+      method: 'POST'
+    });
+    const body = (await response.json().catch(() => ({}))) as { message?: string; code?: string; providerStatus?: string };
+
+    if (!response.ok) {
+      console.error('Video generation cancel failed', {
+        httpStatus: response.status,
+        code: body.code,
+        message: body.message,
+        sceneId,
+        url: `/api/projects/${draft.id}/scenes/${sceneId}/cancel-video`,
+        at: new Date().toISOString()
+      });
+      setGenerationMessage(`Cancel failed [${response.status}]${body.code ? ` (${body.code})` : ''}: ${body.message || 'Unknown error'}`);
+      setGeneratingSceneId(null);
+      await refreshProject();
+      return;
+    }
+
+    setGenerationMessage(body.message || 'Video generation cancelled.');
     await refreshProject();
     setGeneratingSceneId(null);
   }
@@ -1795,7 +1901,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                           };
                         })
                       }
-                      options={GENERATION_PROVIDERS}
+                      options={selectedScene.visual.kind === 'generated_video' ? VIDEO_GENERATION_PROVIDERS : GENERATION_PROVIDERS}
                     />
                     <SelectField
                       label="Status"
@@ -1835,6 +1941,75 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                       }
                       asTextArea
                     />
+
+                    {selectedScene.visual.kind === 'generated_video' ? (
+                      <>
+                        <Field
+                          label="Model"
+                          value={selectedScene.visual.generation.model ?? ''}
+                          placeholder={selectedScene.visual.generation.provider === 'fal' ? 'minimax/h3-max-turbo/image-to-video' : 'Provider default'}
+                          suggestions={selectedScene.visual.generation.provider === 'fal' ? FAL_VIDEO_MODEL_ENDPOINTS : undefined}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'generated_video') {
+                                return scene;
+                              }
+                              const trimmed = String(value).trim();
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  generation: { ...scene.visual.generation, model: trimmed ? trimmed : undefined }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        {(() => {
+                          const visual = selectedScene.visual;
+                          if (!visual || visual.kind !== 'generated_video') {
+                            return null;
+                          }
+                          const generation = visual.generation;
+                          // Use the canonical scene reference list so frame choices
+                          // match what the inspector shows; keep any already-stored
+                          // frame ids visible even if the snapshot had drifted.
+                          const referenceIds = selectedScene.referenceIds;
+                          const storedFrameIds = [generation.startFrameReferenceId, generation.endFrameReferenceId].filter(
+                            (id): id is string => Boolean(id)
+                          );
+                          const effective = [...referenceIds, ...storedFrameIds.filter((id) => !referenceIds.includes(id))];
+                          const frameLabels: Record<string, string> = { '': 'None (prompt only)' };
+                          for (const id of effective) {
+                            frameLabels[id] = referenceName(id);
+                          }
+                          const startOptions = ['', ...effective.filter((id) => id !== generation.endFrameReferenceId)];
+                          const endOptions = ['', ...effective.filter((id) => id !== generation.startFrameReferenceId)];
+                          return (
+                            <div className="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-3 space-y-2">
+                              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Keyframes (image-to-video)</p>
+                              {referenceIds.length === 0 ? (
+                                <p className="text-xs text-slate-400">Select at least one reference below, then choose it as a start frame.</p>
+                              ) : null}
+                              <SelectField
+                                label="Start frame"
+                                value={generation.startFrameReferenceId ?? ''}
+                                onChange={(value) => setSceneFrame(selectedScene.id, 'start', value)}
+                                options={startOptions}
+                                labels={frameLabels}
+                              />
+                              <SelectField
+                                label="End frame (optional)"
+                                value={generation.endFrameReferenceId ?? ''}
+                                onChange={(value) => setSceneFrame(selectedScene.id, 'end', value)}
+                                options={endOptions}
+                                labels={frameLabels}
+                              />
+                            </div>
+                          );
+                        })()}
+                      </>
+                    ) : null}
 
                     {selectedScene.visual.kind === 'generated_image' ? (
                       <div className="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-3 space-y-2">
@@ -1955,6 +2130,19 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                     Open Asset
                                   </button>
                                 ) : null}
+
+                                {inProgress ? (
+                                  <button
+                                    type="button"
+                                    disabled={generatingSceneId === selectedScene.id}
+                                    onClick={() => {
+                                      void cancelVideoGeneration(selectedScene.id);
+                                    }}
+                                    className="rounded-2xl border border-rose-500/60 px-3 py-2 text-xs font-semibold text-rose-200 disabled:opacity-60"
+                                  >
+                                    Cancel Video
+                                  </button>
+                                ) : null}
                               </>
                             );
                           })()}
@@ -1996,10 +2184,10 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                           key={reference.id}
                           type="button"
                           onClick={() =>
-                            updateScene(selectedScene.id, (scene) => ({
-                              ...scene,
-                              referenceIds: selected ? scene.referenceIds.filter((entry) => entry !== reference.id) : [...scene.referenceIds, reference.id]
-                            }))
+                            setSceneReferences(
+                              selectedScene.id,
+                              selected ? selectedScene.referenceIds.filter((entry) => entry !== reference.id) : [...selectedScene.referenceIds, reference.id]
+                            )
                           }
                           className={`w-full rounded-2xl border px-3 py-2 text-left text-sm ${selected ? 'border-amber-300/50 bg-amber-200/10 text-amber-50' : 'border-slate-700/70 bg-slate-950/30 text-slate-200'}`}
                         >
@@ -2391,7 +2579,9 @@ function Field({
   onChange,
   type = 'text',
   step,
-  asTextArea = false
+  asTextArea = false,
+  placeholder,
+  suggestions
 }: {
   label: string;
   value: string | number;
@@ -2399,7 +2589,10 @@ function Field({
   type?: 'text' | 'number';
   step?: string;
   asTextArea?: boolean;
+  placeholder?: string;
+  suggestions?: readonly string[];
 }): JSX.Element {
+  const suggestionsId = useId();
   return (
     <label className="grid gap-2">
       <span className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-500">{label}</span>
@@ -2410,13 +2603,24 @@ function Field({
           className="min-h-20 rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
         />
       ) : (
-        <input
-          type={type}
-          step={step}
-          value={value}
-          onChange={(event) => onChange(type === 'number' ? Number(event.target.value) : event.target.value)}
-          className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
-        />
+        <>
+          <input
+            type={type}
+            step={step}
+            value={value}
+            placeholder={placeholder}
+            list={suggestions && suggestions.length > 0 ? suggestionsId : undefined}
+            onChange={(event) => onChange(type === 'number' ? Number(event.target.value) : event.target.value)}
+            className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
+          />
+          {suggestions && suggestions.length > 0 ? (
+            <datalist id={suggestionsId}>
+              {suggestions.map((suggestion) => (
+                <option key={suggestion} value={suggestion} />
+              ))}
+            </datalist>
+          ) : null}
+        </>
       )}
     </label>
   );
@@ -2426,12 +2630,14 @@ function SelectField({
   label,
   value,
   onChange,
-  options
+  options,
+  labels
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   options: readonly string[];
+  labels?: Record<string, string>;
 }): JSX.Element {
   return (
     <label className="grid gap-2">
@@ -2443,7 +2649,7 @@ function SelectField({
       >
         {options.map((option) => (
           <option key={option} value={option}>
-            {option}
+            {labels?.[option] ?? option}
           </option>
         ))}
       </select>

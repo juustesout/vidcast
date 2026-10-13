@@ -7,7 +7,7 @@ import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/productio
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
-import type { GenerationAttempt, GenerationProvider, GenerationRecord, GenerationStatus } from '@/lib/types/generation';
+import type { GenerationAttempt, GenerationErrorCode, GenerationProvider, GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { Scene } from '@/lib/types/scene';
@@ -276,10 +276,46 @@ function activeStatus(status: GenerationStatus): boolean {
   return status === 'queued' || status === 'generating';
 }
 
+// A status poll can only fail in two ways that matter for billing:
+//
+//  - `terminal`: polling is impossible for a *local* reason AND there is no
+//    remote job that could later be recovered through this attempt. Only these
+//    codes are allowed to mark the attempt `failed`, which drops the busy-guard
+//    in `submitSceneVideoGeneration` and lets the planner schedule a fresh
+//    `video_submit`:
+//      * INVALID_REQUEST: the persisted provider job id is malformed, so this
+//        attempt can never address a remote job again (a corrupt local value
+//        that this service's own encoder never produces). Failing it is the
+//        only way to unblock the scene.
+//
+//  - `transient`: every other failure a status poll can raise leaves the
+//    *remote* job state either unknown or recoverable, so the attempt must stay
+//    active and keep its job id. That includes:
+//      * HTTP/transport errors (5xx, 429, 401/403, and 4xx such as 404/405 for a
+//        not-yet-registered request or a non-canonical queue path) — the
+//        (possibly billed) job may still be running; and
+//      * NOT_CONFIGURED — a missing credential never proves the remote job is
+//        gone. The existing job id is fully recoverable once the credential is
+//        restored, and while the attempt stays active the busy-guard blocks any
+//        new submission (so a temporarily-missing credential can never leak into
+//        a second paid job).
+const TERMINAL_POLL_ERROR_CODES = new Set<GenerationErrorCode>(['INVALID_REQUEST']);
+
+export function classifyStatusPollError(error: unknown): 'transient' | 'terminal' {
+  if (error instanceof VideoGenerationProviderError) {
+    return TERMINAL_POLL_ERROR_CODES.has(error.code) ? 'terminal' : 'transient';
+  }
+  // An unexpected error never proves the job died; keep it resumable.
+  return 'transient';
+}
+
+const TRANSIENT_POLL_MESSAGE =
+  'Provider status could not be confirmed; the job may still be running. The same job will be re-polled during recovery (no new submission is started).';
+
 export async function submitSceneVideoGeneration(
   projectId: string,
   sceneId: string,
-  options: { regenerate?: boolean; provider?: string; mode?: RunMode } = {},
+  options: { regenerate?: boolean; provider?: string; model?: string; mode?: RunMode } = {},
   dependencies: VideoGenerationServiceDependencies = defaultDependencies
 ): Promise<SceneVideoGenerationSubmissionResult> {
   const key = sceneLockKey(projectId, sceneId);
@@ -300,6 +336,11 @@ export async function submitSceneVideoGeneration(
 
     const current = scene.visual.generation;
     const regenerate = Boolean(options.regenerate);
+    // An explicit request model (e.g. the FAL image-to-video endpoint selected in
+    // the UI) overrides the persisted value for this attempt; when absent the
+    // stored scene model is used as before. Empty/whitespace means "not set".
+    const requestedModel = typeof options.model === 'string' ? options.model.trim() : '';
+    const model = requestedModel || current.model;
 
     if (!regenerate && current.status === 'generated' && (scene.visual.assetId || current.assetId)) {
       throw new SceneVideoGenerationError('Scene already has a generated video. Use regenerate=true to generate a new one.', 409, 'generation.scene.alreadyGenerated');
@@ -329,6 +370,7 @@ export async function submitSceneVideoGeneration(
       kind: 'video',
       status: 'queued',
       provider: normalizeProviderNameForGeneration(provider.providerId),
+      model,
       referenceIds,
       duration: current.duration ?? scene.duration,
       assetId: previousAssetId,
@@ -360,7 +402,7 @@ export async function submitSceneVideoGeneration(
     let submission;
     try {
       submission = await provider.submit({
-        model: current.model,
+        model,
         prompt: current.prompt,
         references,
         aspectRatio: current.aspectRatio || project.aspectRatio,
@@ -430,12 +472,199 @@ export async function submitSceneVideoGeneration(
       generationAttemptId: attemptId,
       status: submission.status,
       provider: provider.providerId,
-      model: current.model,
+      model,
       providerJobId: updatedAttempt.providerJobId!,
       providerStatus: updatedAttempt.providerStatus
     };
   } finally {
     activeSceneSubmitLocks.delete(key);
+  }
+}
+
+export interface SceneVideoGenerationCancellationResult {
+  sceneId: string;
+  generationAttemptId: string;
+  status: 'rejected';
+  provider: string;
+  model?: string;
+  providerJobId?: string;
+  providerStatus: string;
+}
+
+// Cancels the current active remote video job for a scene through the existing
+// provider lifecycle. The remote cancellation is explicit: an unsupported
+// provider is rejected (never silently treated as cancelled), and a remote
+// cancellation failure is surfaced without failing the attempt (the remote job
+// state is unknown, so the attempt is left resumable).
+//
+// Concurrency: this holds BOTH the per-scene submit lock (so a submit cannot
+// interleave) and the per-attempt poll lock (so a status poll cannot interleave
+// with the cancel/remote-cancel/write sequence). The project is re-read under
+// both locks and the terminal `rejected` write is applied only to the exact
+// active attempt that was observed, so a poll that completed a job (or any
+// other writer) can never have its result overwritten by a stale cancellation.
+export async function cancelSceneVideoGeneration(
+  projectId: string,
+  sceneId: string,
+  options: { mode?: RunMode } = {},
+  dependencies: VideoGenerationServiceDependencies = defaultDependencies
+): Promise<SceneVideoGenerationCancellationResult> {
+  const sceneKey = sceneLockKey(projectId, sceneId);
+  if (activeSceneSubmitLocks.has(sceneKey)) {
+    throw new SceneVideoGenerationError('Video generation submit is already running for this scene.', 409, 'generation.scene.alreadyRunning');
+  }
+
+  activeSceneSubmitLocks.add(sceneKey);
+  let attemptKey: string | undefined;
+
+  try {
+    const project = await dependencies.store.getProject(projectId);
+    if (!project) {
+      throw new SceneVideoGenerationError(`Project ${projectId} not found.`, 404, 'generation.project.notFound');
+    }
+
+    const scene = getScene(project, sceneId);
+    ensureGeneratedVideoScene(scene);
+
+    const observed = scene.visual.generation;
+    if (!activeStatus(observed.status)) {
+      throw new SceneVideoGenerationError('There is no active video generation to cancel.', 409, 'generation.scene.notActive');
+    }
+    if (!observed.providerJobId) {
+      throw new SceneVideoGenerationError('Active video generation is missing a provider job id.', 409, 'generation.attempt.missingJobId');
+    }
+
+    // Serialize against an in-flight status poll for this attempt. Without this
+    // the poll could observe `generated` and write it concurrently with the
+    // cancellation, and the later write would clobber the other's result.
+    attemptKey = attemptLockKey(projectId, observed.id);
+    if (activeAttemptPollLocks.has(attemptKey)) {
+      throw new SceneVideoGenerationError(
+        'A status poll is currently running for this attempt; retry the cancellation once it finishes.',
+        409,
+        'generation.attempt.pollBusy'
+      );
+    }
+    activeAttemptPollLocks.add(attemptKey);
+
+    // Re-read under both locks so the freshest attempt is used. A poll that
+    // finished between the first read and lock acquisition cannot be cancelled
+    // or overwritten.
+    const fresh = await dependencies.store.getProject(projectId);
+    if (!fresh) {
+      throw new SceneVideoGenerationError(`Project ${projectId} not found.`, 404, 'generation.project.notFound');
+    }
+    const freshScene = getScene(fresh, sceneId);
+    ensureGeneratedVideoScene(freshScene);
+    const current = freshScene.visual.generation;
+    if (current.id !== observed.id || !activeStatus(current.status)) {
+      throw new SceneVideoGenerationError('Video generation already finished; nothing to cancel.', 409, 'generation.scene.notActive');
+    }
+    if (!current.providerJobId) {
+      throw new SceneVideoGenerationError('Active video generation is missing a provider job id.', 409, 'generation.attempt.missingJobId');
+    }
+
+    const providerKey = resolveVideoProvider(current.provider && current.provider !== 'other' ? current.provider : undefined, options.mode);
+    const provider = dependencies.registry.getProvider(providerKey);
+    const capabilities = provider.getCapabilities();
+    const cancel = provider.cancel;
+    if (!capabilities.supportsCancellation || typeof cancel !== 'function') {
+      throw new SceneVideoGenerationError(
+        `Provider ${provider.providerId} does not support cancellation.`,
+        409,
+        'generation.provider.cancelUnsupported'
+      );
+    }
+
+    try {
+      await cancel.call(provider, current.providerJobId);
+    } catch (error) {
+      // The remote cancellation could not be confirmed. Keep the attempt active
+      // (and its job id) so the job is never abandoned or re-submitted, but record
+      // the failure so it is visible.
+      const normalized = sanitizeProviderError(error);
+      const cancelFailedAttempt: GenerationAttempt = {
+        ...current,
+        providerStatus: 'cancel_failed',
+        error: `Cancellation request failed: ${normalized.message}`,
+        errorMessage: `Cancellation request failed: ${normalized.message}`,
+        lastPolledAt: nowIso(),
+        metadata: {
+          ...(current.metadata ?? {}),
+          cancelFailed: true
+        }
+      };
+
+      await dependencies.store.mutateProject(projectId, (latest) =>
+        updateScene(latest, sceneId, (entry) => {
+          ensureGeneratedVideoScene(entry);
+          const live = entry.visual.generation;
+          if (live.id !== current.id || !activeStatus(live.status)) {
+            return entry;
+          }
+          return { ...entry, visual: { ...entry.visual, generation: cancelFailedAttempt } };
+        })
+      );
+
+      if (error instanceof VideoGenerationProviderError) {
+        throw new SceneVideoGenerationError(`Cancellation failed: ${error.message}`, error.status, 'generation.provider.cancelFailed');
+      }
+      throw new SceneVideoGenerationError('Provider cancellation call failed.', 502, 'generation.provider.cancelFailed');
+    }
+
+    const canceledAttempt: GenerationAttempt = {
+      ...current,
+      status: 'rejected',
+      providerStatus: 'canceled',
+      error: 'Canceled by user.',
+      errorMessage: 'Canceled by user.',
+      errorCode: undefined,
+      completedAt: nowIso(),
+      lastPolledAt: nowIso()
+    };
+
+    const persisted = await dependencies.store.mutateProject(projectId, (latest) =>
+      updateScene(latest, sceneId, (entry) => {
+        ensureGeneratedVideoScene(entry);
+        const live = entry.visual.generation;
+        // Apply the terminal status only to the exact active attempt observed.
+        // If the job reached a terminal state by any other means, leave it as is
+        // rather than overwriting a completed generation with `rejected`.
+        if (live.id !== current.id || !activeStatus(live.status)) {
+          return entry;
+        }
+        return { ...entry, visual: { ...entry.visual, generation: canceledAttempt } };
+      })
+    );
+
+    if (!persisted) {
+      throw new SceneVideoGenerationError(`Project ${projectId} was removed during cancellation.`, 404, 'generation.project.notFound');
+    }
+
+    const persistedScene = getScene(persisted, sceneId);
+    ensureGeneratedVideoScene(persistedScene);
+    if (persistedScene.visual.generation.status !== 'rejected') {
+      throw new SceneVideoGenerationError(
+        'Video generation completed before the cancellation could be applied.',
+        409,
+        'generation.scene.notActive'
+      );
+    }
+
+    return {
+      sceneId,
+      generationAttemptId: canceledAttempt.id,
+      status: 'rejected',
+      provider: provider.providerId,
+      model: canceledAttempt.model,
+      providerJobId: current.providerJobId,
+      providerStatus: 'canceled'
+    };
+  } finally {
+    if (attemptKey) {
+      activeAttemptPollLocks.delete(attemptKey);
+    }
+    activeSceneSubmitLocks.delete(sceneKey);
   }
 }
 
@@ -510,6 +739,49 @@ export async function refreshVideoGenerationAttempt(
       providerStatus = await provider.getStatus(attempt.providerJobId);
     } catch (error) {
       const normalized = sanitizeProviderError(error);
+
+      if (classifyStatusPollError(error) === 'transient') {
+        // Transient/unconfirmed: keep the attempt active with its provider job id
+        // so recovery re-polls the SAME remote job. The active-status guard in
+        // `submitSceneVideoGeneration` blocks a new submission while the job may
+        // still be running, so no second paid submission can be started.
+        const unresolvedAttempt: GenerationAttempt = {
+          ...attempt,
+          providerStatus: 'status_unresolved',
+          error: TRANSIENT_POLL_MESSAGE,
+          errorMessage: TRANSIENT_POLL_MESSAGE,
+          errorCode: undefined,
+          lastPolledAt: nowIso(),
+          metadata: {
+            ...(attempt.metadata ?? {}),
+            pollUnresolved: true,
+            lastPollErrorCode: normalized.errorCode
+          }
+        };
+
+        const withUnresolved = (fresh: Project) => updateScene(fresh, scene.id, (entry) => {
+          ensureGeneratedVideoScene(entry);
+          return {
+            ...entry,
+            visual: {
+              ...entry.visual,
+              generation: unresolvedAttempt,
+              assetId: entry.visual.assetId || attempt.assetId
+            }
+          };
+        });
+
+        await dependencies.store.mutateProject(projectId, withUnresolved);
+
+        throw new SceneVideoGenerationError(TRANSIENT_POLL_MESSAGE, 503, 'generation.attempt.statusUnresolved');
+      }
+
+      // Terminal: the persisted job id is malformed, so this attempt can never
+      // address a remote job again. It is failed to unblock the scene; the job
+      // id is retained for audit. Every other poll failure (HTTP/transport, and
+      // NOT_CONFIGURED) takes the transient branch above and keeps the job
+      // resumable, so a temporary fault or missing credential can never leak
+      // into a second paid submission.
       const failedAttempt: GenerationAttempt = {
         ...attempt,
         status: 'failed',

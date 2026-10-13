@@ -120,6 +120,39 @@ describe('production MCP tool service', () => {
     });
   });
 
+  it('passes an explicit fal video provider through the run_production tool', async () => {
+    const calls: unknown[] = [];
+    const service = createProductionToolService(
+      makeClient({
+        runProduction: async (_projectId, payload) => {
+          calls.push(payload);
+          return { run: makeRun('run-fal'), reused: false };
+        }
+      })
+    );
+
+    const result = await service.runProduction({
+      projectId: 'project-1',
+      mode: 'real',
+      providers: { video: 'fal' }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toMatchObject({ mode: 'real', providers: { video: 'fal' } });
+  });
+
+  it('rejects an unsupported video provider in the MCP input schema', async () => {
+    const service = createProductionToolService(makeClient());
+
+    // gemini is image-only and must not be accepted as a video provider.
+    const result = await service.runProduction({ projectId: 'project-1', providers: { video: 'gemini' } });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+  });
+
   it('returns structured start/status/log payloads', async () => {
     const service = createProductionToolService(makeClient());
 

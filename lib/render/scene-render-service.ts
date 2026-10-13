@@ -62,7 +62,8 @@ export class SceneRenderService {
         tempDir: paths.tempRoot,
         sceneWidth: singleScenePlan.width,
         sceneHeight: singleScenePlan.height,
-        sceneFps: singleScenePlan.fps
+        sceneFps: singleScenePlan.fps,
+        fit: singleScenePlan.fit
       });
     } catch (error) {
       const failedScenePlan = singleScenePlan.scenes[0];

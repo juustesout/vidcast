@@ -39,6 +39,19 @@ export const OVERLAY_MAX_FADE_SECONDS = 600;
 
 export const GENERATION_PROVIDERS: GenerationProvider[] = ['openai', 'gemini', 'local', 'other'];
 
+// Video-capable generation providers. FAL is video-only (see
+// lib/ai/video-generation/registry.ts), so image generation keeps using
+// GENERATION_PROVIDERS without `fal`. Existing providers/defaults are unchanged.
+export const VIDEO_GENERATION_PROVIDERS: GenerationProvider[] = ['openai', 'fal', 'local', 'other'];
+
+// Validated FAL video model endpoints offered as authoring suggestions. These
+// mirror the adapter defaults in lib/ai/video-generation/fal-provider.ts
+// (DEFAULT_FAL_VIDEO_ENDPOINT and the image-to-video variant) and are not new ids.
+export const FAL_VIDEO_MODEL_ENDPOINTS: string[] = [
+  'minimax/h3-max-turbo/text-to-video',
+  'minimax/h3-max-turbo/image-to-video'
+];
+
 export const GENERATION_STATUSES: GenerationStatus[] = ['planned', 'queued', 'generating', 'generated', 'failed', 'rejected'];
 
 export const ASPECT_RATIOS: AspectRatio[] = ['16:9', '1:1', '9:16'];

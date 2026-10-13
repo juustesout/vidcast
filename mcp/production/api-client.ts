@@ -25,7 +25,7 @@ export interface StartRunRequestPayload {
   mode?: RunMode;
   providers?: {
     image?: 'fake' | 'openai';
-    video?: 'local' | 'openai';
+    video?: 'local' | 'openai' | 'fal';
     narration?: 'fake' | 'elevenlabs';
     music?: 'fake' | 'elevenlabs';
   };

@@ -189,6 +189,49 @@ describe('P2 scene relationships and readiness', () => {
     const scene1 = plan.scenes.find((scene) => scene.sceneId === 'scene-1');
     expect(scene1?.status).toBe('invalid');
   });
+
+  it('warns when a non-canvas-aspect source will be center-cropped by the cover fit', () => {
+    const project = buildProject();
+    // 1200x800 is 3:2, not 16:9 -> cover crops and discards image information.
+    project.assets[0].width = 1200;
+    project.assets[0].height = 800;
+
+    const plan = resolveRenderPlan(project);
+
+    const warning = plan.issues.find((issue) => issue.code === 'scene.visual.fit.crop');
+    expect(warning?.severity).toBe('warning');
+    expect(warning?.message).toContain('center-cropped');
+  });
+
+  it('does not warn when the source already matches the canvas aspect ratio', () => {
+    const project = buildProject();
+    // Default fixture asset is 1200x675 (16:9) which matches the 1920x1080 canvas.
+    const plan = resolveRenderPlan(project);
+    expect(plan.issues.some((issue) => issue.code === 'scene.visual.fit.crop')).toBe(false);
+  });
+
+  it('carries the resolved fit from render settings onto the render plan (default cover)', () => {
+    const project = buildProject();
+    expect(resolveRenderPlan(project).fit).toBe('cover');
+
+    project.renderSettings.fit = 'contain';
+    expect(resolveRenderPlan(project).fit).toBe('contain');
+  });
+
+  it('suppresses the crop warning for a 3:2 source on a 16:9 canvas when fit is contain', () => {
+    const project = buildProject();
+    project.renderSettings.fit = 'contain';
+    // 1200x800 is 3:2; under cover this warns, under contain it is letterboxed.
+    project.assets[0].width = 1200;
+    project.assets[0].height = 800;
+
+    const plan = resolveRenderPlan(project);
+
+    expect(plan.fit).toBe('contain');
+    expect(plan.issues.some((issue) => issue.code === 'scene.visual.fit.crop')).toBe(false);
+    // The source is still recognized as aspect-mismatched even without a warning.
+    expect(plan.scenes.some((scene) => scene.source.width === 1200 && scene.source.height === 800)).toBe(true);
+  });
 });
 
 describe('P2 usage derivation and task derivation', () => {

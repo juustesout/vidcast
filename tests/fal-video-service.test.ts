@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FalVideoGenerationProvider, encodeFalJobId } from '@/lib/ai/video-generation/fal-provider';
 import {
   refreshVideoGenerationAttempt,
-  SceneVideoGenerationError,
   submitSceneVideoGeneration
 } from '@/lib/generation/video-generation-service';
 import type { MediaStore } from '@/lib/storage/media-store';
@@ -300,7 +299,7 @@ describe('FAL video generation through the scene service', () => {
     expect(persisted.visual.generation.providerJobId).toBeUndefined();
   });
 
-  it('keeps the job id after a poll timeout so the job remains resumable', async () => {
+  it('keeps a timed-out poll attempt active (resumable, same job id) instead of failing it', async () => {
     const harness = createHarness(createProject(), { failStatus: true });
 
     const submission = await submitSceneVideoGeneration(
@@ -312,12 +311,15 @@ describe('FAL video generation through the scene service', () => {
 
     await expect(
       refreshVideoGenerationAttempt('project-fal-service', submission.generationAttemptId, depsOf(harness), { mode: 'real' })
-    ).rejects.toBeInstanceOf(SceneVideoGenerationError);
+    ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
     const persisted = harness.state.project.scenes[0];
     if (persisted.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
-    expect(persisted.visual.generation.status).toBe('failed');
-    // Identity is preserved, so a later run/recovery can still resolve the job.
+    // A transient poll failure must not fail the attempt: the remote job may still
+    // be running, so the attempt stays active with its job identity preserved for
+    // recovery (and a new paid submission is blocked in the meantime).
+    expect(persisted.visual.generation.status).not.toBe('failed');
+    expect(persisted.visual.generation.providerStatus).toBe('status_unresolved');
     expect(persisted.visual.generation.providerJobId).toBe(encodeFalJobId(ENDPOINT, 'req-service-1'));
     expect(persisted.visual.generation.providerJobId).toContain(ENDPOINT);
   });

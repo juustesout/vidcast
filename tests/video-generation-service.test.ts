@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import { cancelSceneVideoGeneration, classifyStatusPollError, refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import { VideoGenerationProviderError } from '@/lib/ai/video-generation/provider';
+import { reconcileInterruptedGenerations } from '@/lib/production/run-recovery';
 import type { VideoGenerationRequest } from '@/lib/ai/video-generation/provider';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -90,10 +92,23 @@ function createProject(): Project {
   };
 }
 
-function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?: boolean; failOnStatus?: boolean; failOnDownload?: boolean }) {
+function createInMemoryDependencies(
+  project: Project,
+  behavior?: {
+    failOnSubmit?: boolean;
+    failOnStatus?: boolean;
+    failOnDownload?: boolean;
+    statusError?: unknown;
+    supportsCancellation?: boolean;
+    failOnCancel?: boolean;
+    // Awaited inside getStatus so a test can hold a poll in flight.
+    statusGate?: () => Promise<void>;
+  }
+) {
   const state = { project: structuredClone(project) as Project };
   let createdAssetCount = 0;
   const submitRequests: VideoGenerationRequest[] = [];
+  const canceledJobIds: string[] = [];
 
   const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
@@ -153,6 +168,20 @@ function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?
     getProvider() {
       return {
         providerId: 'fake',
+        getCapabilities() {
+          return {
+            supportsTextToVideo: true,
+            supportsImageToVideo: true,
+            supportsReferences: false,
+            supportsCancellation: behavior?.supportsCancellation ?? true
+          };
+        },
+        async cancel(providerJobId: string) {
+          if (behavior?.failOnCancel) {
+            throw new Error('cancel failed');
+          }
+          canceledJobIds.push(providerJobId);
+        },
         async submit(request: VideoGenerationRequest) {
           if (behavior?.failOnSubmit) {
             throw new Error('submit failed');
@@ -165,6 +194,12 @@ function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?
           };
         },
         async getStatus() {
+          if (behavior?.statusGate) {
+            await behavior.statusGate();
+          }
+          if (behavior?.statusError !== undefined) {
+            throw behavior.statusError;
+          }
           if (behavior?.failOnStatus) {
             throw new Error('status failed');
           }
@@ -187,7 +222,7 @@ function createInMemoryDependencies(project: Project, behavior?: { failOnSubmit?
     }
   };
 
-  return { state, store, media, registry, submitRequests };
+  return { state, store, media, registry, submitRequests, canceledJobIds };
 }
 
 describe('video generation service', () => {
@@ -374,5 +409,541 @@ describe('video generation service', () => {
     const scene = deps.state.project.scenes[0];
     if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
     expect(scene.visual.generation.startFrameReferenceId).toBe('ref-1');
+  });
+
+  it('uses the stored scene model when no model override is provided', async () => {
+    const project = createProject();
+    const deps = createInMemoryDependencies(project);
+
+    await submit(deps);
+
+    expect(deps.submitRequests).toHaveLength(1);
+    expect(deps.submitRequests[0].model).toBe('sora-1');
+  });
+
+  it('threads an explicit model override to the provider and the persisted attempt', async () => {
+    const project = createProject();
+    const deps = createInMemoryDependencies(project);
+
+    const result = await submitSceneVideoGeneration(
+      project.id,
+      'scene-video-1',
+      { regenerate: true, model: 'minimax/h3-max-turbo/image-to-video' },
+      { store: deps.store, media: deps.media, registry: deps.registry as never }
+    );
+
+    expect(deps.submitRequests).toHaveLength(1);
+    expect(deps.submitRequests[0].model).toBe('minimax/h3-max-turbo/image-to-video');
+    expect(result.model).toBe('minimax/h3-max-turbo/image-to-video');
+
+    const scene = deps.state.project.scenes[0];
+    if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(scene.visual.generation.model).toBe('minimax/h3-max-turbo/image-to-video');
+  });
+
+  it('rejects a real provider in mock mode without submitting to any provider', async () => {
+    const project = createProject();
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      submitSceneVideoGeneration(
+        project.id,
+        'scene-video-1',
+        { regenerate: true, provider: 'fal', mode: 'mock' },
+        { store: deps.store, media: deps.media, registry: deps.registry as never }
+      )
+    ).rejects.toMatchObject({ code: 'generation.provider.notAllowed' });
+
+    expect(deps.submitRequests).toHaveLength(0);
+  });
+
+  describe('cancellation', () => {
+    it('cancels the active remote job and marks the attempt rejected', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project);
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      const result = await cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      expect(deps.canceledJobIds).toEqual(['job-1']);
+      expect(result.status).toBe('rejected');
+      expect(result.providerStatus).toBe('canceled');
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('rejected');
+      expect(scene.visual.generation.providerStatus).toBe('canceled');
+      expect(scene.visual.generation.id).toBe(submit.generationAttemptId);
+    });
+
+    it('rejects cancellation when the provider does not support it (never silent)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, { supportsCancellation: false });
+      await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      await expect(
+        cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.provider.cancelUnsupported' });
+
+      expect(deps.canceledJobIds).toHaveLength(0);
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('queued');
+    });
+
+    it('rejects cancellation when no attempt is active', async () => {
+      const project = createProject();
+      // The fixture's current attempt is already `generated`.
+      const deps = createInMemoryDependencies(project);
+
+      await expect(
+        cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.notActive' });
+    });
+
+    it('surfaces a remote cancellation failure and keeps the attempt active (no double billing)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, { failOnCancel: true });
+      await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      await expect(
+        cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.provider.cancelFailed' });
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      // Still active and resumable; a new submit is not silently started.
+      expect(scene.visual.generation.status).toBe('queued');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+      expect(scene.visual.generation.providerStatus).toBe('cancel_failed');
+    });
+
+    it('keeps a completed job recoverable when the remote cancel fails (job finished mid-cancel)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, { failOnCancel: true });
+      await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      // FAL rejects the cancel because the job already completed remotely: the
+      // cancellation is surfaced, the attempt is NOT marked terminal, and the
+      // completed result is still recoverable by a later poll.
+      await expect(
+        cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.provider.cancelFailed' });
+
+      const active = deps.state.project.scenes[0];
+      if (active.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(active.visual.generation.status).toBe('queued');
+
+      const polled = await refreshVideoGenerationAttempt(project.id, active.visual.generation.id, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      expect(polled.status).toBe('generated');
+      expect(polled.assetId).toBeDefined();
+    });
+
+    it('rejects a cancel while a status poll is in flight (poll and cancel are serialized)', async () => {
+      const project = createProject();
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      const deps = createInMemoryDependencies(project, { statusGate: () => gate });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      // Start the poll but do not await it: it acquires the per-attempt poll lock
+      // synchronously before its first await and then blocks on the gate.
+      const poll = refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      await expect(
+        cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.pollBusy' });
+
+      // The remote cancel was never invoked while the poll owned the attempt.
+      expect(deps.canceledJobIds).toHaveLength(0);
+
+      releaseGate();
+      const polled = await poll;
+      expect(polled.status).toBe('generated');
+
+      // The completed generation is intact: the blocked cancel did not clobber it.
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('generated');
+      expect(scene.visual.assetId).toBe(polled.assetId);
+    });
+
+    it('never overwrites a just-completed generation with a cancellation', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project);
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      // A poll completes the job (active -> generated) before cancellation starts.
+      const polled = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      expect(polled.status).toBe('generated');
+
+      // Cancelling the (now terminal) attempt must be refused, not applied.
+      await expect(
+        cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.notActive' });
+
+      expect(deps.canceledJobIds).toHaveLength(0);
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('generated');
+      expect(scene.visual.assetId).toBe(polled.assetId);
+    });
+  });
+
+  describe('safe recovery of a possibly-live remote job', () => {
+    it('keeps the attempt active (same job id) on a transient status error and never allows a second submit', async () => {
+      const project = createProject();
+      const behavior: { failOnStatus?: boolean } = { failOnStatus: true };
+      const deps = createInMemoryDependencies(project, behavior);
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      expect(submit.providerJobId).toBe('job-1');
+
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
+
+      // The attempt is NOT failed: it stays active and keeps its provider job id.
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('queued');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+      expect(scene.visual.generation.providerStatus).toBe('status_unresolved');
+
+      // A retry/new run must not start a second paid submission while the job may
+      // still be running.
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+
+      // Recovery keeps the same job resumable, and re-polling succeeds on the
+      // SAME attempt/job once the provider is reachable again (no re-submission).
+      behavior.failOnStatus = false;
+      const resumed = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      expect(resumed.generationAttemptId).toBe(submit.generationAttemptId);
+      expect(resumed.providerJobId).toBe('job-1');
+      expect(resumed.status).toBe('generated');
+    });
+
+    it('treats a transport/5xx provider error (PROVIDER_FAILED) as transient', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, {
+        statusError: new VideoGenerationProviderError('Could not reach the FAL video generation service.', 502, 'PROVIDER_FAILED')
+      });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).not.toBe('failed');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+    });
+
+    it('keeps the attempt active on an HTTP 4xx status error (PROVIDER_REJECTED is not proof the job is dead)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, {
+        statusError: new VideoGenerationProviderError('FAL status endpoint rejected the request.', 422, 'PROVIDER_REJECTED')
+      });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      // A 4xx from the *status* endpoint (e.g. 404 for a not-yet-registered
+      // request or 405 for a non-canonical queue path) does not prove the remote
+      // job stopped, so the attempt must stay resumable and must not be failed
+      // (failing it lets the planner auto-resubmit with regenerate).
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).not.toBe('failed');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+      expect(scene.visual.generation.providerStatus).toBe('status_unresolved');
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+    });
+
+    it('keeps the attempt active on a provider auth status error (PROVIDER_AUTH = unknown remote state)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, {
+        statusError: new VideoGenerationProviderError('FAL status call not authorized.', 502, 'PROVIDER_AUTH')
+      });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).not.toBe('failed');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+    });
+
+    it('keeps an existing job recoverable when the credential is missing (never fails into a new submission)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, {
+        // Analogous to assertConfigured() throwing when FAL_KEY is absent.
+        statusError: new VideoGenerationProviderError('FAL video generation is not configured. Set FAL_KEY on the server.', 409, 'NOT_CONFIGURED')
+      });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      // The poll cannot confirm status, but the job id is fully recoverable once
+      // the credential returns, so the attempt must NOT be failed.
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('queued');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+
+      // While the attempt stays active the busy-guard blocks any resubmission, so
+      // a missing credential can never leak into a second paid job.
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+      // No provider submit was attempted at all.
+      expect(deps.submitRequests).toHaveLength(1);
+    });
+
+    it('fails the attempt only on a locally-definitive status error (malformed job id)', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project, {
+        statusError: new VideoGenerationProviderError('Malformed FAL video job id.', 400, 'INVALID_REQUEST')
+      });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('failed');
+      // The job id is retained for audit even when the attempt is failed.
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+    });
+
+    it('never fails an attempt for an unrecognized provider status payload', async () => {
+      const project = createProject();
+      const deps = createInMemoryDependencies(project);
+      // An unknown/forward-compatible status must be treated as still-processing.
+      (deps.registry as unknown as { getProvider: () => { getStatus: () => Promise<unknown> } }).getProvider = () => ({
+        providerId: 'fake',
+        getCapabilities: () => ({
+          supportsTextToVideo: true,
+          supportsImageToVideo: true,
+          supportsReferences: false,
+          supportsCancellation: true
+        }),
+        submit: async () => ({ providerJobId: 'job-1', status: 'queued' as const, providerStatus: 'queued' }),
+        getStatus: async () => ({ status: 'generating' as const, providerStatus: 'SOMETHING_NEW' }),
+        download: async () => ({ mimeType: 'video/mp4', data: Buffer.from('00', 'hex') })
+      });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+
+      expect(poll.status).toBe('generating');
+      expect(poll.providerStatus).toBe('SOMETHING_NEW');
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('generating');
+    });
+
+    it('leaves an unresolved active job resumable through run recovery (no suppression, poll retained)', async () => {
+      const project = createProject();
+      const behavior: { failOnStatus?: boolean } = { failOnStatus: true };
+      const deps = createInMemoryDependencies(project, behavior);
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      await expect(
+        refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
+
+      const recovery = reconcileInterruptedGenerations(deps.state.project, 'real');
+
+      // Nothing is marked failed or suppressed; the active job is left to resume by poll.
+      expect(recovery.suppressedActionIds).toEqual([]);
+      expect(recovery.notes.some((note) => note.actionType === 'video_poll')).toBe(true);
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('queued');
+    });
+  });
+
+  describe('classifyStatusPollError', () => {
+    it('only treats a locally-unrecoverable job id as terminal', () => {
+      expect(classifyStatusPollError(new VideoGenerationProviderError('x', 400, 'INVALID_REQUEST'))).toBe('terminal');
+      // A missing credential never proves the remote job is gone (it is
+      // recoverable once the credential returns), so it must stay transient.
+      for (const code of ['NOT_CONFIGURED', 'PROVIDER_FAILED', 'PROVIDER_RATE_LIMIT', 'PROVIDER_AUTH', 'PROVIDER_REJECTED'] as const) {
+        expect(classifyStatusPollError(new VideoGenerationProviderError('x', 500, code))).toBe('transient');
+      }
+      expect(classifyStatusPollError(new Error('unexpected'))).toBe('transient');
+      expect(classifyStatusPollError('boom')).toBe('transient');
+    });
   });
 });

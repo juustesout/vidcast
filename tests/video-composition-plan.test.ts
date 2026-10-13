@@ -174,6 +174,21 @@ describe('composition plan resolver', () => {
     expect(plan.audio).toEqual({ narrationVolume: 0, musicVolume: 4, effectsVolume: 0.2 });
   });
 
+  it('carries the resolved fit from render settings onto the composition plan (default cover)', async () => {
+    const project = createProject('project-composition-plan-test');
+    attachCompletedRenders(project);
+
+    await writeRenderFile(project.id, 'renders/scene-1.mp4');
+    await writeRenderFile(project.id, 'renders/scene-2.mp4');
+
+    const coverPlan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(coverPlan.fit).toBe('cover');
+
+    project.renderSettings.fit = 'contain';
+    const containPlan = await resolveCompositionPlan(project, { type: 'none' });
+    expect(containPlan.fit).toBe('contain');
+  });
+
   it('fails when a scene render is missing', async () => {
     const project = createProject('project-composition-plan-test');
     project.scenes[0].renders = [];

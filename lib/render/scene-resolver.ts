@@ -1,7 +1,8 @@
-import type { Project, RenderIssue, RenderPlan, RenderPlanScene, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
+import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanScene, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
 import type { Asset } from '@/lib/types/asset';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
 import { normalizeAudioMix } from './audio-mix';
+import { describeFitWarning, resolveRenderFit } from './fit-policy';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -13,6 +14,34 @@ function findAsset(project: Project, assetId?: string): Asset | undefined {
 
 function createSceneIssue(code: string, message: string, severity: 'error' | 'warning' = 'error'): RenderPlanSceneStateIssue {
   return { code, message, severity };
+}
+
+// A source with a known size that does not match the canvas aspect ratio is
+// cropped by the `cover` fit, discarding part of the image. This surfaces that
+// as an existing warning-level RenderPlan issue so the loss is visible in
+// validation/production reporting instead of silent. Under `contain` nothing is
+// cropped (the source is letterboxed), so no warning is emitted.
+function resolveFitIssues(project: Project, source: RenderPlanScene['source'], fit: RenderFit): RenderPlanSceneStateIssue[] {
+  if (
+    (source.kind !== 'image' && source.kind !== 'video') ||
+    typeof source.width !== 'number' ||
+    typeof source.height !== 'number' ||
+    source.width <= 0 ||
+    source.height <= 0
+  ) {
+    return [];
+  }
+
+  const warning = describeFitWarning({
+    sourceWidth: source.width,
+    sourceHeight: source.height,
+    canvasWidth: project.renderSettings.width,
+    canvasHeight: project.renderSettings.height,
+    fit,
+    aspectRatio: project.aspectRatio
+  });
+
+  return warning ? [createSceneIssue('scene.visual.fit.crop', warning, 'warning')] : [];
 }
 
 function resolveVisualSource(project: Project, scene: Scene): {
@@ -145,13 +174,15 @@ function resolveVisualSource(project: Project, scene: Scene): {
 
 export function resolveRenderPlan(project: Project): RenderPlan {
   const issues: RenderIssue[] = [];
+  const fit = resolveRenderFit(project.renderSettings.fit);
   const scenes: RenderPlanScene[] = project.scenes
     .slice()
     .sort((left, right) => left.order - right.order)
     .map((scene) => {
       const resolved = resolveVisualSource(project, scene);
+      const sceneIssues = [...resolved.issues, ...resolveFitIssues(project, resolved.source, fit)];
 
-      for (const issue of resolved.issues) {
+      for (const issue of sceneIssues) {
         issues.push({
           severity: issue.severity,
           code: issue.code,
@@ -171,7 +202,7 @@ export function resolveRenderPlan(project: Project): RenderPlan {
         overlay: scene.overlay,
         narration: scene.narration,
         referenceIds: scene.referenceIds,
-        issues: resolved.issues
+        issues: sceneIssues
       };
     });
 
@@ -182,6 +213,7 @@ export function resolveRenderPlan(project: Project): RenderPlan {
     fps: project.fps,
     width: project.renderSettings.width,
     height: project.renderSettings.height,
+    fit,
     background: project.renderSettings.background,
     ready: scenes.every((scene) => scene.status === 'renderable'),
     scenes,
