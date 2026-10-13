@@ -86,6 +86,27 @@ export interface GetProjectCompositionsResponse {
   compositions: CompositionInfo[];
 }
 
+// Result of polling one video generation attempt (GET /generation-jobs/{id}).
+// The call refreshes the attempt against the provider and records the latest
+// state, so repeated calls advance an in-flight job exactly like the run's
+// video_poll step. `providerStatus` values such as `status_unresolved` indicate
+// a transient poll failure where the job is still recoverable and must be
+// retried rather than resubmitted.
+export interface GetGenerationJobResponse {
+  projectId: string;
+  sceneId: string;
+  generationAttemptId: string;
+  status: string;
+  assetId?: string;
+  provider: string;
+  model?: string;
+  providerJobId?: string;
+  providerStatus?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  lastPolledAt?: string;
+}
+
 export function toCompositionInfo(projectId: string, artifact: CompositionArtifact): CompositionInfo {
   return {
     compositionId: artifact.compositionId,

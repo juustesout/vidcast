@@ -2,6 +2,7 @@ import type { Project } from '@/lib/types/render';
 import type { ProjectSummary } from '@/lib/storage/project-store';
 import type { ProjectValidationReport } from '@/lib/validation/project-validation-report';
 import type { ProductionPlanReport } from '@/lib/production/production-plan-report';
+import type { GetGenerationJobResponse } from './types';
 import { ReadOnlyMcpToolError } from './errors';
 
 interface ProjectsListPayload {
@@ -22,6 +23,21 @@ interface ProductionPlanPayload {
 
 interface ApiErrorPayload {
   message?: string;
+  code?: string;
+}
+
+interface GenerationJobPayload {
+  sceneId?: string;
+  generationAttemptId?: string;
+  status?: string;
+  assetId?: string;
+  provider?: string;
+  model?: string;
+  providerJobId?: string;
+  providerStatus?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  lastPolledAt?: string;
 }
 
 export interface AppApiClient {
@@ -29,6 +45,7 @@ export interface AppApiClient {
   getProject(projectId: string): Promise<Project>;
   getValidationReport(projectId: string): Promise<ProjectValidationReport>;
   getProductionPlan(projectId: string): Promise<ProductionPlanReport>;
+  getGenerationJob(projectId: string, attemptId: string): Promise<GetGenerationJobResponse>;
 }
 
 export interface HttpAppApiClientOptions {
@@ -148,5 +165,33 @@ export class HttpAppApiClient implements AppApiClient {
       });
     }
     return payload.report;
+  }
+
+  async getGenerationJob(projectId: string, attemptId: string): Promise<GetGenerationJobResponse> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/generation-jobs/${encodeURIComponent(attemptId)}`;
+    const payload = (await this.request(path)) as GenerationJobPayload;
+
+    if (!payload.sceneId || !payload.generationAttemptId || typeof payload.status !== 'string' || typeof payload.provider !== 'string') {
+      throw new ReadOnlyMcpToolError('API_ERROR', 'Invalid generation job response payload.', {
+        endpoint: path,
+        projectId,
+        attemptId
+      });
+    }
+
+    return {
+      projectId,
+      sceneId: payload.sceneId,
+      generationAttemptId: payload.generationAttemptId,
+      status: payload.status,
+      assetId: payload.assetId,
+      provider: payload.provider,
+      model: payload.model,
+      providerJobId: payload.providerJobId,
+      providerStatus: payload.providerStatus,
+      errorCode: payload.errorCode,
+      errorMessage: payload.errorMessage,
+      lastPolledAt: payload.lastPolledAt
+    };
   }
 }

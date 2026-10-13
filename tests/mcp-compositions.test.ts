@@ -60,7 +60,8 @@ function makeApiClient(getProject: AppApiClient['getProject']): AppApiClient {
     listProjects: async () => [],
     getProject,
     getValidationReport: async () => ({}) as never,
-    getProductionPlan: async () => ({}) as never
+    getProductionPlan: async () => ({}) as never,
+    getGenerationJob: async () => ({}) as never
   };
 }
 
@@ -156,7 +157,8 @@ describe('single MCP server registers all tool groups', () => {
       'get_scene',
       'get_validation_report',
       'get_production_plan',
-      'get_project_compositions'
+      'get_project_compositions',
+      'get_generation_job'
     ]);
     expect(authoring.names).toEqual(AUTHORING_TOOL_DEFINITIONS.map((definition) => definition.name));
     expect(production.names).toEqual(PRODUCTION_TOOL_DEFINITIONS.map((definition) => definition.name));

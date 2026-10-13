@@ -94,3 +94,59 @@ export interface ManageProjectMusicResponse {
   musicModel?: string;
 }
 
+export interface CreateReferenceInput {
+  name: string;
+  // Raw base64 (or a full data URL) of a png/jpg/jpeg/webp image. Reference
+  // images are what text-to-video and image-to-video consume (including the
+  // start/end keyframes), so this is how an agent attaches visual inputs.
+  contentBase64: string;
+  mimeType?: string;
+  fileName?: string;
+  description?: string;
+  tags?: string[];
+}
+
+export interface CreateReferenceResponse {
+  projectId: string;
+  referenceId: string;
+  name: string;
+  filePath?: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  filesize?: number;
+}
+
+export interface GenerateVideoInput {
+  regenerate?: boolean;
+  // Explicit provider/model selection forwarded to the video service. When
+  // omitted, the server uses the scene's stored values and its mode-aware
+  // default. The mock sentinel `local` is validated server-side like any other.
+  provider?: string;
+  model?: string;
+  mode?: 'mock' | 'real';
+}
+
+export interface GenerateVideoResponse {
+  projectId: string;
+  sceneId: string;
+  generationAttemptId: string;
+  status: string;
+  provider: string;
+  model?: string;
+  providerJobId: string;
+  providerStatus?: string;
+}
+
+export interface CancelVideoResponse {
+  projectId: string;
+  sceneId: string;
+  generationAttemptId: string;
+  status: string;
+  provider: string;
+  model?: string;
+  providerJobId?: string;
+  providerStatus: string;
+}
+
+

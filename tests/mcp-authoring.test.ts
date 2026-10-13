@@ -43,6 +43,23 @@ function makeClient(overrides: Partial<AuthoringApiClient> = {}): AuthoringApiCl
     }),
     approveSceneIntents: async () => ({ project: makeProject() as never, approved: ['intent-1'], skipped: [] }),
     manageMusic: async () => ({ action: 'clear', status: 'cleared' }),
+    createReference: async () => ({ reference: { id: 'reference-1', name: 'ref', description: '', tags: [], createdAt: '', updatedAt: '' } as never }),
+    generateVideo: async () => ({
+      sceneId: 'scene-1',
+      generationAttemptId: 'generation_attempt_1',
+      status: 'queued',
+      provider: 'fal',
+      providerJobId: 'fal:minimax/h3-max-turbo:req-1',
+      providerStatus: 'queued'
+    }),
+    cancelVideo: async () => ({
+      sceneId: 'scene-1',
+      generationAttemptId: 'generation_attempt_1',
+      status: 'rejected',
+      provider: 'fal',
+      providerJobId: 'fal:minimax/h3-max-turbo:req-1',
+      providerStatus: 'canceled'
+    }),
     ...overrides
   };
 }
@@ -66,7 +83,10 @@ describe('authoring MCP tool definitions', () => {
       'plan_scene_intents',
       'materialize_scene_intents',
       'approve_scene_intents',
-      'manage_project_music'
+      'manage_project_music',
+      'create_reference',
+      'generate_video',
+      'cancel_video'
     ]);
     expect(AUTHORING_TOOL_DEFINITIONS.every((entry) => entry.annotations.readOnlyHint === false)).toBe(true);
   });
@@ -316,5 +336,213 @@ describe('authoring HTTP client behavior', () => {
     await service.manageProjectMusic({ projectId: 'project-1', action: 'generate', prompt: 'calm' });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('create_reference tool', () => {
+  it('is registered as a mutating tool', () => {
+    const entry = AUTHORING_TOOL_DEFINITIONS.find((definition) => definition.name === 'create_reference');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(false);
+  });
+
+  it('forwards base64 content and returns stored metadata', async () => {
+    const calls: Array<{ projectId: string; input: unknown }> = [];
+    const service = createAuthoringToolService(
+      makeClient({
+        createReference: async (projectId, input) => {
+          calls.push({ projectId, input });
+          return {
+            reference: {
+              id: 'reference-9',
+              name: input.name,
+              description: input.description ?? '',
+              filePath: 'references/reference-9-start.png',
+              tags: input.tags ?? [],
+              metadata: { mimeType: 'image/png', width: 1024, height: 768, filesize: 2048 },
+              createdAt: '',
+              updatedAt: ''
+            } as never
+          };
+        }
+      })
+    );
+
+    const result = await service.createReference({
+      projectId: 'project-1',
+      name: 'start',
+      contentBase64: 'AAAA',
+      tags: ['frame']
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([{ projectId: 'project-1', input: expect.objectContaining({ name: 'start', contentBase64: 'AAAA', tags: ['frame'] }) }]);
+    if (result.ok) {
+      expect(result.data).toEqual({
+        projectId: 'project-1',
+        referenceId: 'reference-9',
+        name: 'start',
+        filePath: 'references/reference-9-start.png',
+        mimeType: 'image/png',
+        width: 1024,
+        height: 768,
+        filesize: 2048
+      });
+    }
+  });
+
+  it('rejects an empty name without calling the API', async () => {
+    const client = makeClient();
+    const spy = vi.spyOn(client, 'createReference');
+    const service = createAuthoringToolService(client);
+
+    const result = await service.createReference({ projectId: 'project-1', name: '', contentBase64: 'AAAA' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('maps an API reference.x error to INVALID_ARGUMENT', async () => {
+    const client = new HttpAuthoringApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: (async () => new Response(JSON.stringify({ message: 'bad image', code: 'reference.invalidImage' }), { status: 400 })) as unknown as typeof fetch
+    });
+
+    const result = await createAuthoringToolService(client).createReference({ projectId: 'project-1', name: 'x', contentBase64: 'AAAA' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+  });
+});
+
+describe('generate_video tool', () => {
+  it('is registered as a mutating tool', () => {
+    const entry = AUTHORING_TOOL_DEFINITIONS.find((definition) => definition.name === 'generate_video');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(false);
+  });
+
+  it('forwards provider, model, mode and regenerate to the API', async () => {
+    const calls: Array<{ projectId: string; sceneId: string; input: unknown }> = [];
+    const service = createAuthoringToolService(
+      makeClient({
+        generateVideo: async (projectId, sceneId, input) => {
+          calls.push({ projectId, sceneId, input });
+          return {
+            sceneId,
+            generationAttemptId: 'attempt-1',
+            status: 'queued',
+            provider: input.provider ?? 'fal',
+            model: input.model,
+            providerJobId: 'fal:model:req-1',
+            providerStatus: 'queued'
+          };
+        }
+      })
+    );
+
+    const result = await service.generateVideo({
+      projectId: 'project-1',
+      sceneId: 'scene-1',
+      provider: 'fal',
+      model: 'minimax/h3-max-turbo/image-to-video',
+      mode: 'real',
+      regenerate: true
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([
+      {
+        projectId: 'project-1',
+        sceneId: 'scene-1',
+        input: expect.objectContaining({ provider: 'fal', model: 'minimax/h3-max-turbo/image-to-video', mode: 'real', regenerate: true })
+      }
+    ]);
+    if (result.ok) {
+      expect(result.data.generationAttemptId).toBe('attempt-1');
+      expect(result.data.provider).toBe('fal');
+    }
+  });
+
+  it('rejects an invalid mode before calling the API', async () => {
+    const client = makeClient();
+    const spy = vi.spyOn(client, 'generateVideo');
+    const service = createAuthoringToolService(client);
+
+    const result = await service.generateVideo({ projectId: 'project-1', sceneId: 'scene-1', mode: 'live' as never });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('maps a busy scene conflict to CONFLICT', async () => {
+    const client = new HttpAuthoringApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: (async () => new Response(JSON.stringify({ message: 'busy', code: 'generation.scene.busy' }), { status: 409 })) as unknown as typeof fetch
+    });
+
+    const result = await createAuthoringToolService(client).generateVideo({ projectId: 'project-1', sceneId: 'scene-1' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('CONFLICT');
+    }
+  });
+});
+
+describe('cancel_video tool', () => {
+  it('is registered as a mutating tool', () => {
+    const entry = AUTHORING_TOOL_DEFINITIONS.find((definition) => definition.name === 'cancel_video');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(false);
+  });
+
+  it('requires a sceneId before calling the API', async () => {
+    const client = makeClient();
+    const spy = vi.spyOn(client, 'cancelVideo');
+    const service = createAuthoringToolService(client);
+
+    const result = await service.cancelVideo({ projectId: 'project-1' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('posts to the cancel-video endpoint and returns the provider status', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          sceneId: 'scene-1',
+          generationAttemptId: 'attempt-1',
+          status: 'rejected',
+          provider: 'fal',
+          providerJobId: 'fal:model:req-1',
+          providerStatus: 'canceled'
+        }),
+        { status: 200 }
+      )
+    );
+    const client = new HttpAuthoringApiClient({ baseUrl: 'http://127.0.0.1:5555', fetchFn: fetchMock as unknown as typeof fetch });
+
+    const result = await createAuthoringToolService(client).cancelVideo({ projectId: 'project-1', sceneId: 'scene-1' });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe('http://127.0.0.1:5555/api/projects/project-1/scenes/scene-1/cancel-video');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.providerStatus).toBe('canceled');
+      expect(result.data.status).toBe('rejected');
+    }
   });
 });

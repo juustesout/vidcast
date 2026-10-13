@@ -128,6 +128,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
         readyActionCount: 0
       }
     }),
+    getGenerationJob: async () => ({}) as never,
     ...overrides
   };
 }
@@ -135,8 +136,11 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
 describe('read-only MCP tool definitions', () => {
   it('registers read-only tools with expected names', () => {
     const names = READ_ONLY_TOOL_DEFINITIONS.map((entry) => entry.name);
-    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions']);
-    expect(READ_ONLY_TOOL_DEFINITIONS.every((entry) => entry.annotations.readOnlyHint)).toBe(true);
+    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions', 'get_generation_job']);
+    // get_generation_job mutates state (provider poll + persist), so it is the
+    // one definition in this group that is NOT read-only.
+    const mutating = READ_ONLY_TOOL_DEFINITIONS.filter((entry) => entry.annotations.readOnlyHint !== true).map((entry) => entry.name);
+    expect(mutating).toEqual(['get_generation_job']);
   });
 });
 
@@ -608,5 +612,58 @@ describe('read-only HTTP client service token forwarding', () => {
     if (!result.ok) {
       expect(result.error.code).toBe('API_ERROR');
     }
+  });
+});
+
+describe('get_generation_job tool', () => {
+  it('is registered as a state-mutating tool (it refreshes and persists the attempt)', () => {
+    const entry = READ_ONLY_TOOL_DEFINITIONS.find((definition) => definition.name === 'get_generation_job');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(false);
+  });
+
+  it('returns the job status from GET /api/projects/{id}/generation-jobs/{attemptId}', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          sceneId: 'scene-1',
+          generationAttemptId: 'attempt-1',
+          status: 'generating',
+          provider: 'fal',
+          model: 'minimax/h3-max-turbo/image-to-video',
+          providerJobId: 'fal:model:req-1',
+          providerStatus: 'IN_PROGRESS'
+        }),
+        { status: 200 }
+      )
+    );
+    const client = new HttpAppApiClient({ baseUrl: 'http://127.0.0.1:5555', fetchFn: fetchMock as unknown as typeof fetch });
+    process.env.EXPLAINER_API_TOKEN = 'service-token-123';
+
+    const result = await createReadOnlyToolService(client).getGenerationJob({ projectId: 'project-1', attemptId: 'attempt-1' });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe('http://127.0.0.1:5555/api/projects/project-1/generation-jobs/attempt-1');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.status).toBe('generating');
+      expect(result.data.providerJobId).toBe('fal:model:req-1');
+    }
+
+    delete process.env.EXPLAINER_API_TOKEN;
+  });
+
+  it('rejects a missing attemptId without calling the API', async () => {
+    const client = makeApiClient();
+    const spy = vi.spyOn(client, 'getGenerationJob');
+    const service = createReadOnlyToolService(client);
+
+    const result = await service.getGenerationJob({ projectId: 'project-1' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
   });
 });

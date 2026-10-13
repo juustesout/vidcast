@@ -7,7 +7,10 @@ import { AuthoringMcpToolError, toFailure, toSuccess } from './errors';
 import type {
   ApproveSceneIntentsResponse,
   AuthoringMcpResult,
+  CancelVideoResponse,
   CreateProjectResponse,
+  CreateReferenceResponse,
+  GenerateVideoResponse,
   ManageProjectMusicResponse,
   MaterializeSceneIntentsResponse,
   PlanSceneIntentsResponse,
@@ -15,6 +18,7 @@ import type {
 } from './types';
 
 const projectIdSchema = z.string().trim().min(1).max(200);
+const sceneIdSchema = z.string().trim().min(1).max(200);
 const projectPatchSchema = z.record(z.string(), z.unknown());
 
 export const createProjectInputSchema = z.object({
@@ -60,6 +64,33 @@ export const manageProjectMusicInputSchema = z.object({
   mode: z.enum(['mock', 'real']).optional()
 });
 
+// Reference images are the visual inputs the video providers consume. The
+// content is passed inline as base64 (or a full data URL) so the agent does not
+// need a second transport; the server caps and validates the payload.
+export const createReferenceInputSchema = z.object({
+  projectId: projectIdSchema,
+  name: z.string().trim().min(1).max(200),
+  contentBase64: z.string().min(1).max(40_000_000),
+  mimeType: z.string().trim().max(100).optional(),
+  fileName: z.string().trim().max(200).optional(),
+  description: z.string().max(2000).optional(),
+  tags: z.array(z.string().trim().min(1).max(100)).max(50).optional()
+});
+
+export const generateVideoInputSchema = z.object({
+  projectId: projectIdSchema,
+  sceneId: sceneIdSchema,
+  regenerate: z.boolean().optional(),
+  provider: z.string().trim().max(100).optional(),
+  model: z.string().trim().max(300).optional(),
+  mode: z.enum(['mock', 'real']).optional()
+});
+
+export const cancelVideoInputSchema = z.object({
+  projectId: projectIdSchema,
+  sceneId: sceneIdSchema
+});
+
 export const AUTHORING_TOOL_DEFINITIONS = [
   {
     name: 'create_project',
@@ -75,7 +106,7 @@ export const AUTHORING_TOOL_DEFINITIONS = [
   {
     name: 'update_project',
     description:
-      'Update a project (title, description, narration, scenes, story beats, renderSettings, music reference) via PUT /api/projects/{id}. The server validates the merged project; invalid input returns code VALIDATION_FAILED with details.errors and details.warnings. Note that project.scenes replaces the entire scenes array (it is not merged field-by-field), and production narration is set per scene in scene.narration.text. A 403 means the caller does not own the project; 404 means the project does not exist.',
+      'Update a project (title, description, narration, scenes, story beats, renderSettings, music reference) via PUT /api/projects/{id}. The server validates the merged project; invalid input returns code VALIDATION_FAILED with details.errors and details.warnings. Note that project.scenes replaces the entire scenes array (it is not merged field-by-field), and production narration is set per scene in scene.narration.text. A 403 means the caller does not own the project; 404 means the project does not exist. Video scenes are edited through this patch: set scene.visual.kind="generated_video" with scene.visual.generation.{prompt,provider,model,startFrameReferenceId,endFrameReferenceId} plus scene.referenceIds, and scene.overlay={type,...} for text overlays. startFrameReferenceId/endFrameReferenceId must each be one of the effective reference ids (scene.referenceIds, or generation.referenceIds when set) and are preserved across later updates. provider is optional (e.g. openai|fal|local); model selects the endpoint (e.g. a FAL image-to-video vs text-to-video endpoint).',
     inputSchema: updateProjectInputSchema,
     annotations: {
       title: 'Update Project',
@@ -126,6 +157,39 @@ export const AUTHORING_TOOL_DEFINITIONS = [
       readOnlyHint: false,
       openWorldHint: false
     }
+  },
+  {
+    name: 'create_reference',
+    description:
+      'Attach a reference image to a project via POST /api/projects/{id}/references (JSON, base64 content). Reference images are the visual inputs video generation consumes, including image-to-video start/end keyframes. `contentBase64` accepts raw base64 or a full `data:image/...;base64,...` URL; png/jpg/jpeg/webp are accepted and the decoded payload is capped at 25 MB. Returns the created referenceId plus its stored filePath and dimensions, so scenes can reference it (scene.referenceIds and generation.startFrameReferenceId/endFrameReferenceId). Invalid content returns INVALID_ARGUMENT; a bad project id returns NOT_FOUND.',
+    inputSchema: createReferenceInputSchema,
+    annotations: {
+      title: 'Create Reference Image',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
+  },
+  {
+    name: 'generate_video',
+    description:
+      'Submit (or regenerate) a single scene video via POST /api/projects/{id}/scenes/{sceneId}/generate-video. This is the manual alternative to run_production for one scene. It forwards an explicit `provider` and `model` (e.g. provider=fal, model=minimax/h3-max-turbo/image-to-video for image-to-video, or .../text-to-video for text-to-video) and an optional `mode` (mock|real). The start/end frames and the reference set come from the scene, not this call: set scene.referenceIds and scene.visual.generation.startFrameReferenceId/endFrameReferenceId with update_project first. GENERATION IS AN EXPLICIT PAID ACTION in real mode; it is never retried automatically. Mock mode only allows the local video provider; real mode requires a real provider and its credentials. A scene that already has an active job returns CONFLICT (generation.scene.busy) so a second paid submit can never be started.',
+    inputSchema: generateVideoInputSchema,
+    annotations: {
+      title: 'Generate Scene Video',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
+  },
+  {
+    name: 'cancel_video',
+    description:
+      'Cancel the active remote video generation for a scene via POST /api/projects/{id}/scenes/{sceneId}/cancel-video. Cancellation is explicit: an unsupported provider returns CONFLICT (generation.provider.cancelUnsupported), a remote cancel failure returns CONFLICT (generation.provider.cancelFailed) and keeps the attempt active so the job is never abandoned or double-submitted, and no active job returns CONFLICT (generation.scene.notActive). The terminal state is applied only to the active attempt observed, so a job that already finished is never overwritten.',
+    inputSchema: cancelVideoInputSchema,
+    annotations: {
+      title: 'Cancel Scene Video',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
   }
 ] as const;
 export interface AuthoringToolService {
@@ -135,6 +199,9 @@ export interface AuthoringToolService {
   materializeSceneIntents(args: unknown): Promise<AuthoringMcpResult<MaterializeSceneIntentsResponse>>;
   approveSceneIntents(args: unknown): Promise<AuthoringMcpResult<ApproveSceneIntentsResponse>>;
   manageProjectMusic(args: unknown): Promise<AuthoringMcpResult<ManageProjectMusicResponse>>;
+  createReference(args: unknown): Promise<AuthoringMcpResult<CreateReferenceResponse>>;
+  generateVideo(args: unknown): Promise<AuthoringMcpResult<GenerateVideoResponse>>;
+  cancelVideo(args: unknown): Promise<AuthoringMcpResult<CancelVideoResponse>>;
 }
 
 export function createAuthoringToolService(apiClient: AuthoringApiClient = new HttpAuthoringApiClient()): AuthoringToolService {
@@ -231,6 +298,76 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
           musicLengthMs: result.musicLengthMs,
           musicProvider: result.provider,
           musicModel: result.model
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async createReference(args: unknown) {
+      try {
+        const parsed = createReferenceInputSchema.parse(args ?? {});
+        const result = await apiClient.createReference(parsed.projectId, {
+          name: parsed.name,
+          contentBase64: parsed.contentBase64,
+          mimeType: parsed.mimeType,
+          fileName: parsed.fileName,
+          description: parsed.description,
+          tags: parsed.tags
+        });
+        const metadata = result.reference.metadata ?? {};
+        return toSuccess({
+          projectId: parsed.projectId,
+          referenceId: result.reference.id,
+          name: result.reference.name,
+          filePath: result.reference.filePath,
+          mimeType: typeof metadata.mimeType === 'string' ? metadata.mimeType : undefined,
+          width: typeof metadata.width === 'number' ? metadata.width : undefined,
+          height: typeof metadata.height === 'number' ? metadata.height : undefined,
+          filesize: typeof metadata.filesize === 'number' ? metadata.filesize : undefined
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async generateVideo(args: unknown) {
+      try {
+        const parsed = generateVideoInputSchema.parse(args ?? {});
+        const result = await apiClient.generateVideo(parsed.projectId, parsed.sceneId, {
+          regenerate: parsed.regenerate,
+          provider: parsed.provider,
+          model: parsed.model,
+          mode: parsed.mode
+        });
+        return toSuccess({
+          projectId: parsed.projectId,
+          sceneId: result.sceneId,
+          generationAttemptId: result.generationAttemptId,
+          status: result.status,
+          provider: result.provider,
+          model: result.model,
+          providerJobId: result.providerJobId,
+          providerStatus: result.providerStatus
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async cancelVideo(args: unknown) {
+      try {
+        const parsed = cancelVideoInputSchema.parse(args ?? {});
+        const result = await apiClient.cancelVideo(parsed.projectId, parsed.sceneId);
+        return toSuccess({
+          projectId: parsed.projectId,
+          sceneId: result.sceneId,
+          generationAttemptId: result.generationAttemptId,
+          status: result.status,
+          provider: result.provider,
+          model: result.model,
+          providerJobId: result.providerJobId,
+          providerStatus: result.providerStatus
         });
       } catch (error) {
         return toFailure(fromValidationError(error));
@@ -336,5 +473,35 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       annotations: AUTHORING_TOOL_DEFINITIONS[5].annotations
     },
     async (args) => asToolResponse(await service.manageProjectMusic(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[6].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[6].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[6].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[6].annotations
+    },
+    async (args) => asToolResponse(await service.createReference(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[7].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[7].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[7].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[7].annotations
+    },
+    async (args) => asToolResponse(await service.generateVideo(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[8].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[8].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[8].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[8].annotations
+    },
+    async (args) => asToolResponse(await service.cancelVideo(args))
   );
 }

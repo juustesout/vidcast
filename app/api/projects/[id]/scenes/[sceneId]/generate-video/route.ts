@@ -21,7 +21,7 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json({ message: 'Unexpected authorization failure.', code: 'auth.unexpected' }, { status: 500 });
   }
 
-  const body = (await request.json().catch(() => ({}))) as { regenerate?: boolean; provider?: string; model?: string };
+  const body = (await request.json().catch(() => ({}))) as { regenerate?: boolean; provider?: string; model?: string; mode?: 'mock' | 'real' };
 
   // Provider/model selected in the scene inspector are forwarded so a stored
   // `fal` (or any non-default) provider is honoured instead of falling back to
@@ -29,12 +29,14 @@ export async function POST(request: Request, context: RouteContext) {
   // inside `submitSceneVideoGeneration`, so this cannot bypass policy.
   const provider = typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined;
   const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+  const mode = body.mode === 'mock' || body.mode === 'real' ? body.mode : undefined;
 
   try {
     const result = await submitSceneVideoGeneration(id, sceneId, {
       regenerate: Boolean(body.regenerate),
       provider,
-      model
+      model,
+      mode
     });
     return NextResponse.json(result, { status: 200 });
   } catch (error) {

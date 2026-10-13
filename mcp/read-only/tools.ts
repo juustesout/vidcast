@@ -5,6 +5,7 @@ import type { AppApiClient } from './api-client';
 import { HttpAppApiClient } from './api-client';
 import { ReadOnlyMcpToolError, toFailure, toSuccess } from './errors';
 import type {
+  GetGenerationJobResponse,
   GetProjectCompositionsResponse,
   GetProjectResponse,
   GetProductionPlanResponse,
@@ -35,6 +36,10 @@ export const getProductionPlanInputSchema = z.object({
 export const getProjectCompositionsInputSchema = z.object({
   projectId: projectIdSchema,
   compositionId: z.string().trim().min(1).max(200).optional()
+});
+export const getGenerationJobInputSchema = z.object({
+  projectId: projectIdSchema,
+  attemptId: z.string().trim().min(1).max(200)
 });
 
 export const READ_ONLY_TOOL_DEFINITIONS = [
@@ -98,6 +103,20 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
       readOnlyHint: true,
       openWorldHint: false
     }
+  },
+  {
+    name: 'get_generation_job',
+    description:
+      'Poll one video generation attempt via GET /api/projects/{id}/generation-jobs/{attemptId}. Each call refreshes the attempt against the provider and persists the latest state, so repeating it advances an in-flight job the same way the run video_poll step does. Returns status, providerStatus, providerJobId, assetId and any errorCode/errorMessage. A transient failure sets providerStatus=status_unresolved and returns an error while KEEPING the job active and resumable — retry the same attempt, never resubmit it, because a live remote job may still be running. Use this after generate_video (or run_production) to follow a job to a terminal status.',
+    inputSchema: getGenerationJobInputSchema,
+    annotations: {
+      // Not read-only: each call refreshes the attempt against the provider and
+      // persists the latest state (and downloads the asset on completion), so it
+      // mutates server state the same way a run video_poll step does.
+      title: 'Get Generation Job',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
   }
 ] as const;
 
@@ -108,6 +127,7 @@ export interface ReadOnlyToolService {
   getValidationReport(args: unknown): Promise<ReadOnlyMcpResult<GetValidationReportResponse>>;
   getProductionPlan(args: unknown): Promise<ReadOnlyMcpResult<GetProductionPlanResponse>>;
   getProjectCompositions(args: unknown): Promise<ReadOnlyMcpResult<GetProjectCompositionsResponse>>;
+  getGenerationJob(args: unknown): Promise<ReadOnlyMcpResult<GetGenerationJobResponse>>;
 }
 
 export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppApiClient()): ReadOnlyToolService {
@@ -204,6 +224,16 @@ export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppA
           latest: all[0] ?? null,
           compositions: selected
         });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async getGenerationJob(args: unknown) {
+      try {
+        const parsed = getGenerationJobInputSchema.parse(args ?? {});
+        const job = await apiClient.getGenerationJob(parsed.projectId, parsed.attemptId);
+        return toSuccess(job);
       } catch (error) {
         return toFailure(fromValidationError(error));
       }
@@ -308,5 +338,15 @@ export function registerReadOnlyTools(server: McpServer, service: ReadOnlyToolSe
       annotations: READ_ONLY_TOOL_DEFINITIONS[5].annotations
     },
     async (args) => asToolResponse(await service.getProjectCompositions(args))
+  );
+
+  server.registerTool(
+    'get_generation_job',
+    {
+      description: READ_ONLY_TOOL_DEFINITIONS[6].description,
+      inputSchema: READ_ONLY_TOOL_DEFINITIONS[6].inputSchema,
+      annotations: READ_ONLY_TOOL_DEFINITIONS[6].annotations
+    },
+    async (args) => asToolResponse(await service.getGenerationJob(args))
   );
 }

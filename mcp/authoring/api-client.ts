@@ -1,6 +1,7 @@
 import type { Project } from '@/lib/types/render';
+import type { ReferenceImage } from '@/lib/types/reference';
 import { AuthoringMcpToolError } from './errors';
-import type { AuthoringMcpErrorCode, CreateProjectInput, ManageProjectMusicInput } from './types';
+import type { AuthoringMcpErrorCode, CreateProjectInput, CreateReferenceInput, GenerateVideoInput, ManageProjectMusicInput } from './types';
 
 interface ApiErrorPayload {
   message?: string;
@@ -76,6 +77,30 @@ export interface ManageMusicResult {
   model?: string;
 }
 
+export interface CreateReferenceResult {
+  reference: ReferenceImage;
+}
+
+export interface GenerateVideoResult {
+  sceneId: string;
+  generationAttemptId: string;
+  status: string;
+  provider: string;
+  model?: string;
+  providerJobId: string;
+  providerStatus?: string;
+}
+
+export interface CancelVideoResult {
+  sceneId: string;
+  generationAttemptId: string;
+  status: string;
+  provider: string;
+  model?: string;
+  providerJobId?: string;
+  providerStatus: string;
+}
+
 export interface AuthoringApiClient {
   createProject(input: CreateProjectInput): Promise<CreateProjectResult>;
   updateProject(projectId: string, patch: ProjectPatch): Promise<UpdateProjectResult>;
@@ -83,6 +108,9 @@ export interface AuthoringApiClient {
   materializeSceneIntents(projectId: string, patch?: ProjectPatch, intentIds?: string[]): Promise<MaterializeSceneIntentsResult>;
   approveSceneIntents(projectId: string, intentIds?: string[]): Promise<ApproveSceneIntentsResult>;
   manageMusic(projectId: string, input: ManageProjectMusicInput): Promise<ManageMusicResult>;
+  createReference(projectId: string, input: CreateReferenceInput): Promise<CreateReferenceResult>;
+  generateVideo(projectId: string, sceneId: string, input: GenerateVideoInput): Promise<GenerateVideoResult>;
+  cancelVideo(projectId: string, sceneId: string): Promise<CancelVideoResult>;
 }
 
 export interface HttpAuthoringApiClientOptions {
@@ -145,6 +173,55 @@ function mapMusicApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | u
   }
 }
 
+function mapGenerationApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | undefined {
+  if (!apiCode) {
+    return undefined;
+  }
+
+  // Reference upload codes (POST /references JSON path). All are 4xx input
+  // problems surfaced as INVALID_ARGUMENT.
+  if (apiCode.startsWith('reference.')) {
+    return 'INVALID_ARGUMENT';
+  }
+
+  switch (apiCode) {
+    case 'generation.provider.notConfigured':
+      return 'PROVIDER_NOT_CONFIGURED';
+    case 'generation.provider.notAllowed':
+    case 'generation.policy.denied':
+      return 'FORBIDDEN';
+    case 'generation.provider.auth':
+    case 'generation.provider.rejected':
+    case 'generation.provider.failed':
+    case 'generation.provider.invalid':
+      return 'PROVIDER_ERROR';
+    case 'generation.provider.rateLimited':
+      return 'RATE_LIMITED';
+    case 'generation.provider.cancelUnsupported':
+    case 'generation.provider.cancelFailed':
+      return 'CONFLICT';
+    case 'generation.project.notFound':
+    case 'generation.scene.notFound':
+    case 'generation.reference.notFound':
+    case 'generation.reference.fileMissing':
+      return 'NOT_FOUND';
+    case 'generation.scene.busy':
+    case 'generation.scene.alreadyGenerated':
+    case 'generation.scene.alreadyRunning':
+    case 'generation.scene.notActive':
+    case 'generation.attempt.pollBusy':
+    case 'generation.reference.frameConflict':
+      return 'CONFLICT';
+    case 'generation.scene.missingPrompt':
+    case 'generation.reference.startFrameInvalid':
+    case 'generation.reference.endFrameInvalid':
+    case 'generation.attempt.missingJobId':
+      return 'INVALID_ARGUMENT';
+    default:
+      return undefined;
+  }
+}
+
 function mapApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | undefined {
   if (!apiCode) {
     return undefined;
@@ -153,6 +230,11 @@ function mapApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | undefi
   const musicCode = mapMusicApiCode(apiCode);
   if (musicCode) {
     return musicCode;
+  }
+
+  const generationCode = mapGenerationApiCode(apiCode);
+  if (generationCode) {
+    return generationCode;
   }
 
   switch (apiCode) {
@@ -343,6 +425,33 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
       provider: payload.provider,
       model: payload.model
     };
+  }
+
+  async createReference(projectId: string, input: CreateReferenceInput): Promise<CreateReferenceResult> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/references`;
+    const payload = (await this.request(path, 'POST', input)) as { reference?: ReferenceImage };
+    if (!payload.reference) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid reference creation response payload.', { endpoint: path, projectId });
+    }
+    return { reference: payload.reference };
+  }
+
+  async generateVideo(projectId: string, sceneId: string, input: GenerateVideoInput): Promise<GenerateVideoResult> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}/generate-video`;
+    const payload = (await this.request(path, 'POST', input)) as Partial<GenerateVideoResult>;
+    if (!payload.sceneId || !payload.generationAttemptId || typeof payload.status !== 'string' || typeof payload.providerJobId !== 'string') {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid video submit response payload.', { endpoint: path, projectId, sceneId });
+    }
+    return payload as GenerateVideoResult;
+  }
+
+  async cancelVideo(projectId: string, sceneId: string): Promise<CancelVideoResult> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}/cancel-video`;
+    const payload = (await this.request(path, 'POST', {})) as Partial<CancelVideoResult>;
+    if (!payload.sceneId || typeof payload.status !== 'string' || typeof payload.providerStatus !== 'string') {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid video cancel response payload.', { endpoint: path, projectId, sceneId });
+    }
+    return payload as CancelVideoResult;
   }
 }
 
