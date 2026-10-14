@@ -12,3 +12,30 @@ describe('ProjectWorkspace production controls', () => {
     expect(source).toContain('Live activity');
   });
 });
+
+describe('ServerRunPanel idle-aware polling', () => {
+  function panelSource(): string {
+    return fs.readFileSync(path.join(process.cwd(), 'components/project/server-run-panel.tsx'), 'utf8');
+  }
+
+  it('suspends the run poll while hidden and resumes without dropping the tracker', () => {
+    const source = panelSource();
+
+    expect(source).toContain("import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll'");
+    expect(source).toContain('const visibleRef = useRef(true);');
+    expect(source).toContain('const pollRef = useRef<() => Promise<void>>(');
+    // Scheduling is gated on visibility, and a poll already running becomes a no-op.
+    expect(source).toContain('if (!visibleRef.current) {');
+    expect(source).toContain('const tracker = trackerRef.current;');
+    expect(source).toContain('subscribeToVisibility((hidden) => {');
+    // The remote job must be recovered on resume, not cancelled.
+    expect(source).not.toContain('.cancel(');
+  });
+
+  it('routes timers through the latest poll callback instead of a captured one', () => {
+    const source = panelSource();
+
+    expect(source).toContain('void pollRef.current();');
+    expect(source).not.toContain('void pollServerRun();');
+  });
+});

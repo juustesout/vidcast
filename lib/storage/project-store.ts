@@ -85,21 +85,41 @@ function isMissingFileError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT';
 }
 
-async function readProjectFile(projectId: string): Promise<Project | null> {
+async function readProjectRaw(projectId: string): Promise<string | null> {
   const projectJsonPath = getProjectJsonPath(projectId);
 
-  let raw: string;
   try {
-    raw = await fs.readFile(projectJsonPath, 'utf8');
+    return await fs.readFile(projectJsonPath, 'utf8');
   } catch (error) {
     if (isMissingFileError(error)) {
       return null;
     }
     throw new ProjectReadError(projectId, `Failed to read project ${projectId} from disk.`, { cause: error });
   }
+}
+
+async function readProjectFile(projectId: string): Promise<Project | null> {
+  const raw = await readProjectRaw(projectId);
+  if (raw === null) {
+    return null;
+  }
 
   try {
     return normalizeProject(JSON.parse(raw) as Project);
+  } catch (error) {
+    throw new ProjectReadError(projectId, `Project ${projectId} contains invalid or corrupt JSON.`, { cause: error });
+  }
+}
+
+async function readProjectOwnerTag(projectId: string): Promise<string | undefined> {
+  const raw = await readProjectRaw(projectId);
+  if (raw === null) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { ownerId?: unknown };
+    return typeof parsed.ownerId === 'string' ? parsed.ownerId : undefined;
   } catch (error) {
     throw new ProjectReadError(projectId, `Project ${projectId} contains invalid or corrupt JSON.`, { cause: error });
   }
@@ -723,16 +743,29 @@ class JsonProjectStore implements ProjectStore {
         continue;
       }
 
-      let project: Project | null;
+      let ownerTag: string | undefined;
       try {
-        project = await readProjectFile(entry.name);
+        ownerTag = await readProjectOwnerTag(entry.name);
       } catch (error) {
         console.warn(`[project-store] Skipping unreadable project "${entry.name}" during claim: ${error instanceof Error ? error.message : 'unknown error'}`);
         continue;
       }
 
-      if (project && !project.ownerId?.trim()) {
-        await withKeyedLock(projectLockKey(project.id), () => writeProjectFile({ ...project, ownerId: trimmedOwnerId }));
+      if (ownerTag?.trim()) {
+        continue;
+      }
+
+      const didClaim = await withKeyedLock(projectLockKey(entry.name), async () => {
+        const current = await readProjectFile(entry.name);
+        if (!current || current.ownerId?.trim()) {
+          return false;
+        }
+
+        await writeProjectFile({ ...current, ownerId: trimmedOwnerId });
+        return true;
+      });
+
+      if (didClaim) {
         claimed += 1;
       }
     }

@@ -9,6 +9,10 @@ function workspaceSource(): string {
   return fs.readFileSync(path.join(process.cwd(), 'components/project/project-workspace.tsx'), 'utf8');
 }
 
+function productionActionClientSource(): string {
+  return fs.readFileSync(path.join(process.cwd(), 'lib/client/production-action-client.ts'), 'utf8');
+}
+
 describe('video generation provider/import constants', () => {
   it('adds fal to the video provider list without changing the image provider list', () => {
     expect(VIDEO_GENERATION_PROVIDERS).toContain('fal');
@@ -92,9 +96,10 @@ describe('ProjectWorkspace image-to-video authoring', () => {
   });
 
   it('forwards the effective provider and model from the client batch runner video submit', () => {
-    const source = workspaceSource();
+    const source = productionActionClientSource();
 
-    // The batch runner must not ignore the explicit scene configuration.
+    // The batch runner must not ignore the explicit scene configuration. This
+    // HTTP/mapping logic now lives in the shared production action client.
     expect(source).toContain("if (action.type === 'video_submit' && action.sceneId)");
     expect(source).toContain('const { provider, model } = resolveVideoProviderForwarding(videoGeneration);');
     expect(source).toContain('body: JSON.stringify({ regenerate, provider, model })');
@@ -106,5 +111,18 @@ describe('ProjectWorkspace image-to-video authoring', () => {
     expect(source).toContain('async function cancelVideoGeneration');
     expect(source).toContain('/cancel-video');
     expect(source).toContain('Cancel Video');
+  });
+
+  it('pauses video polling while the document is hidden and resumes on visibility', () => {
+    const source = workspaceSource();
+
+    // A single guarded interval runs only while visible; it is torn down and
+    // recreated on visibility transitions instead of polling a background tab.
+    expect(source).toContain("import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll'");
+    expect(source).toContain('const startPolling = () => {');
+    expect(source).toContain('const stopPolling = () => {');
+    expect(source).toContain('subscribeToVisibility((hidden) => {');
+    expect(source).toContain('isHidden(');
+    expect(source).not.toContain('const timer = window.setInterval(poll, 5000);');
   });
 });

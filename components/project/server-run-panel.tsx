@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { HeadlessRunLogItem, HeadlessRunSnapshot, HeadlessRunStatus } from '@/lib/production/run-types';
 import { ProductionRunTracker, startServerRunFlow } from '@/lib/client/production-run-tracker';
+import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll';
 import type { ProductionRunApiError } from '@/lib/client/production-run-client';
 
 interface ServerRunPanelProps {
@@ -93,6 +94,8 @@ function ServerRunErrorCard({ error }: { error: ProductionRunApiError | null }) 
 export function ServerRunPanel({ projectId, onEnsureSaved }: ServerRunPanelProps) {
   const trackerRef = useRef<ProductionRunTracker | null>(null);
   const pollTimerRef = useRef<number | null>(null);
+  const pollRef = useRef<() => Promise<void>>(async () => {});
+  const visibleRef = useRef(true);
   const [phase, setPhase] = useState<'idle' | 'starting' | 'tracking' | 'error'>('idle');
   const [trackerState, setTrackerState] = useState(() => new ProductionRunTracker().getState());
   const [runFeedback, setRunFeedback] = useState('');
@@ -115,8 +118,11 @@ export function ServerRunPanel({ projectId, onEnsureSaved }: ServerRunPanelProps
 
   function schedulePoll(delayMs: number): void {
     clearScheduledPoll();
+    if (!visibleRef.current) {
+      return;
+    }
     pollTimerRef.current = window.setTimeout(() => {
-      void pollServerRun();
+      void pollRef.current();
     }, delayMs);
   }
 
@@ -155,7 +161,7 @@ export function ServerRunPanel({ projectId, onEnsureSaved }: ServerRunPanelProps
 
   async function pollServerRun(): Promise<void> {
     const tracker = trackerRef.current;
-    if (!tracker) {
+    if (!tracker || !visibleRef.current) {
       return;
     }
 
@@ -225,6 +231,28 @@ export function ServerRunPanel({ projectId, onEnsureSaved }: ServerRunPanelProps
       clearScheduledPoll();
       trackerRef.current?.invalidate();
     };
+  }, []);
+
+  useEffect(() => {
+    pollRef.current = pollServerRun;
+  });
+
+  useEffect(() => {
+    visibleRef.current = typeof document !== 'undefined' ? !isHidden(document.visibilityState) : true;
+
+    return subscribeToVisibility((hidden) => {
+      const wasHidden = visibleRef.current;
+      visibleRef.current = !hidden;
+
+      if (hidden) {
+        clearScheduledPoll();
+        return;
+      }
+
+      if (wasHidden) {
+        void pollRef.current();
+      }
+    });
   }, []);
 
   useEffect(() => {

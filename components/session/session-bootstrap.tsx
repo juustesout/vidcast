@@ -7,6 +7,21 @@ interface SessionBootstrapProps {
   authenticated: boolean;
 }
 
+let sessionRequest: Promise<number> | null = null;
+
+export function ensureAnonymousSession(): Promise<number> {
+  if (!sessionRequest) {
+    sessionRequest = fetch('/api/auth/session', { method: 'POST' })
+      .then((response) => response.status)
+      .catch(() => {
+        sessionRequest = null;
+        return 0;
+      });
+  }
+
+  return sessionRequest;
+}
+
 /**
  * Bootstraps a local (non-production) anonymous session when the request has no
  * identity yet, then refreshes the server-rendered tree. In production no
@@ -24,13 +39,9 @@ export function SessionBootstrap({ authenticated }: SessionBootstrapProps) {
     let cancelled = false;
 
     void (async () => {
-      try {
-        const response = await fetch('/api/auth/session', { method: 'POST' });
-        if (!cancelled && response.status === 201) {
-          router.refresh();
-        }
-      } catch {
-        // Keep protected content hidden while no session can be established.
+      const status = await ensureAnonymousSession();
+      if (!cancelled && status === 201) {
+        router.refresh();
       }
     })();
 

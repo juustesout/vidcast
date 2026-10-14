@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ASPECT_RATIOS, FAL_VIDEO_MODEL_ENDPOINTS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
@@ -10,19 +10,23 @@ import { ProductionWorkflow } from '@/components/project/production-workflow';
 import { ServerRunPanel } from '@/components/project/server-run-panel';
 import { ScenePreview } from '@/components/preview/scene-preview';
 import { ValidationPanel } from '@/components/project/validation-panel';
+import { ReferencesPanel } from '@/components/project/references-panel';
+import { EmptyPanel, Field, InfoMiniCard, SelectField, TabButton } from '@/components/project/workspace-controls';
 import { createProjectCompositionRequest, createSceneNarrationRequest, createSceneRenderRequest } from '@/lib/client/render-client';
+import { executeProductionActionRequest } from '@/lib/client/production-action-client';
 import { deriveGenerationTasks } from '@/lib/projects/generation-tasks';
 import { resolveVideoProviderForwarding } from '@/lib/generation/video-provider-forwarding';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
-import { getAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
+import { getAssetUsage } from '@/lib/projects/usage';
 import { defaultBoxForType, defaultPositionForType } from '@/lib/render/overlay-resolve';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { createId } from '@/lib/utils/ids';
+import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll';
 import { joinProjectAssetUrl, joinProjectReferenceUrl } from '@/lib/utils/project-files';
 import { deriveActiveWorkflowStepId } from '@/lib/workflow/workflow-navigation';
 import { deriveWorkflowStatus } from '@/lib/workflow/workflow-status';
 import { deriveProductionPlan, groupProductionActionsByScene, type ProductionPlannedAction } from '@/lib/production/production-planner';
-import { createProductionRunnerError, runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent, type ProductionRunnerResultStatus } from '@/lib/production/production-runner';
+import { runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent, type ProductionRunnerResultStatus } from '@/lib/production/production-runner';
 import { formatProductionLogAsText } from '@/lib/production/production-log-export';
 import type { WorkflowNavigationTarget, WorkflowStepId } from '@/lib/workflow/workflow-status';
 import type { GenerationProvider, GenerationStatus } from '@/lib/types/generation';
@@ -265,15 +269,6 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
 
   const sceneAssetFileInput = useRef<HTMLInputElement | null>(null);
   const libraryAssetFileInput = useRef<HTMLInputElement | null>(null);
-  const referenceFileInput = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    void fetch('/api/auth/session', {
-      method: 'POST'
-    }).catch(() => {
-      // Protected API calls surface errors if session bootstrap fails.
-    });
-  }, []);
 
   const selectedScene = useMemo(
     () => draft.scenes.find((scene) => scene.id === selectedSceneId) ?? draft.scenes[0] ?? null,
@@ -599,196 +594,17 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   }
 
   async function executeProductionAction(action: ProductionPlannedAction): Promise<ProductionActionExecutionOutcome | void> {
-    if (!action.execute) {
-      return;
-    }
-
-    if (action.type === 'image_generate' && action.sceneId) {
-      const regenerate = Boolean(action.payload?.regenerate);
-      setGeneratingSceneId(action.sceneId);
-      const endpoint = `/api/projects/${draft.id}/scenes/${action.sceneId}/generate-image`;
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ regenerate })
-      });
-      const body = (await response.json().catch(() => ({}))) as {
-        message?: string;
-        code?: string;
-        status?: string;
-        providerStatus?: string;
-        generationAttemptId?: string;
-      };
-      setGeneratingSceneId(null);
-      if (!response.ok) {
-        throw createProductionRunnerError(body.message || 'Image generation failed.', {
-          message: body.message || 'Image generation failed.',
-          code: body.code,
-          endpoint,
-          httpStatus: response.status,
-          providerStatus: body.providerStatus,
-          sceneId: action.sceneId,
-          attemptId: body.generationAttemptId
-        });
+    return executeProductionActionRequest(action, {
+      projectId: draft.id,
+      scenes: draft.scenes,
+      lifecycle: {
+        setSceneGenerating: setGeneratingSceneId,
+        setSceneNarrating: setNarratingSceneId,
+        setSceneRendering: setRenderingSceneId,
+        setComposing: setComposingProject,
+        setCompositionFailed
       }
-      return {
-        message: body.message || body.status || 'Image generation completed.',
-        endpoint,
-        providerStatus: body.providerStatus,
-        sceneId: action.sceneId,
-        attemptId: body.generationAttemptId
-      };
-    }
-
-    if (action.type === 'video_submit' && action.sceneId) {
-      const regenerate = Boolean(action.payload?.regenerate);
-      // The client batch runner must honour the scene's explicit video provider
-      // (and model) so automated generation matches a manual submit, while never
-      // forwarding the mock sentinel or forcing a mock/real mismatch. The server
-      // remains the authority and re-validates the forwarded selection.
-      const scene = draft.scenes.find((entry) => entry.id === action.sceneId);
-      const videoGeneration = scene?.visual && scene.visual.kind === 'generated_video' ? scene.visual.generation : undefined;
-      const { provider, model } = resolveVideoProviderForwarding(videoGeneration);
-      setGeneratingSceneId(action.sceneId);
-      const endpoint = `/api/projects/${draft.id}/scenes/${action.sceneId}/generate-video`;
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ regenerate, provider, model })
-      });
-      const body = (await response.json().catch(() => ({}))) as { message?: string; code?: string; status?: string; providerStatus?: string; generationAttemptId?: string };
-      setGeneratingSceneId(null);
-      if (!response.ok) {
-        throw createProductionRunnerError(body.message || 'Video submit failed.', {
-          message: body.message || 'Video submit failed.',
-          code: body.code,
-          endpoint,
-          httpStatus: response.status,
-          providerStatus: body.providerStatus,
-          sceneId: action.sceneId,
-          attemptId: body.generationAttemptId
-        });
-      }
-      return {
-        message: body.message || body.status || 'Video generation submitted.',
-        endpoint,
-        providerStatus: body.providerStatus,
-        sceneId: action.sceneId,
-        attemptId: body.generationAttemptId
-      };
-    }
-
-    if (action.type === 'video_poll') {
-      const attemptId = String(action.payload?.attemptId ?? '');
-      if (!attemptId) {
-        throw createProductionRunnerError('Missing video attempt id for polling.', {
-          endpoint: `/api/projects/${draft.id}/generation-jobs/:attemptId`,
-          message: 'Missing video attempt id for polling.'
-        });
-      }
-      const endpoint = `/api/projects/${draft.id}/generation-jobs/${attemptId}`;
-      const response = await fetch(endpoint);
-      const body = (await response.json().catch(() => ({}))) as { message?: string; code?: string; status?: string; providerStatus?: string };
-      if (!response.ok) {
-        throw createProductionRunnerError(body.message || 'Video poll failed.', {
-          message: body.message || 'Video poll failed.',
-          code: body.code,
-          endpoint,
-          httpStatus: response.status,
-          providerStatus: body.providerStatus,
-          sceneId: action.sceneId,
-          attemptId
-        });
-      }
-      return {
-        message: body.message || body.status || 'Video poll completed.',
-        endpoint,
-        providerStatus: body.providerStatus,
-        sceneId: action.sceneId,
-        attemptId
-      };
-    }
-
-    if (action.type === 'narration_generate' && action.sceneId) {
-      const scene = draft.scenes.find((entry) => entry.id === action.sceneId);
-      if (!scene) {
-        throw createProductionRunnerError(`Scene ${action.sceneId} not found for narration.`, {
-          endpoint: `/api/projects/${draft.id}/scenes/${action.sceneId}/generate-narration`,
-          sceneId: action.sceneId
-        });
-      }
-
-      const mode = String(action.payload?.mode ?? 'generate');
-      setNarratingSceneId(action.sceneId);
-      const result = await createSceneNarrationRequest(draft.id, action.sceneId, {
-        text: scene.narration?.text,
-        voiceId: scene.narration?.voiceId,
-        model: scene.narration?.model,
-        format: scene.narration?.format ?? 'mp3',
-        regenerate: mode === 'regenerate',
-        retry: mode === 'retry'
-      });
-      setNarratingSceneId(null);
-      if (!result.ok) {
-        throw createProductionRunnerError(result.message || 'Narration generation failed.', {
-          message: result.message || 'Narration generation failed.',
-          endpoint: `/api/projects/${draft.id}/scenes/${action.sceneId}/generate-narration`,
-          sceneId: action.sceneId,
-          attemptId: result.narration?.generationAttemptId
-        });
-      }
-      return {
-        message: result.message || 'Narration generation completed.',
-        endpoint: `/api/projects/${draft.id}/scenes/${action.sceneId}/generate-narration`,
-        sceneId: action.sceneId,
-        attemptId: result.narration?.generationAttemptId
-      };
-    }
-
-    if (action.type === 'scene_render' && action.sceneId) {
-      setRenderingSceneId(action.sceneId);
-      const result = await createSceneRenderRequest(draft.id, action.sceneId);
-      setRenderingSceneId(null);
-      if (!result.ok) {
-        throw createProductionRunnerError(result.message || 'Scene render failed.', {
-          message: result.message || 'Scene render failed.',
-          code: result.code,
-          details: result.details,
-          endpoint: `/api/projects/${draft.id}/scenes/${action.sceneId}/render`,
-          sceneId: action.sceneId
-        });
-      }
-      return {
-        message: result.message || 'Scene render completed.',
-        code: result.code,
-        details: result.details,
-        endpoint: `/api/projects/${draft.id}/scenes/${action.sceneId}/render`,
-        sceneId: action.sceneId
-      };
-    }
-
-    if (action.type === 'final_compose') {
-      setComposingProject(true);
-      setCompositionFailed(false);
-      const result = await createProjectCompositionRequest(draft.id);
-      setComposingProject(false);
-      if (!result.ok) {
-        setCompositionFailed(true);
-        throw createProductionRunnerError(result.message || 'Final composition failed.', {
-          message: result.message || 'Final composition failed.',
-          code: result.code,
-          details: result.details,
-          endpoint: `/api/projects/${draft.id}/compose`
-        });
-      }
-      setCompositionFailed(false);
-      return {
-        message: result.message || 'Final composition completed.',
-        code: result.code,
-        details: result.details,
-        endpoint: `/api/projects/${draft.id}/compose`
-      };
-    }
+    });
   }
 
   async function runProduceReady(): Promise<void> {
@@ -1096,9 +912,38 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       })();
     };
 
-    poll();
-    const timer = window.setInterval(poll, 5000);
-    return () => window.clearInterval(timer);
+    let timer: number | null = null;
+    const startPolling = () => {
+      if (timer !== null) {
+        return;
+      }
+      poll();
+      timer = window.setInterval(poll, 5000);
+    };
+    const stopPolling = () => {
+      if (timer === null) {
+        return;
+      }
+      window.clearInterval(timer);
+      timer = null;
+    };
+
+    if (!isHidden(typeof document !== 'undefined' ? document.visibilityState : undefined)) {
+      startPolling();
+    }
+
+    const unsubscribe = subscribeToVisibility((hidden) => {
+      if (hidden) {
+        stopPolling();
+      } else {
+        startPolling();
+      }
+    });
+
+    return () => {
+      stopPolling();
+      unsubscribe();
+    };
   }, [activeVideoAttemptIds, draft.id, pollVideoGenerationAttempt]);
 
   async function renderProject(): Promise<void> {
@@ -2312,69 +2157,28 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       ) : null}
 
       {activeTab === 'references' ? (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-          <section className="studio-panel rounded-[28px] p-4 shadow-panel">
-            <div className="flex flex-wrap items-center gap-2 border-b border-slate-700/70 pb-4">
-              <input value={newReferenceName} onChange={(event) => setNewReferenceName(event.target.value)} placeholder="Reference name" className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100" />
-              <input value={newReferenceDescription} onChange={(event) => setNewReferenceDescription(event.target.value)} placeholder="Description" className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100" />
-              <input value={newReferenceTags} onChange={(event) => setNewReferenceTags(event.target.value)} placeholder="tags,comma,separated" className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100" />
-              <button type="button" onClick={() => referenceFileInput.current?.click()} className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-semibold text-slate-950">Import reference</button>
-              <input
-                ref={referenceFileInput}
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                className="hidden"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.currentTarget.value = '';
-                  if (file) {
-                    void importReference(file);
-                  }
-                }}
-              />
-              <input value={referenceQuery} onChange={(event) => setReferenceQuery(event.target.value)} placeholder="Filter references" className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100" />
-            </div>
-
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {filteredReferences.map((reference) => {
-                const usage = getReferenceUsage(draft, reference.id);
-                return (
-                  <button
-                    key={reference.id}
-                    type="button"
-                    onClick={() => setSelectedReferenceId(reference.id)}
-                    className={`rounded-2xl border p-3 text-left ${selectedReferenceId === reference.id ? 'border-amber-300/50 bg-amber-200/10' : 'border-slate-700/70 bg-slate-950/30'}`}
-                  >
-                    <div className="relative aspect-video overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900">
-                      {reference.filePath ? <Image src={joinProjectReferenceUrl(draft.id, reference.id)} alt={reference.name} fill unoptimized sizes="240px" className="object-cover" /> : null}
-                    </div>
-                    <p className="mt-2 truncate text-sm font-semibold text-white">{reference.name}</p>
-                    <p className="text-xs text-slate-400 line-clamp-2">{reference.description}</p>
-                    <p className="text-xs text-slate-400">{reference.tags.join(', ') || 'No tags'} • used by {usage.length}</p>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-
-          <aside className="studio-panel rounded-[28px] p-4 shadow-panel">
-            {selectedReference ? (
-              <ReferenceDetailCard
-                project={draft}
-                reference={selectedReference}
-                onNavigateScene={(sceneId) => {
-                  setSelectedSceneId(sceneId);
-                  setActiveTab('scenes');
-                }}
-                onSave={(fields) => void saveReferenceDetails(selectedReference, fields)}
-                onDelete={() => void deleteSelectedReference()}
-              />
-            ) : (
-              <EmptyPanel message="Select a reference to inspect and edit." />
-            )}
-            {referenceMessage ? <p className="mt-3 text-xs text-slate-300">{referenceMessage}</p> : null}
-          </aside>
-        </div>
+        <ReferencesPanel
+          project={draft}
+          references={filteredReferences}
+          referenceQuery={referenceQuery}
+          onReferenceQueryChange={setReferenceQuery}
+          selectedReferenceId={selectedReferenceId}
+          onSelectReference={setSelectedReferenceId}
+          onNavigateScene={(sceneId) => {
+            setSelectedSceneId(sceneId);
+            setActiveTab('scenes');
+          }}
+          newReferenceName={newReferenceName}
+          newReferenceDescription={newReferenceDescription}
+          newReferenceTags={newReferenceTags}
+          onNewReferenceNameChange={setNewReferenceName}
+          onNewReferenceDescriptionChange={setNewReferenceDescription}
+          onNewReferenceTagsChange={setNewReferenceTags}
+          onImportReference={(file) => void importReference(file)}
+          onSaveReferenceDetails={(reference, fields) => void saveReferenceDetails(reference, fields)}
+          onDeleteReference={() => void deleteSelectedReference()}
+          referenceMessage={referenceMessage}
+        />
       ) : null}
 
       {activeTab === 'generation' ? (
@@ -2480,183 +2284,3 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   );
 }
 
-function TabButton({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }): JSX.Element {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-2xl border px-4 py-2 text-sm ${active ? 'border-amber-300/50 bg-amber-200/10 text-amber-100' : 'border-slate-700/70 bg-slate-950/40 text-slate-200'}`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function InfoMiniCard({ label, value }: { label: string; value: string }): JSX.Element {
-  return (
-    <div className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-3 text-sm">
-      <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-500">{label}</p>
-      <p className="mt-1 text-slate-100">{value}</p>
-    </div>
-  );
-}
-
-function ReferenceDetailCard({
-  project,
-  reference,
-  onNavigateScene,
-  onSave,
-  onDelete
-}: {
-  project: Project;
-  reference: ReferenceImage;
-  onNavigateScene: (sceneId: string) => void;
-  onSave: (fields: { name: string; description: string; tags: string[] }) => void;
-  onDelete: () => void;
-}): JSX.Element {
-  const [name, setName] = useState(reference.name);
-  const [description, setDescription] = useState(reference.description);
-  const [tags, setTags] = useState(reference.tags.join(', '));
-
-  const usage = getReferenceUsage(project, reference.id);
-
-  return (
-    <div className="space-y-3">
-      <h3 className="text-lg font-semibold text-white">Reference details</h3>
-      <div className="relative aspect-video overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900">
-        {reference.filePath ? <Image src={joinProjectReferenceUrl(project.id, reference.id)} alt={reference.name} fill unoptimized sizes="320px" className="object-cover" /> : null}
-      </div>
-      <Field label="Name" value={name} onChange={(value) => setName(String(value))} />
-      <Field label="Description" value={description} onChange={(value) => setDescription(String(value))} asTextArea />
-      <Field label="Tags" value={tags} onChange={(value) => setTags(String(value))} />
-
-      <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3">
-        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Used by scenes</p>
-        <div className="mt-2 space-y-2">
-          {usage.map((sceneId) => {
-            const scene = project.scenes.find((entry) => entry.id === sceneId);
-            if (!scene) return null;
-            return (
-              <button
-                key={scene.id}
-                type="button"
-                onClick={() => onNavigateScene(scene.id)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/40 px-3 py-2 text-left text-sm text-slate-200"
-              >
-                Scene {String(scene.order).padStart(2, '0')}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={() =>
-            onSave({
-              name,
-              description,
-              tags: tags
-                .split(',')
-                .map((entry: string) => entry.trim())
-                .filter(Boolean)
-            })
-          }
-          className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-semibold text-slate-950"
-        >
-          Save reference
-        </button>
-        <button type="button" onClick={onDelete} className="rounded-2xl border border-rose-400/60 bg-rose-400/10 px-4 py-2 text-sm text-rose-100">Delete reference</button>
-      </div>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  type = 'text',
-  step,
-  asTextArea = false,
-  placeholder,
-  suggestions
-}: {
-  label: string;
-  value: string | number;
-  onChange: (value: string | number) => void;
-  type?: 'text' | 'number';
-  step?: string;
-  asTextArea?: boolean;
-  placeholder?: string;
-  suggestions?: readonly string[];
-}): JSX.Element {
-  const suggestionsId = useId();
-  return (
-    <label className="grid gap-2">
-      <span className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-500">{label}</span>
-      {asTextArea ? (
-        <textarea
-          value={String(value)}
-          onChange={(event) => onChange(event.target.value)}
-          className="min-h-20 rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
-        />
-      ) : (
-        <>
-          <input
-            type={type}
-            step={step}
-            value={value}
-            placeholder={placeholder}
-            list={suggestions && suggestions.length > 0 ? suggestionsId : undefined}
-            onChange={(event) => onChange(type === 'number' ? Number(event.target.value) : event.target.value)}
-            className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
-          />
-          {suggestions && suggestions.length > 0 ? (
-            <datalist id={suggestionsId}>
-              {suggestions.map((suggestion) => (
-                <option key={suggestion} value={suggestion} />
-              ))}
-            </datalist>
-          ) : null}
-        </>
-      )}
-    </label>
-  );
-}
-
-function SelectField({
-  label,
-  value,
-  onChange,
-  options,
-  labels
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  options: readonly string[];
-  labels?: Record<string, string>;
-}): JSX.Element {
-  return (
-    <label className="grid gap-2">
-      <span className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-500">{label}</span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
-      >
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {labels?.[option] ?? option}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function EmptyPanel({ message }: { message: string }) {
-  return <div className="rounded-[24px] border border-dashed border-slate-700 p-8 text-center text-slate-400">{message}</div>;
-}
