@@ -140,6 +140,24 @@ describe('authoring MCP tool service', () => {
     }
   });
 
+  it('surfaces a service claim token from create_project', async () => {
+    const service = createAuthoringToolService(
+      makeClient({ createProject: async () => ({ project: makeProject() as never, claimToken: 'claim-token-abc' }) })
+    );
+
+    const result = await service.createProject({ title: 'New' });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toEqual({
+        projectId: 'project-1',
+        title: 'Music Test',
+        valid: true,
+        claimToken: 'claim-token-abc'
+      });
+    }
+  });
+
   it('requires an assetId before selecting music and never calls the client', async () => {
     const manageMusic = vi.fn();
     const service = createAuthoringToolService(makeClient({ manageMusic: manageMusic as never }));

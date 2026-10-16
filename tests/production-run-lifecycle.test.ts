@@ -68,6 +68,7 @@ function baseConfig(overrides: Partial<RunServiceConfig> = {}): RunServiceConfig
       maxVideoPolls: 5,
       limits: {
         image_generate: 1,
+        stock_select: 1,
         video_submit: 1,
         video_poll: 1,
         narration_generate: 1,

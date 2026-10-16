@@ -7,6 +7,7 @@ import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation'
 import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, TransitionPreset, VisualSpec } from '@/lib/types/scene';
+import type { StockOrientation, StockProviderId, StockSelection } from '@/lib/types/stock';
 
 type LegacyScene = {
   id?: string;
@@ -110,12 +111,33 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
     generation?: Partial<GenerationRecord>;
     attempts?: Partial<GenerationRecord>[];
     text?: string;
+    query?: string;
+    orientation?: StockOrientation;
+    preferredProviders?: StockProviderId[];
+    selection?: StockSelection;
   } | undefined;
   const assetId = legacyVisual?.assetId ?? scene.assetIds?.[0];
   const referenceIds = scene.referenceIds ?? [];
   const prompt = legacyVisual?.visualPrompt ?? legacyVisual?.generation?.prompt ?? '';
   const negativePrompt = legacyVisual?.negativePrompt ?? legacyVisual?.generation?.negativePrompt;
   const aspectRatio = project.aspectRatio ?? DEFAULT_RENDER_SETTINGS.aspectRatio;
+
+  // Stock selections must be preserved verbatim (provider, photo id, attribution,
+  // usage policy). Without this branch a stock visual would be coerced into
+  // `asset`/`generated_image`, silently dropping the manual selection and
+  // attribution and re-introducing an AI-generation intent. This has to run
+  // before the asset branch below, which would otherwise capture a stock visual
+  // that carries an assetId (download-policy photos).
+  if (legacyVisual?.kind === 'stock_image') {
+    return {
+      kind: 'stock_image',
+      query: typeof legacyVisual.query === 'string' ? legacyVisual.query : '',
+      orientation: legacyVisual.orientation,
+      preferredProviders: Array.isArray(legacyVisual.preferredProviders) ? legacyVisual.preferredProviders : undefined,
+      assetId: legacyVisual.assetId ?? assetId,
+      selection: legacyVisual.selection
+    };
+  }
 
   if (legacyVisual?.kind === 'asset' || (assetId && legacyVisual?.kind !== 'generated_image' && legacyVisual?.kind !== 'generated_video')) {
     return {

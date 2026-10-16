@@ -89,7 +89,7 @@ export async function requireProjectAccess(
   }
 
   const ownerId = project.ownerId?.trim();
-  if (!ownerId && options.claimLegacyOwner !== false) {
+  if (!ownerId && options.claimLegacyOwner !== false && !(await projectStore.hasPendingClaim(projectId))) {
     const claimed = await projectStore.mutateProject(projectId, (current) => {
       if (current.ownerId?.trim()) {
         return current;
@@ -132,6 +132,8 @@ export function enforceThrottle(
     | 'video_poll'
     | 'render_scene'
     | 'compose_project'
+    | 'stock_search'
+    | 'stock_select'
 ): void {
   const keyPrefix = `throttle:${bucket}:${identity.subject}`;
 
@@ -179,6 +181,14 @@ export function enforceThrottle(
     compose_project: {
       limit: envInt('API_THROTTLE_COMPOSE_PROJECT_LIMIT', 8, 1, 10_000),
       windowMs: envInt('API_THROTTLE_COMPOSE_PROJECT_WINDOW_MS', 60_000, 1_000, 24 * 60 * 60 * 1000)
+    },
+    stock_search: {
+      limit: envInt('API_THROTTLE_STOCK_SEARCH_LIMIT', 30, 1, 10_000),
+      windowMs: envInt('API_THROTTLE_STOCK_SEARCH_WINDOW_MS', 60_000, 1_000, 24 * 60 * 60 * 1000)
+    },
+    stock_select: {
+      limit: envInt('API_THROTTLE_STOCK_SELECT_LIMIT', 20, 1, 10_000),
+      windowMs: envInt('API_THROTTLE_STOCK_SELECT_WINDOW_MS', 60_000, 1_000, 24 * 60 * 60 * 1000)
     }
   };
 

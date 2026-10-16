@@ -108,6 +108,12 @@ export interface RunProductionBatchInput {
   executeAction: (action: ProductionPlannedAction) => Promise<ProductionActionExecutionOutcome | void>;
   refreshProject: () => Promise<Project>;
   skippedActionIds?: string[];
+  // Action ids already completed before the batch starts (for example restored
+  // from a recovered run). They are seeded into the planner's completed set so a
+  // forced run does not re-execute work that already produced its artifacts, but
+  // they are NOT treated as executed in this batch: if an artifact is missing or
+  // stale the planner still re-derives the action as ready and it runs.
+  initialCompletedActionIds?: string[];
   // Action ids already known to be failed before the batch starts (for example
   // interrupted work restored during recovery). They are treated as failed and
   // never executed.
@@ -120,6 +126,7 @@ export interface RunProductionBatchInput {
 const DEFAULT_CONFIG: ProductionRunnerConfig = {
   limits: {
     image_generate: 2,
+    stock_select: 2,
     video_submit: 2,
     video_poll: 4,
     narration_generate: 2,
@@ -256,7 +263,11 @@ async function executeBounded(
 export async function runProductionBatch(input: RunProductionBatchInput): Promise<ProductionRunnerResult> {
   const config = mergeConfig(input.config);
   const skippedActionIds = new Set(input.skippedActionIds ?? []);
-  const completedActionIds = new Set<string>();
+  const completedActionIds = new Set<string>(input.initialCompletedActionIds ?? []);
+  // Ids completed by *this* batch execution only. Used to avoid re-running an
+  // action within the batch without suppressing a genuine re-run of a recovered
+  // action whose artifact turned out to be missing (see `initialCompletedActionIds`).
+  const executedActionIds = new Set<string>();
   const failedActionIds = new Set<string>(input.initialFailedActionIds ?? []);
   const runningActionIds = new Set<string>();
   const events: ProductionRunnerEvent[] = [];
@@ -374,7 +385,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
     });
 
     const readyActions = deriveReadyProductionActions(plan)
-      .filter((action) => !completedActionIds.has(action.id))
+      .filter((action) => !executedActionIds.has(action.id))
       .filter((action) => !failedActionIds.has(action.id));
 
     if (readyActions.length === 0) {
@@ -411,7 +422,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
 
     previousSignature = statusSignature(plan);
 
-    const executionOrder: ProductionActionType[] = ['image_generate', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
+    const executionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
     let executed = 0;
 
     for (const type of executionOrder) {
@@ -455,6 +466,13 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
         executed += 1;
         if (item.ok) {
           completedActionIds.add(item.action.id);
+          // `video_poll` is a repeatable action: the planner keeps deriving it as
+          // ready while the external job is still running, so it must not be
+          // suppressed by the within-batch dedup set. It stays bounded by the
+          // run's poll/action limits. Other actions run at most once per batch.
+          if (item.action.type !== 'video_poll') {
+            executedActionIds.add(item.action.id);
+          }
           if (type === 'final_compose') {
             compositionAttempted = true;
           }

@@ -16,6 +16,10 @@ export function getProjectJsonPath(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'project.json');
 }
 
+export function getProjectClaimPath(projectId: string): string {
+  return path.join(getProjectRoot(projectId), 'claim.json');
+}
+
 export function getProjectAssetsRoot(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'assets');
 }
@@ -38,4 +42,15 @@ export function getProjectRunsRoot(projectId: string): string {
 
 export function getRunJsonPath(projectId: string, runId: string): string {
   return path.join(getProjectRunsRoot(projectId), `${runId}.json`);
+}
+
+// Cross-project stock router state (quota accounting + selection cache). Kept
+// at the projects root because provider quota is shared by every project that
+// uses the same API key.
+export function getStockStatePath(): string {
+  return path.join(getProjectsRoot(), '_stock', 'stock-state.json');
+}
+
+export function getStockStateDir(): string {
+  return path.join(getProjectsRoot(), '_stock');
 }

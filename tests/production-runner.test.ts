@@ -74,7 +74,7 @@ describe('runProductionBatch', () => {
       initialProject: emptyProject,
       derivePlan: () => plan,
       refreshProject: async () => emptyProject,
-      config: { maxIterations: 1, limits: { image_generate: 2, video_submit: 2, video_poll: 4, narration_generate: 2, scene_render: 1, final_compose: 1 } },
+      config: { maxIterations: 1, limits: { image_generate: 2, stock_select: 2, video_submit: 2, video_poll: 4, narration_generate: 2, scene_render: 1, final_compose: 1 } },
       executeAction: async () => {
         concurrent += 1;
         peak = Math.max(peak, concurrent);
@@ -261,6 +261,39 @@ describe('runProductionBatch', () => {
 
     expect(result.events.some((event) => event.code === 'video_poll_scheduled')).toBe(true);
     expect(result.events.some((event) => event.code === 'video_poll_completed')).toBe(true);
+  });
+
+  it('re-polls an in-flight video job across iterations instead of stopping unresolved after one poll', async () => {
+    const polls: string[] = [];
+    let deriveCalls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => {
+        deriveCalls += 1;
+        if (deriveCalls <= 3) {
+          return makePlan([
+            makeAction('s1:video_submit', 'video_submit', 'running', 's1'),
+            makeAction('s1:video_poll', 'video_poll', 'ready', 's1')
+          ]);
+        }
+        return makePlan([makeAction('s1:video_submit', 'video_submit', 'current', 's1')]);
+      },
+      refreshProject: async () => emptyProject,
+      config: {
+        maxIterations: 10,
+        limits: { image_generate: 1, stock_select: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
+      },
+      executeAction: async (action) => {
+        if (action.type === 'video_poll') {
+          polls.push(action.id);
+        }
+      }
+    });
+
+    expect(polls).toEqual(['s1:video_poll', 's1:video_poll', 's1:video_poll']);
+    expect(result.status).toBe('completed');
+    expect(result.events.filter((event) => event.code === 'video_poll_completed')).toHaveLength(3);
   });
 
   it('emits blocked and skipped diagnostics from plan state', async () => {

@@ -1,13 +1,19 @@
 import { mediaMetadataReader } from '@/lib/media/metadata-reader';
+import { resolveProviderConcurrencyLimit, withKeyedLimit } from '@/lib/concurrency/keyed-limiter';
 import { TextToSpeechProviderError, type TextToSpeechFormat, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+// ElevenLabs rejects requests beyond its account concurrency (3 on the standard
+// plan). Cap our own fan-out well below any per-request limit so parallel scenes
+// can never jointly exceed it.
+const DEFAULT_MAX_CONCURRENCY = 3;
 
 interface ElevenLabsTextToSpeechProviderOptions {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
   timeoutMs?: number;
+  maxConcurrency?: number;
 }
 
 interface ResolvedOutputFormat {
@@ -101,6 +107,7 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
   private readonly model: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly concurrencyLimit: number;
 
   constructor(options: ElevenLabsTextToSpeechProviderOptions = {}) {
     this.apiKey = options.apiKey || process.env.ELEVENLABS_API_KEY;
@@ -108,6 +115,8 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
     this.baseUrl = options.baseUrl || 'https://api.elevenlabs.io/v1';
     const envTimeout = Number(process.env.ELEVENLABS_TTS_TIMEOUT_MS);
     this.timeoutMs = options.timeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);
+    this.concurrencyLimit = options.maxConcurrency
+      ?? resolveProviderConcurrencyLimit(process.env.ELEVENLABS_TTS_MAX_CONCURRENCY, DEFAULT_MAX_CONCURRENCY);
   }
 
   async synthesize(request: TextToSpeechRequest, options?: { signal?: AbortSignal }): Promise<TextToSpeechResult> {
@@ -124,60 +133,68 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
     }
 
     const resolved = resolveOutputFormat();
-    const { signal, cleanup } = createRequestSignal(options?.signal, this.timeoutMs);
+    // Captured as a local so the guarded non-undefined key type flows into the
+    // concurrency-limited closure below.
+    const apiKey = this.apiKey;
 
+    let response: Response;
     try {
-      let response: Response;
-      try {
-        response = await fetch(`${this.baseUrl}/text-to-speech/${encodeURIComponent(request.voiceId)}`, {
-          method: 'POST',
-          headers: {
-            'xi-api-key': this.apiKey,
-            'Content-Type': 'application/json',
-            Accept: resolved.mimeType
-          },
-          body: JSON.stringify({
-            text: request.text,
-            model_id: request.model || this.model,
-            output_format: resolved.outputFormat,
-            voice_settings: {
-              stability: request.settings?.stability,
-              similarity_boost: request.settings?.similarityBoost,
-              style: request.settings?.style,
-              use_speaker_boost: request.settings?.speakerBoost
-            }
-          }),
-          signal
-        });
-      } catch (error) {
-        throw mapTransportError(error);
-      }
-
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => ({}))) as unknown;
-        throw classifyHttpError(response.status, parseErrorMessage(payload));
-      }
-
-      const mimeType = response.headers.get('content-type') || resolved.mimeType;
-      const providerRequestId = response.headers.get('request-id') || response.headers.get('x-request-id') || undefined;
-      const data = Buffer.from(await response.arrayBuffer());
-      const metadata = await mediaMetadataReader.read(data, `narration.${resolved.format}`, mimeType, 'audio');
-
-      return {
-        provider: this.providerId,
-        model: request.model || this.model,
-        mimeType,
-        format: resolved.format,
-        data,
-        duration: metadata.duration,
-        providerRequestId,
-        metadata: {
-          outputFormat: resolved.outputFormat,
-          requestedFormat: request.format
+      // The provider-wide semaphore caps simultaneous ElevenLabs requests across
+      // every scene and run in this process. The request deadline only starts
+      // once a slot is acquired, so queueing never counts as a timeout.
+      response = await withKeyedLimit(`tts:${this.providerId}`, this.concurrencyLimit, async () => {
+        const { signal, cleanup } = createRequestSignal(options?.signal, this.timeoutMs);
+        try {
+          return await fetch(`${this.baseUrl}/text-to-speech/${encodeURIComponent(request.voiceId)}`, {
+            method: 'POST',
+            headers: {
+              'xi-api-key': apiKey,
+              'Content-Type': 'application/json',
+              Accept: resolved.mimeType
+            },
+            body: JSON.stringify({
+              text: request.text,
+              model_id: request.model || this.model,
+              output_format: resolved.outputFormat,
+              voice_settings: {
+                stability: request.settings?.stability,
+                similarity_boost: request.settings?.similarityBoost,
+                style: request.settings?.style,
+                use_speaker_boost: request.settings?.speakerBoost
+              }
+            }),
+            signal
+          });
+        } finally {
+          cleanup();
         }
-      };
-    } finally {
-      cleanup();
+      });
+    } catch (error) {
+      throw mapTransportError(error);
     }
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as unknown;
+      throw classifyHttpError(response.status, parseErrorMessage(payload));
+    }
+
+    const mimeType = response.headers.get('content-type') || resolved.mimeType;
+    const providerRequestId = response.headers.get('request-id') || response.headers.get('x-request-id') || undefined;
+    const data = Buffer.from(await response.arrayBuffer());
+    const metadata = await mediaMetadataReader.read(data, `narration.${resolved.format}`, mimeType, 'audio');
+
+    return {
+      provider: this.providerId,
+      model: request.model || this.model,
+      mimeType,
+      format: resolved.format,
+      data,
+      duration: metadata.duration,
+      providerRequestId,
+      metadata: {
+        outputFormat: resolved.outputFormat,
+        requestedFormat: request.format
+      }
+    };
   }
 }

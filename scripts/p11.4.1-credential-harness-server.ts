@@ -120,6 +120,7 @@ async function main(): Promise<void> {
         maxVideoPolls: 10,
         limits: {
           image_generate: 1,
+          stock_select: 1,
           video_submit: 1,
           video_poll: 1,
           narration_generate: 1,

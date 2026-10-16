@@ -112,9 +112,47 @@ function parseFraction(value?: string): number | undefined {
   return numerator / denominator;
 }
 
+async function fetchRemoteSourceToFile(url: string, targetDir: string, baseName: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), getSceneRenderTimeoutMs());
+  let response: Response;
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } catch (error) {
+    throw new SceneRenderError(
+      'Failed to fetch remote render source.',
+      'MISSING_ASSET',
+      error instanceof Error ? error.message : undefined
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    throw new SceneRenderError(`Remote render source returned HTTP ${response.status}.`, 'MISSING_ASSET');
+  }
+
+  const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
+  const extension = contentType.includes('png')
+    ? 'png'
+    : contentType.includes('webp')
+      ? 'webp'
+      : contentType.includes('gif')
+        ? 'gif'
+        : 'jpg';
+  const target = safePathForSvg(targetDir, `${baseName}.${extension}`);
+  const arrayBuffer = await response.arrayBuffer();
+  await fs.writeFile(target, Buffer.from(arrayBuffer));
+  return target;
+}
+
 async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, options: SceneRenderOptions): Promise<string> {
   if (scene.source.kind === 'blank') {
     return 'color=black';
+  }
+
+  if (scene.source.remoteUrl && !scene.source.assetPath) {
+    return fetchRemoteSourceToFile(scene.source.remoteUrl, options.tempDir, `${options.sceneId}-${options.renderId}-remote`);
   }
 
   if (scene.source.kind === 'image' || scene.source.kind === 'video') {

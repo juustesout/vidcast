@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
+import { ClaimProjectForm } from '@/components/project/claim-project-form';
 import { listProjectsForIdentity } from '@/lib/security/page-access';
 import { getServerIdentity } from '@/lib/security/server-identity';
 
@@ -26,6 +27,8 @@ export default async function ProjectsPage() {
             </Link>
           </div>
         </div>
+
+        <ClaimProjectForm />
 
         <div className="grid gap-4">
           {projects.map((project) => (

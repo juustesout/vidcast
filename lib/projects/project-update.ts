@@ -55,6 +55,12 @@ export function applyProjectUpdate(existingProject: Project, incomingPayload: un
   const candidate = normalizeProject({
     ...existingProject,
     ...(incoming as unknown as Partial<Project>),
+    // Ownership is server-authoritative and immutable through generic updates.
+    // The stored owner always wins over anything a request body supplies, so a
+    // client can neither reassign a project to another subject nor clear it.
+    // Ownership only changes via the explicit server-controlled claim paths
+    // (session bootstrap, legacy first-claim), never via a project patch.
+    ownerId: existingProject.ownerId,
     id: existingProject.id,
     createdAt: existingProject.createdAt,
     updatedAt: existingProject.updatedAt

@@ -42,6 +42,10 @@ export interface CreateProjectResponse {
   projectId: string;
   title: string;
   valid: true;
+  // Present only when the creating caller is a service: a single-use token the
+  // agent must hand to the intended browser user out-of-band so they can claim
+  // the project. Never surfaced to other clients or through project reads.
+  claimToken?: string;
 }
 
 export interface UpdateProjectResponse {

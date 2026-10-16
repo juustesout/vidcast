@@ -5,7 +5,8 @@ vi.mock('@/lib/storage/project-store', () => ({
     listProjects: vi.fn(),
     getProject: vi.fn(),
     updateProject: vi.fn(),
-    mutateProject: vi.fn()
+    mutateProject: vi.fn(),
+    hasPendingClaim: vi.fn()
   }
 }));
 
@@ -22,6 +23,8 @@ describe('page data access', () => {
     vi.mocked(projectStore.getProject).mockReset();
     vi.mocked(projectStore.updateProject).mockReset();
     vi.mocked(projectStore.mutateProject).mockReset();
+    vi.mocked(projectStore.hasPendingClaim).mockReset();
+    vi.mocked(projectStore.hasPendingClaim).mockResolvedValue(false);
   });
 
   it('scopes project listing to the user identity', async () => {
@@ -69,6 +72,14 @@ describe('page data access', () => {
 
     await expect(getProjectForIdentity(USER_A, 'p1')).resolves.toEqual({ id: 'p1', ownerId: 'user-a' });
     expect(projectStore.mutateProject).toHaveBeenCalledWith('p1', expect.any(Function));
+  });
+
+  it('does not legacy-claim an ownerless project while a claim capability is pending', async () => {
+    vi.mocked(projectStore.getProject).mockResolvedValue({ id: 'p1' } as never);
+    vi.mocked(projectStore.hasPendingClaim).mockResolvedValue(true);
+
+    await expect(getProjectForIdentity(USER_A, 'p1')).resolves.toBeNull();
+    expect(projectStore.mutateProject).not.toHaveBeenCalled();
   });
 
   it('allows a service identity to read any project', async () => {

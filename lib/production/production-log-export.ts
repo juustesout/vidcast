@@ -43,6 +43,7 @@ const EVENT_LABELS: Record<ProductionRunnerEvent['code'], string> = {
 
 const ACTION_LABELS: Record<NonNullable<ProductionRunnerEvent['actionType']>, string> = {
   image_generate: 'IMAGE',
+  stock_select: 'STOCK',
   video_submit: 'VIDEO',
   video_poll: 'POLL',
   narration_generate: 'TTS',

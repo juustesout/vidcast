@@ -7,6 +7,7 @@ import { mediaMetadataReader } from '@/lib/media/metadata-reader';
 import { getProjectAssetsRoot, getProjectReferencesRoot } from '@/lib/storage/storage-paths';
 import type { Asset } from '@/lib/types/asset';
 import type { ReferenceImage } from '@/lib/types/reference';
+import type { StockSelection } from '@/lib/types/stock';
 
 const ALLOWED_ASSET_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'mp4', 'webm', 'mov', 'mp3', 'wav', 'm4a']);
 const ALLOWED_REFERENCE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
@@ -123,6 +124,14 @@ export interface GeneratedImageInput {
     referenceIds: string[];
     providerRequestId?: string;
   };
+}
+
+export interface StockImageInput {
+  projectId: string;
+  sceneOrder: number;
+  selection: StockSelection;
+  mimeType: string;
+  data: Buffer;
 }
 
 export interface GeneratedVideoInput {
@@ -303,6 +312,46 @@ export class MediaStore {
         model: input.generation.model,
         prompt: input.generation.prompt,
         referenceIds: input.generation.referenceIds
+      },
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  async saveStockImage(input: StockImageInput): Promise<Asset> {
+    const now = nowIso();
+    const assetId = createId('asset');
+    const extension = input.mimeType.includes('webp') ? 'webp' : input.mimeType.includes('png') ? 'png' : 'jpg';
+    const photoId = sanitizeSegment(input.selection.photoId).slice(0, 40);
+    const suggestedFilename = `scene-${String(input.sceneOrder).padStart(2, '0')}-stock-${input.selection.provider}-${photoId}.${extension}`;
+    const writeResult = await writeUniqueFile(getProjectAssetsRoot(input.projectId), 'assets', suggestedFilename, input.data);
+    const metadata = await mediaMetadataReader.read(input.data, writeResult.storedFilename, input.mimeType, 'image');
+
+    return {
+      id: assetId,
+      type: 'image',
+      status: 'available',
+      provenance: 'stock',
+      filename: writeResult.storedFilename,
+      originalFilename: writeResult.storedFilename,
+      localPath: writeResult.localPath,
+      source: input.selection.sourceUrl,
+      mimeType: metadata.mimeType || input.mimeType,
+      width: metadata.width ?? input.selection.width,
+      height: metadata.height ?? input.selection.height,
+      duration: undefined,
+      filesize: metadata.filesize,
+      metadata: {
+        mimeType: metadata.mimeType || input.mimeType,
+        filesize: metadata.filesize,
+        stockProvider: input.selection.provider,
+        stockPhotoId: input.selection.photoId,
+        stockUsagePolicy: input.selection.usagePolicy,
+        stockSourceUrl: input.selection.sourceUrl,
+        stockPhotographer: input.selection.attribution.photographerName,
+        stockPhotographerUrl: input.selection.attribution.photographerUrl,
+        stockLicense: input.selection.attribution.license,
+        stockProviderName: input.selection.attribution.providerName
       },
       createdAt: now,
       updatedAt: now

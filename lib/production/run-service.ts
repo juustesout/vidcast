@@ -2,6 +2,7 @@ import { generateSceneImage, SceneImageGenerationError } from '@/lib/generation/
 import { generateProjectMusic, ProjectMusicGenerationError, selectProjectMusic } from '@/lib/generation/music-service';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
 import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import { selectSceneStockImage, StockImageSelectionError } from '@/lib/generation/stock-image-service';
 import { isMusicAsset, resolveSelectedMusicAsset } from '@/lib/render/music-mix';
 import { CompositionServiceError, videoCompositionService } from '@/lib/render/video-composition-service';
 import { SceneRenderError } from '@/lib/render/renderer';
@@ -98,6 +99,7 @@ interface ServiceDependencies {
   runBatch: typeof runProductionBatch;
   derivePlan: typeof deriveProductionPlan;
   generateImage: typeof generateSceneImage;
+  selectStockImage: typeof selectSceneStockImage;
   submitVideo: typeof submitSceneVideoGeneration;
   pollVideo: typeof refreshVideoGenerationAttempt;
   generateNarration: typeof generateSceneNarration;
@@ -114,6 +116,7 @@ const defaultDependencies: ServiceDependencies = {
   runBatch: runProductionBatch,
   derivePlan: deriveProductionPlan,
   generateImage: generateSceneImage,
+  selectStockImage: selectSceneStockImage,
   submitVideo: submitSceneVideoGeneration,
   pollVideo: refreshVideoGenerationAttempt,
   generateNarration: generateSceneNarration,
@@ -136,6 +139,7 @@ function envInt(value: string | undefined, fallback: number, min = 1, max = Numb
 function defaultActionLimits(): Record<ProductionActionType, number> {
   return {
     image_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_IMAGE, 2, 1, 16),
+    stock_select: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_STOCK, 2, 1, 16),
     video_submit: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_SUBMIT, 2, 1, 16),
     video_poll: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_POLL, 4, 1, 32),
     narration_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_NARRATION, 2, 1, 16),
@@ -172,6 +176,7 @@ function mergePerActionLimits(
 
   return {
     image_generate: envInt(String(override.image_generate ?? defaults.image_generate), defaults.image_generate, 1, 64),
+    stock_select: envInt(String(override.stock_select ?? defaults.stock_select), defaults.stock_select, 1, 64),
     video_submit: envInt(String(override.video_submit ?? defaults.video_submit), defaults.video_submit, 1, 64),
     video_poll: envInt(String(override.video_poll ?? defaults.video_poll), defaults.video_poll, 1, 64),
     narration_generate: envInt(String(override.narration_generate ?? defaults.narration_generate), defaults.narration_generate, 1, 64),
@@ -525,6 +530,13 @@ export class HeadlessProductionRunService {
     const runId = entry.runId;
     const at = this.dependencies.now();
 
+    // A live owner in another process/worker is executing this run. Leave its
+    // project and state untouched; the imported snapshot still makes the run
+    // readable through this instance.
+    if (this.runStore?.isExecutionLocked && (await this.runStore.isExecutionLocked(entry.projectId, runId))) {
+      return this.registry.getRunUnsafe(runId);
+    }
+
     const project = await this.dependencies.store.getProject(entry.projectId);
     if (!project) {
       this.registry.appendEvent(runId, {
@@ -677,6 +689,26 @@ export class HeadlessProductionRunService {
   }
 
   private async executeRun(runId: string): Promise<void> {
+    const snapshot = this.registry.getRunUnsafe(runId);
+    const projectId = snapshot?.projectId;
+    const lock = projectId && this.runStore?.tryAcquireExecutionLock
+      ? await this.runStore.tryAcquireExecutionLock(projectId, runId)
+      : undefined;
+
+    // Another process/worker owns this run's execution. Bail out without
+    // touching the project so the owner's in-flight work is never duplicated.
+    if (projectId && this.runStore?.tryAcquireExecutionLock && !lock) {
+      return;
+    }
+
+    try {
+      await this.executeRunInternal(runId);
+    } finally {
+      await lock?.release();
+    }
+  }
+
+  private async executeRunInternal(runId: string): Promise<void> {
     const startedAt = this.dependencies.now();
     this.registry.updateRunStatus(runId, 'running', { startedAt });
 
@@ -717,6 +749,10 @@ export class HeadlessProductionRunService {
           limits: run.acceptedConfig.limits.perActionConcurrency
         },
         initialFailedActionIds: run.failedActionIds,
+        // Completed actions are restored so a forced recovered run does not
+        // re-execute generation that already produced its artifacts. The planner
+        // still re-derives any action whose artifact is missing or stale.
+        initialCompletedActionIds: run.completedActionIds,
         executeAction: async (action) => {
           if (actionExecutionCount >= run.acceptedConfig.limits.maxActionExecutions) {
             throw createProductionRunnerError('Run action limit reached.', {
@@ -884,6 +920,42 @@ export class HeadlessProductionRunService {
         };
       } catch (error) {
         if (error instanceof SceneImageGenerationError) {
+          throw createProductionRunnerError(error.message, {
+            message: error.message,
+            code: error.code,
+            httpStatus: error.status,
+            endpoint,
+            sceneId: action.sceneId
+          });
+        }
+        throw error;
+      }
+    }
+
+    if (action.type === 'stock_select') {
+      if (!action.sceneId) {
+        throw createProductionRunnerError('Stock selection action is missing sceneId.', {
+          code: 'INVALID_ACTION',
+          endpoint: `/api/projects/${projectId}/scenes/:sceneId/select-stock-image`
+        });
+      }
+
+      const endpoint = `/api/projects/${projectId}/scenes/${action.sceneId}/select-stock-image`;
+      try {
+        const regenerate = Boolean(action.payload?.regenerate);
+        const result = await this.dependencies.selectStockImage(projectId, action.sceneId, {
+          regenerate,
+          mode
+        });
+
+        return {
+          message: result.status === 'selected' ? 'Stock image selected.' : 'Stock image selection is current.',
+          endpoint,
+          sceneId: action.sceneId,
+          details: `${result.provider}:${result.photoId}`
+        };
+      } catch (error) {
+        if (error instanceof StockImageSelectionError) {
           throw createProductionRunnerError(error.message, {
             message: error.message,
             code: error.code,

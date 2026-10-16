@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { GenerationStatus } from '@/lib/types/generation';
+import { FAKE_VIDEO_CLIP_BYTES, FAKE_VIDEO_CLIP_METADATA } from './fake-video-fixture';
 import { VideoGenerationProviderError, type VideoGenerationCapabilities, type VideoGenerationDownload, type VideoGenerationProvider, type VideoGenerationRequest, type VideoGenerationStatusResult, type VideoGenerationSubmission } from './provider';
 
 interface FakeVideoJob {
@@ -12,7 +13,6 @@ interface FakeVideoJob {
 }
 
 const JOBS = new Map<string, FakeVideoJob>();
-const FAKE_MP4_BYTES = Buffer.from('000000186674797069736F6D0000020069736F6D69736F32', 'hex');
 
 export class FakeVideoGenerationProvider implements VideoGenerationProvider {
   readonly providerId = 'fake';
@@ -102,9 +102,9 @@ export class FakeVideoGenerationProvider implements VideoGenerationProvider {
 
     return {
       mimeType: 'video/mp4',
-      data: FAKE_MP4_BYTES,
+      data: FAKE_VIDEO_CLIP_BYTES,
       metadata: {
-        fake: true,
+        ...FAKE_VIDEO_CLIP_METADATA,
         jobId: providerJobId
       }
     };

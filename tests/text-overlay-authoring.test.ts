@@ -240,7 +240,7 @@ describe('overlay authoring mock E2E', () => {
           maxIterations: 5,
           maxActionExecutions: 5,
           maxVideoPolls: 1,
-          limits: { image_generate: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
+          limits: { image_generate: 1, stock_select: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
         },
         registry: { maxEventsPerRun: 100, retentionMs: 60_000, maxLogPageLimit: 100 },
         policy: { allowRealProviders: false, defaultMode: 'mock' }

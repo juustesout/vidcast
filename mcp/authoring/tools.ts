@@ -95,7 +95,7 @@ export const AUTHORING_TOOL_DEFINITIONS = [
   {
     name: 'create_project',
     description:
-      'Create a new explainer project via POST /api/projects and return its projectId. Requires authentication (EXPLAINER_API_TOKEN as a bearer token). Not idempotent: calling it twice creates two projects. Use list_projects first if you only want to reuse an existing project. On 401 the error code is UNAUTHENTICATED.',
+      'Create a new explainer project via POST /api/projects and return its projectId. Requires authentication (EXPLAINER_API_TOKEN as a bearer token). Not idempotent: calling it twice creates two projects. Use list_projects first if you only want to reuse an existing project. On 401 the error code is UNAUTHENTICATED. When the caller is a service (as with the MCP bearer token), the project is created ownerless and the response also contains a single-use claimToken: hand it to the intended user out-of-band (never place it in a URL, log or analytics event) so they can claim the project via POST /api/projects/{id}/claim with the token in the request body. The token is returned only once and expires.',
     inputSchema: createProjectInputSchema,
     annotations: {
       title: 'Create Project',
@@ -210,11 +210,15 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
       try {
         const parsed = createProjectInputSchema.parse(args ?? {});
         const result = await apiClient.createProject(parsed);
-        return toSuccess({
+        const response: CreateProjectResponse = {
           projectId: result.project.id,
           title: result.project.title,
           valid: true as const
-        });
+        };
+        if (result.claimToken) {
+          response.claimToken = result.claimToken;
+        }
+        return toSuccess(response);
       } catch (error) {
         return toFailure(fromValidationError(error));
       }

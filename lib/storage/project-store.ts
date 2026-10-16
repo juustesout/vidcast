@@ -12,6 +12,9 @@ import { getAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
 import { validateProject } from '@/lib/validation/project-validation';
 import { mediaStore } from '@/lib/storage/media-store';
 import { withKeyedLock } from '@/lib/utils/keyed-mutex';
+import { claimExpiresAtFromNow, claimTokenMatches, generateClaimToken, hashClaimToken, isClaimExpired } from '@/lib/security/claim-token';
+import { deleteProjectClaim, readProjectClaim, writeProjectClaim } from './claim-store';
+import type { ProjectClaimRecord } from './claim-store';
 import { getProjectAssetsRoot, getProjectJsonPath, getProjectPreviewsRoot, getProjectReferencesRoot, getProjectRoot, getProjectRendersRoot, getProjectsRoot } from './storage-paths';
 
 export interface ProjectSummary {
@@ -123,6 +126,19 @@ async function readProjectOwnerTag(projectId: string): Promise<string | undefine
   } catch (error) {
     throw new ProjectReadError(projectId, `Project ${projectId} contains invalid or corrupt JSON.`, { cause: error });
   }
+}
+
+/**
+ * True when a project carries a not-yet-expired claim capability. Such projects
+ * are deliberately excluded from every id-based first-claim path so that only
+ * the holder of the minted token can take ownership.
+ */
+async function hasPendingClaimFile(projectId: string): Promise<boolean> {
+  const claim = await readProjectClaim(projectId);
+  if (!claim) {
+    return false;
+  }
+  return !isClaimExpired(claim.expiresAt);
 }
 
 async function reconcileAssetStatuses(project: Project): Promise<Project> {
@@ -651,13 +667,28 @@ function projectLockKey(projectId: string): string {
 
 const PROJECTS_ROOT_LOCK_KEY = 'projects:root';
 
+export type ClaimRedemptionStatus = 'claimed' | 'not_found' | 'already_owned' | 'invalid';
+
+export interface ClaimRedemption {
+  status: ClaimRedemptionStatus;
+  project?: Project;
+}
+
+export interface CreateProjectWithClaimResult {
+  project: Project;
+  claimToken: string;
+}
+
 export interface ProjectStore {
   listProjects(ownerId?: string): Promise<ProjectSummary[]>;
   getProject(id: string): Promise<Project | null>;
   createProject(input?: CreateProjectInput, ownerId?: string): Promise<Project>;
+  createProjectWithClaim(input?: CreateProjectInput): Promise<CreateProjectWithClaimResult>;
   updateProject(project: Project): Promise<Project>;
   mutateProject(projectId: string, mutator: (current: Project) => Project | Promise<Project>): Promise<Project | null>;
   claimUnownedProjects(ownerId: string): Promise<number>;
+  redeemClaim(projectId: string, subject: string, tokenHash: string): Promise<ClaimRedemption>;
+  hasPendingClaim(projectId: string): Promise<boolean>;
   deleteProject(id: string): Promise<void>;
   importAsset(projectId: string, file: File): Promise<Asset>;
   importReference(projectId: string, file: File, name: string, description: string, tags: string[]): Promise<ReferenceImage>;
@@ -711,6 +742,23 @@ class JsonProjectStore implements ProjectStore {
     return withKeyedLock(projectLockKey(project.id), () => writeProjectFile(project));
   }
 
+  async createProjectWithClaim(input: CreateProjectInput = {}): Promise<CreateProjectWithClaimResult> {
+    const project = buildProjectTemplate(input);
+    const claimToken = generateClaimToken();
+    const record: ProjectClaimRecord = {
+      tokenHash: hashClaimToken(claimToken),
+      createdAt: new Date().toISOString(),
+      expiresAt: claimExpiresAtFromNow()
+    };
+
+    await withKeyedLock(projectLockKey(project.id), async () => {
+      await writeProjectFile(project);
+      await writeProjectClaim(project.id, record);
+    });
+
+    return { project, claimToken };
+  }
+
   async updateProject(project: Project): Promise<Project> {
     return withKeyedLock(projectLockKey(project.id), () => writeProject(project));
   }
@@ -755,6 +803,12 @@ class JsonProjectStore implements ProjectStore {
         continue;
       }
 
+      // Never auto-claim a project that still holds a claim capability; only the
+      // token holder may take it.
+      if (await hasPendingClaimFile(entry.name)) {
+        continue;
+      }
+
       const didClaim = await withKeyedLock(projectLockKey(entry.name), async () => {
         const current = await readProjectFile(entry.name);
         if (!current || current.ownerId?.trim()) {
@@ -771,6 +825,48 @@ class JsonProjectStore implements ProjectStore {
     }
 
     return claimed;
+  }
+
+  async redeemClaim(projectId: string, subject: string, tokenHash: string): Promise<ClaimRedemption> {
+    const trimmedSubject = subject.trim();
+    if (!trimmedSubject) {
+      return { status: 'invalid' };
+    }
+
+    // Ownership check, token verification and the ownership write all run under
+    // the same per-project lock, so two concurrent claims can never both win.
+    return withKeyedLock(projectLockKey(projectId), async (): Promise<ClaimRedemption> => {
+      const current = await readProjectFile(projectId);
+      if (!current) {
+        return { status: 'not_found' };
+      }
+
+      if (current.ownerId?.trim()) {
+        return { status: 'already_owned' };
+      }
+
+      const claim = await readProjectClaim(projectId);
+      if (!claim) {
+        return { status: 'invalid' };
+      }
+
+      if (isClaimExpired(claim.expiresAt)) {
+        await deleteProjectClaim(projectId);
+        return { status: 'invalid' };
+      }
+
+      if (!claimTokenMatches(tokenHash, claim.tokenHash)) {
+        return { status: 'invalid' };
+      }
+
+      const claimed = await writeProject({ ...current, ownerId: trimmedSubject });
+      await deleteProjectClaim(projectId);
+      return { status: 'claimed', project: claimed };
+    });
+  }
+
+  async hasPendingClaim(projectId: string): Promise<boolean> {
+    return hasPendingClaimFile(projectId);
   }
 
   async deleteProject(id: string): Promise<void> {

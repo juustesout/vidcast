@@ -38,6 +38,7 @@ function makeRun(runId = 'run-1') {
         maxVideoPolls: 40,
         perActionConcurrency: {
           image_generate: 2,
+          stock_select: 2,
           video_submit: 2,
           video_poll: 4,
           narration_generate: 2,

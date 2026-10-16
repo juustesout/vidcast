@@ -47,6 +47,7 @@ function buildRunConfig(): RunServiceConfig {
       maxVideoPolls: 120,
       limits: {
         image_generate: 1,
+        stock_select: 1,
         video_submit: 1,
         video_poll: 1,
         narration_generate: 1,
@@ -86,6 +87,31 @@ function generatedImageScene(base: Scene, overrides: Partial<Scene>, generationP
         ...generation,
         status: 'planned',
         prompt: generationPrompt
+      }
+    },
+    render: { motion: { preset: 'none' }, transition: { type: 'none' } },
+    referenceIds: [],
+    notes: ''
+  };
+}
+
+function generatedVideoScene(base: Scene, overrides: Partial<Scene>, generationPrompt: string, duration = 4): Scene {
+  return {
+    ...base,
+    ...overrides,
+    type: 'video',
+    visual: {
+      kind: 'generated_video',
+      generation: {
+        id: `gen-video-${overrides.id ?? 'scene'}`,
+        kind: 'video',
+        status: 'planned',
+        provider: 'local',
+        prompt: generationPrompt,
+        referenceIds: [],
+        aspectRatio: '16:9',
+        duration,
+        createdAt: new Date().toISOString()
       }
     },
     render: { motion: { preset: 'none' }, transition: { type: 'none' } },
@@ -311,6 +337,136 @@ describe('production run end-to-end (integration)', () => {
       expect(duration).toBeGreaterThan(0);
 
       // 6. Full decode succeeds with no errors.
+      await decodeWithoutErrors(runtime.ffmpegPath, compositionPath);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  }, 180000);
+
+  it('renders a generated-video project (mock fake provider) through polling, render and composition into a valid MP4', async () => {
+    if (!(await ffmpegAvailable())) {
+      return;
+    }
+
+    const runtime = createFFmpegRuntime();
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'production-run-e2e-video-'));
+
+    try {
+      const created = await projectStore.createProject({ title: 'P26 E2E mock video production run', durationTarget: 8, fps: FPS });
+      createdProjectIds.push(created.id);
+      const templateScene = created.scenes[0];
+
+      const sceneOne = generatedVideoScene(
+        templateScene,
+        {
+          id: 'scene-video-e2e-1',
+          order: 1,
+          duration: 4,
+          narration: { text: 'First beat of the mock video explainer.' }
+        },
+        'Deterministic mock motion clip for the first video scene.'
+      );
+
+      const sceneTwo = generatedVideoScene(
+        templateScene,
+        {
+          id: 'scene-video-e2e-2',
+          order: 2,
+          duration: 4,
+          narration: { text: 'Second beat of the mock video explainer.' }
+        },
+        'Deterministic mock motion clip for the second video scene.'
+      );
+
+      const project: Project = {
+        ...created,
+        aspectRatio: '16:9',
+        fps: FPS,
+        scenes: [sceneOne, sceneTwo],
+        assets: [],
+        references: [],
+        compositions: [],
+        renderSettings: {
+          ...created.renderSettings,
+          aspectRatio: '16:9',
+          fps: FPS,
+          width: WIDTH,
+          height: HEIGHT
+        }
+      };
+      await projectStore.updateProject(project);
+
+      // Real service, real runner, real renderer/compositor. The only stand-in is
+      // the ordinary default mock `fake` video provider, which returns a small
+      // decodable MP4 fixture and requires no network.
+      const service = new HeadlessProductionRunService(buildRunConfig(), {
+        runBatch: async (input) => runProductionBatch(input)
+      });
+
+      const { run } = await service.startOrReuseRun({ projectId: created.id, policy: { mode: 'mock', force: true } });
+      const final = await waitForTerminal(service, run.runId);
+
+      expect(final.status).toBe('completed');
+      expect(final.failedActionIds).toEqual([]);
+      expect(final.summary.failed).toBe(0);
+
+      // The video job is polled to a terminal status before it is rendered: the
+      // event log shows more than one poll and no unresolved stop.
+      const log = service.getRunLog(run.runId, { limit: 250 });
+      const events = log.items.map((item) => item.event);
+      expect(events.filter((event) => event.code === 'video_poll_completed').length).toBeGreaterThanOrEqual(2);
+      expect(events.some((event) => event.code === 'run_stopped_unresolved')).toBe(false);
+      expect(
+        events.filter((event) => event.code === 'action_failed' || event.code === 'run_failed' || event.code === 'composition_failed')
+      ).toEqual([]);
+
+      const persisted = await projectStore.getProject(created.id);
+      expect(persisted).not.toBeNull();
+      const persistedProject = persisted as Project;
+
+      const videoAssets = persistedProject.assets.filter((asset) => asset.type === 'video');
+      const audioAssets = persistedProject.assets.filter((asset) => asset.type === 'audio');
+      expect(videoAssets.length).toBeGreaterThanOrEqual(2);
+      expect(audioAssets.length).toBeGreaterThanOrEqual(2);
+
+      // The generated video assets are the decodable mock fixture, not the old
+      // 24-byte stub: the ISO-BMFF duration was parsed back and the payload is
+      // the ~2 KB clip.
+      for (const asset of videoAssets) {
+        expect(asset.mimeType).toBe('video/mp4');
+        expect(asset.filesize).toBeGreaterThan(1000);
+        expect(asset.duration).toBeGreaterThan(0.9);
+        expect(asset.duration).toBeLessThan(1.1);
+        expect(asset.provenance).toBe('generated');
+      }
+
+      for (const scene of persistedProject.scenes) {
+        expect(scene.visual?.kind).toBe('generated_video');
+        expect(scene.narration?.status).toBe('generated');
+        const completedRenders = (scene.renders ?? []).filter((render) => render.status === 'completed');
+        expect(completedRenders.length).toBeGreaterThanOrEqual(1);
+        const renderPath = path.join(getProjectRoot(created.id), completedRenders[completedRenders.length - 1].outputPath);
+        const stat = await fs.stat(renderPath);
+        expect(stat.size).toBeGreaterThan(0);
+      }
+
+      const compositions = persistedProject.compositions ?? [];
+      expect(compositions.length).toBe(1);
+      const compositionPath = path.join(getProjectRoot(created.id), compositions[0].outputPath);
+
+      const probe = await probeMedia(compositionPath, runtime);
+      const video = probe.streams.find((stream) => stream.codec_type === 'video');
+      const audio = probe.streams.find((stream) => stream.codec_type === 'audio');
+      expect(video).toBeDefined();
+      expect(audio).toBeDefined();
+      expect(video!.codec_name).toBe('h264');
+      expect(video!.width).toBe(WIDTH);
+      expect(video!.height).toBe(HEIGHT);
+      expect(audio!.codec_name).toBe('aac');
+      const duration = parseDurationSeconds(probe.format?.duration);
+      expect(duration).toBeGreaterThan(7);
+      expect(duration).toBeLessThan(9);
+
       await decodeWithoutErrors(runtime.ffmpegPath, compositionPath);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });

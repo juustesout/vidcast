@@ -15,6 +15,7 @@ type ProjectPatch = Record<string, unknown>;
 
 interface ProjectEnvelope {
   project?: Project;
+  claimToken?: string;
 }
 
 interface PlanSceneIntentsPayload {
@@ -45,6 +46,9 @@ interface MusicPayload {
 
 export interface CreateProjectResult {
   project: Project;
+  // Single-use capability that lets the intended browser user take ownership.
+  // Only present for service-created (ownerless) projects.
+  claimToken?: string;
 }
 
 export interface UpdateProjectResult {
@@ -359,7 +363,11 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
     if (!payload.project) {
       throw new AuthoringMcpToolError('API_ERROR', 'Invalid project creation response payload.', { endpoint: '/api/projects' });
     }
-    return { project: payload.project };
+    const result: CreateProjectResult = { project: payload.project };
+    if (typeof payload.claimToken === 'string' && payload.claimToken) {
+      result.claimToken = payload.claimToken;
+    }
+    return result;
   }
 
   async updateProject(projectId: string, patch: ProjectPatch): Promise<UpdateProjectResult> {

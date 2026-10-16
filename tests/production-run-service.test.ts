@@ -82,6 +82,7 @@ describe('headless production run service', () => {
           maxVideoPolls: 5,
           limits: {
             image_generate: 1,
+            stock_select: 1,
             video_submit: 1,
             video_poll: 1,
             narration_generate: 1,
@@ -159,6 +160,7 @@ describe('headless production run service', () => {
           maxVideoPolls: 5,
           limits: {
             image_generate: 1,
+            stock_select: 1,
             video_submit: 1,
             video_poll: 1,
             narration_generate: 1,
@@ -224,6 +226,7 @@ describe('headless production run service', () => {
           maxVideoPolls: 5,
           limits: {
             image_generate: 1,
+            stock_select: 1,
             video_submit: 1,
             video_poll: 1,
             narration_generate: 1,
@@ -311,7 +314,7 @@ describe('headless production run service', () => {
           maxIterations: 5,
           maxActionExecutions: 5,
           maxVideoPolls: 5,
-          limits: { image_generate: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
+          limits: { image_generate: 1, stock_select: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
         },
         registry: { maxEventsPerRun: 100, retentionMs: 60_000, maxLogPageLimit: 100 },
         policy: { allowRealProviders: true, defaultMode: 'mock' }
@@ -343,6 +346,149 @@ describe('headless production run service', () => {
 
     // Without the injected force flag the action would be `current`.
     expect(forcedStatus).toBe('ready');
+  });
+
+  it('enforces the per-run maxVideoPolls limit', async () => {
+    const project = createProject('project-poll-limit');
+    const codes: Array<string | undefined> = [];
+    let pollCalls = 0;
+
+    const service = new HeadlessProductionRunService(
+      {
+        maxConcurrentRuns: 1,
+        runner: {
+          maxIterations: 5,
+          maxActionExecutions: 100,
+          maxVideoPolls: 2,
+          limits: { image_generate: 1, stock_select: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
+        },
+        registry: { maxEventsPerRun: 100, retentionMs: 60_000, maxLogPageLimit: 100 },
+        policy: { allowRealProviders: false, defaultMode: 'mock' }
+      },
+      {
+        store: {
+          async getProject(projectId: string) {
+            return projectId === project.id ? project : null;
+          }
+        },
+        pollVideo: async () => {
+          pollCalls += 1;
+          return {
+            sceneId: 'scene-1',
+            generationAttemptId: 'attempt-1',
+            provider: 'fake',
+            providerJobId: 'job-1',
+            status: 'generating',
+            providerStatus: 'in_progress'
+          };
+        },
+        runBatch: async (input) => {
+          for (let i = 0; i < 4; i += 1) {
+            try {
+              await input.executeAction({
+                id: 'scene:scene-1:video_poll',
+                type: 'video_poll',
+                sceneId: 'scene-1',
+                sceneOrder: 1,
+                status: 'ready',
+                execute: true,
+                dependencyActionIds: [],
+                payload: { attemptId: 'attempt-1' }
+              });
+            } catch (error) {
+              codes.push((error as { diagnostics?: { code?: string } }).diagnostics?.code);
+            }
+          }
+
+          return {
+            status: 'failed',
+            project: input.initialProject,
+            iterations: 1,
+            completedActionIds: [],
+            failedActionIds: ['scene:scene-1:video_poll'],
+            unresolvedActions: [],
+            events: []
+          };
+        }
+      }
+    );
+
+    const started = await service.startOrReuseRun({ projectId: project.id });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    expect(pollCalls).toBe(2);
+    expect(codes).toEqual(['VIDEO_POLL_LIMIT_REACHED', 'VIDEO_POLL_LIMIT_REACHED']);
+  });
+
+  it('enforces the per-run maxActionExecutions limit', async () => {
+    const project = createProject('project-action-limit');
+    const codes: Array<string | undefined> = [];
+    let executions = 0;
+
+    const service = new HeadlessProductionRunService(
+      {
+        maxConcurrentRuns: 1,
+        runner: {
+          maxIterations: 5,
+          maxActionExecutions: 2,
+          maxVideoPolls: 100,
+          limits: { image_generate: 1, stock_select: 1, video_submit: 1, video_poll: 1, narration_generate: 1, scene_render: 1, final_compose: 1 }
+        },
+        registry: { maxEventsPerRun: 100, retentionMs: 60_000, maxLogPageLimit: 100 },
+        policy: { allowRealProviders: false, defaultMode: 'mock' }
+      },
+      {
+        store: {
+          async getProject(projectId: string) {
+            return projectId === project.id ? project : null;
+          }
+        },
+        generateImage: async () => {
+          executions += 1;
+          return {
+            sceneId: 'scene-1',
+            status: 'generated',
+            generationAttemptId: 'attempt-1',
+            provider: 'fake',
+            assetId: 'asset-1'
+          };
+        },
+        runBatch: async (input) => {
+          for (let i = 0; i < 4; i += 1) {
+            try {
+              await input.executeAction({
+                id: 'scene:scene-1:image_generate',
+                type: 'image_generate',
+                sceneId: 'scene-1',
+                sceneOrder: 1,
+                status: 'ready',
+                execute: true,
+                dependencyActionIds: [],
+                payload: { regenerate: false }
+              });
+            } catch (error) {
+              codes.push((error as { diagnostics?: { code?: string } }).diagnostics?.code);
+            }
+          }
+
+          return {
+            status: 'failed',
+            project: input.initialProject,
+            iterations: 1,
+            completedActionIds: [],
+            failedActionIds: ['scene:scene-1:image_generate'],
+            unresolvedActions: [],
+            events: []
+          };
+        }
+      }
+    );
+
+    const started = await service.startOrReuseRun({ projectId: project.id });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    expect(executions).toBe(2);
+    expect(codes).toEqual(['ACTION_LIMIT_REACHED', 'ACTION_LIMIT_REACHED']);
   });
 
   it('returns NOT_FOUND when run state is missing (restart/expiry)', () => {

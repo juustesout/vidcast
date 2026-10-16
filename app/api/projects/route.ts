@@ -26,8 +26,16 @@ export async function POST(request: Request) {
   try {
     const identity = requireIdentity(request);
     const body = (await request.json().catch(() => ({}))) as { title?: string; description?: string; durationTarget?: number; aspectRatio?: '16:9' | '1:1' | '9:16'; fps?: number };
-    const ownerId = identity.kind === 'service' ? undefined : identity.subject;
-    const project = await projectStore.createProject(body, ownerId);
+
+    if (identity.kind === 'service') {
+      // Service-created projects are ownerless and can only be claimed with the
+      // single-use token minted here. The raw token is returned exactly once, to
+      // the trusted service caller, and never stored or exposed through reads.
+      const { project, claimToken } = await projectStore.createProjectWithClaim(body);
+      return NextResponse.json({ project, claimToken }, { status: 201 });
+    }
+
+    const project = await projectStore.createProject(body, identity.subject);
     return NextResponse.json({ project }, { status: 201 });
   } catch (error) {
     if (error instanceof AccessControlError) {

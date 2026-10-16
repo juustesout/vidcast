@@ -115,6 +115,10 @@ export interface RenderPlanSceneSource {
   kind: SceneType;
   assetId?: string;
   assetPath?: string;
+  // Remote CDN URL for hotlink-only sources (for example Unsplash stock photos)
+  // that must not be persisted locally. Fetched into the transient render
+  // workspace at render time.
+  remoteUrl?: string;
   assetType?: AssetType;
   width?: number;
   height?: number;

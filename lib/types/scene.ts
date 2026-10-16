@@ -1,4 +1,5 @@
 import type { GenerationAttempt, GenerationRecord } from './generation';
+import type { StockOrientation, StockProviderId, StockSelection } from './stock';
 
 export type SceneType = 'image' | 'video' | 'graphic' | 'text' | 'blank';
 
@@ -135,6 +136,21 @@ export interface GeneratedVideoVisual {
   attempts?: GenerationAttempt[];
 }
 
+// A royalty-free stock photo chosen at runtime by the stock router. The author
+// supplies a search query; the resolved `selection` (provider, photo, usage
+// policy, attribution) is persisted once so re-runs are idempotent. `assetId`
+// is set only for `download`-policy selections that were persisted as a durable
+// project asset.
+export interface StockImageVisual {
+  kind: 'stock_image';
+  query: string;
+  orientation?: StockOrientation;
+  // Optional per-scene provider preference order; falls back to server config.
+  preferredProviders?: StockProviderId[];
+  assetId?: string;
+  selection?: StockSelection;
+}
+
 export interface GraphicVisual {
   kind: 'graphic';
   template?: GraphicTemplateType;
@@ -151,7 +167,7 @@ export interface BlankVisual {
   kind: 'blank';
 }
 
-export type VisualSpec = AssetVisual | GeneratedImageVisual | GeneratedVideoVisual | GraphicVisual | TextVisual | BlankVisual;
+export type VisualSpec = AssetVisual | GeneratedImageVisual | GeneratedVideoVisual | StockImageVisual | GraphicVisual | TextVisual | BlankVisual;
 
 export interface SceneSourceTrace {
   sceneIntentId?: string;

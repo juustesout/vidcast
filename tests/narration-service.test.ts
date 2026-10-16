@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildSilentWav } from '@/lib/ai/audio/silent-wav';
+import { TextToSpeechProviderError } from '@/lib/ai/text-to-speech/provider';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -72,7 +73,7 @@ function createProject(): Project {
   };
 }
 
-function createInMemoryDependencies(project: Project, behavior?: { providerFails?: boolean; durationSeconds?: number }) {
+function createInMemoryDependencies(project: Project, behavior?: { providerFails?: boolean; durationSeconds?: number; providerError?: Error }) {
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
 
@@ -133,6 +134,9 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
       return {
         providerId: 'fake',
         async synthesize() {
+          if (behavior?.providerError) {
+            throw behavior.providerError;
+          }
           if (behavior?.providerFails) {
             throw new Error('provider failed');
           }
@@ -196,6 +200,25 @@ describe('narration generation service', () => {
     const scene = deps.state.project.scenes[0];
     expect(scene.narration?.audioAssetId).toBe('asset-old-audio');
     expect(scene.narration?.status).toBe('failed');
+    expect(deps.state.project.assets.length).toBe(1);
+  });
+
+  it('records a failed attempt and preserves previous asset on provider rate limiting', async () => {
+    const project = createProject();
+    const deps = createInMemoryDependencies(project, {
+      providerError: new TextToSpeechProviderError('Too many concurrent requests', 429, 'PROVIDER_RATE_LIMIT')
+    });
+
+    await expect(generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    })).rejects.toMatchObject({ code: 'narration.provider.failed' });
+
+    const scene = deps.state.project.scenes[0];
+    expect(scene.narration?.audioAssetId).toBe('asset-old-audio');
+    expect(scene.narration?.status).toBe('failed');
+    expect(scene.narration?.attempts?.at(-1)?.status).toBe('failed');
     expect(deps.state.project.assets.length).toBe(1);
   });
 

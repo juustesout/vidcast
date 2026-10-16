@@ -23,6 +23,7 @@ const SERVICE_CONFIG: RunServiceConfig = {
     maxVideoPolls: 5,
     limits: {
       image_generate: 1,
+      stock_select: 1,
       video_submit: 1,
       video_poll: 1,
       narration_generate: 1,
@@ -124,6 +125,7 @@ function createPersistedRun(overrides: Partial<PersistedRun> = {}): PersistedRun
         maxVideoPolls: 5,
         perActionConcurrency: {
           image_generate: 1,
+          stock_select: 1,
           video_submit: 1,
           video_poll: 1,
           narration_generate: 1,
@@ -432,6 +434,45 @@ describe('headless run recovery', () => {
     expect(batches[0].initialFailedActionIds).toContain('scene:scene-1:image_generate');
   });
 
+  it('forwards persisted completed actions to the recovered batch so forced runs stay idempotent', async () => {
+    const root = await tempRoot();
+    const runStore = new FileRunStore({ projectsRoot: root });
+    const persisted = createPersistedRun({
+      runId: 'run-completed',
+      completedActionIds: ['scene:scene-1:image_generate', 'scene:scene-1:narration_generate']
+    });
+    persisted.acceptedConfig.policy.force = true;
+    await runStore.save(persisted);
+
+    const store = mutableStore(project('project-r', [imageScene(1, 'generated')]));
+    const batches: Array<{ initialFailedActionIds: string[]; initialCompletedActionIds: string[] }> = [];
+    const runBatch: RunBatch = async (input) => {
+      batches.push({
+        initialFailedActionIds: input.initialFailedActionIds ?? [],
+        initialCompletedActionIds: input.initialCompletedActionIds ?? []
+      });
+      return {
+        status: 'completed',
+        project: input.initialProject,
+        iterations: 1,
+        completedActionIds: input.initialCompletedActionIds ?? [],
+        failedActionIds: [],
+        unresolvedActions: [],
+        events: []
+      };
+    };
+    const service = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch }, { runStore });
+
+    await service.recoverRuns();
+    await waitForStatus(service, 'run-completed', ['completed']);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].initialCompletedActionIds).toEqual([
+      'scene:scene-1:image_generate',
+      'scene:scene-1:narration_generate'
+    ]);
+  });
+
   it('fails a recovered run whose project no longer exists', async () => {
     const root = await tempRoot();
     const runStore = new FileRunStore({ projectsRoot: root });
@@ -461,5 +502,79 @@ describe('headless run recovery', () => {
     const recovered = await service.recoverRuns();
 
     expect(recovered.map((run) => run.runId)).toEqual(['run-good']);
+  });
+});
+
+describe('headless run execution lock (cross-process dedupe)', () => {
+  function gatedRunBatch(entered: number[], gate: Promise<void>): RunBatch {
+    return async (input) => {
+      entered.push(Date.now());
+      await gate;
+      return {
+        status: 'completed',
+        project: input.initialProject,
+        iterations: 1,
+        completedActionIds: [],
+        failedActionIds: [],
+        unresolvedActions: [],
+        events: []
+      } satisfies ProductionRunnerResult;
+    };
+  }
+
+  it('does not re-execute a run another instance is already executing', async () => {
+    const root = await tempRoot();
+    const runStore = new FileRunStore({ projectsRoot: root });
+    const store = mutableStore(project('project-r', [imageScene(1, 'planned')]));
+
+    let releaseGate: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const entered: number[] = [];
+    const runBatch = gatedRunBatch(entered, gate);
+
+    const owner = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch }, { runStore, autoRecover: false });
+    const started = await owner.startOrReuseRun({ projectId: 'project-r' });
+    await waitForStatus(owner, started.run.runId, ['running']);
+    await owner.flushPersists();
+
+    // A second service instance (as every Next.js route worker constructs)
+    // observes the same non-terminal run. It must not launch a duplicate batch.
+    const observer = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch }, { runStore, autoRecover: false });
+    await observer.recoverRuns();
+
+    expect(entered).toHaveLength(1);
+    expect(observer.getRun(started.run.runId).status).toBe('running');
+    expect(await runStore.isExecutionLocked('project-r', started.run.runId)).toBe(true);
+
+    releaseGate!();
+    await waitForStatus(owner, started.run.runId, ['completed']);
+
+    expect(entered).toHaveLength(1);
+    expect(await runStore.isExecutionLocked('project-r', started.run.runId)).toBe(false);
+  });
+
+  it('reclaims a stale lock left by a dead process and resumes the run', async () => {
+    const root = await tempRoot();
+    const runStore = new FileRunStore({ projectsRoot: root });
+    await runStore.save(createPersistedRun({ runId: 'run-stale' }));
+    await fs.mkdir(path.join(root, 'project-r', 'runs'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, 'project-r', 'runs', 'run-stale.lock'),
+      JSON.stringify({ pid: 2_147_480_000, startedAt: '2026-01-01T00:00:00.000Z' }),
+      'utf8'
+    );
+
+    const store = mutableStore(project('project-r', [imageScene(1, 'planned')]));
+    const batches: Array<{ initialFailedActionIds: string[] }> = [];
+    const service = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch: makeRunBatch(batches) }, { runStore });
+
+    const recovered = await service.recoverRuns();
+    expect(recovered.map((run) => run.runId)).toEqual(['run-stale']);
+
+    await waitForStatus(service, 'run-stale', ['completed']);
+    expect(batches).toHaveLength(1);
+    expect(await runStore.isExecutionLocked('project-r', 'run-stale')).toBe(false);
   });
 });

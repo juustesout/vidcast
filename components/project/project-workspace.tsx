@@ -33,16 +33,61 @@ import type { GenerationProvider, GenerationStatus } from '@/lib/types/generatio
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { GraphicTemplateType, OverlaySpec, Scene, VisualSpec } from '@/lib/types/scene';
+import type { StockOrientation } from '@/lib/types/stock';
 import { validateProject } from '@/lib/validation/project-validation';
 
 interface ProjectWorkspaceProps {
   project: Project;
 }
 
-type VisualMode = 'asset' | 'generated_image' | 'generated_video' | 'graphic' | 'text' | 'blank';
+type VisualMode = 'asset' | 'generated_image' | 'generated_video' | 'stock_image' | 'graphic' | 'text' | 'blank';
 type WorkspaceTab = 'story' | 'scenes' | 'assets' | 'references' | 'generation';
 type AssetFilter = 'all' | 'images' | 'video' | 'audio' | 'generated' | 'imported';
 type StoryFocusArea = 'brief' | 'story' | 'scene_plan';
+
+// Mirrors the JSON returned by the server-side stock search route. Declared
+// locally (rather than imported) so no server-only module (fs/sharp) is pulled
+// into the client bundle.
+interface StockSearchResultItem {
+  id: string;
+  provider: string;
+  photoId: string;
+  width: number;
+  height: number;
+  description?: string;
+  color?: string;
+  previewUrl: string;
+  imageUrl: string;
+  sourceUrl: string;
+  photographerName: string;
+  photographerUrl?: string;
+  license: string;
+  usagePolicy: 'download' | 'hotlink';
+}
+
+interface StockQuotaSnapshot {
+  provider: string;
+  configured: boolean;
+  allowed: boolean;
+  windowSeconds: number;
+  windowLimit: number;
+  windowRemaining: number;
+  reserve: number;
+  resetAt?: number;
+  monthlyLimit?: number;
+  monthlyRemaining?: number;
+}
+
+interface StockSearchState {
+  sceneId: string;
+  searchId: string;
+  query: string;
+  orientation?: string;
+  cached: boolean;
+  results: StockSearchResultItem[];
+  quota: StockQuotaSnapshot[];
+  diagnostics: Array<{ provider: string; outcome: string; detail?: string }>;
+}
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
 
@@ -90,6 +135,8 @@ function ensureVisualForMode(scene: Scene, mode: VisualMode): VisualSpec {
   switch (mode) {
     case 'asset':
       return { kind: 'asset' };
+    case 'stock_image':
+      return { kind: 'stock_image', query: '' };
     case 'generated_image':
       return {
         kind: 'generated_image',
@@ -260,6 +307,10 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   const [batchLogOpen, setBatchLogOpen] = useState(false);
   const [batchCopyState, setBatchCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [providerStatus, setProviderStatus] = useState<{ openaiConfigured: boolean; defaultProvider: string } | null>(null);
+  const [stockSearching, setStockSearching] = useState(false);
+  const [stockSelectingId, setStockSelectingId] = useState<string | null>(null);
+  const [stockMessage, setStockMessage] = useState('');
+  const [stockSearch, setStockSearch] = useState<StockSearchState | null>(null);
   const isVideoPollingRef = useRef(false);
   const batchCopyResetTimerRef = useRef<number | null>(null);
 
@@ -717,6 +768,113 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       setBatchCopyState('idle');
       batchCopyResetTimerRef.current = null;
     }, 1600);
+  }
+
+  async function runStockSearch(scene: Scene): Promise<void> {
+    const visual = scene.visual;
+    if (!visual || visual.kind !== 'stock_image') {
+      return;
+    }
+    const query = visual.query.trim();
+    if (!query) {
+      setStockMessage('Enter a search term first.');
+      return;
+    }
+
+    setStockSearching(true);
+    setStockMessage('Searching stock providers...');
+
+    const params = new URLSearchParams({ query });
+    if (visual.orientation) {
+      params.set('orientation', visual.orientation);
+    }
+    if (visual.preferredProviders && visual.preferredProviders.length > 0) {
+      params.set('providers', visual.preferredProviders.join(','));
+    }
+
+    try {
+      const response = await fetch(`/api/projects/${draft.id}/stock/search?${params.toString()}`);
+      const body = (await response.json().catch(() => ({}))) as (StockSearchState & { message?: string });
+      if (!response.ok) {
+        setStockSearch(null);
+        setStockMessage(body.message || 'Stock search failed.');
+        return;
+      }
+      setStockSearch({
+        sceneId: scene.id,
+        searchId: body.searchId,
+        query: body.query,
+        orientation: body.orientation,
+        cached: Boolean(body.cached),
+        results: body.results ?? [],
+        quota: body.quota ?? [],
+        diagnostics: body.diagnostics ?? []
+      });
+      setStockMessage(
+        body.results && body.results.length > 0
+          ? `Found ${body.results.length} photo(s)${body.cached ? ' (cached)' : ''}.`
+          : 'No matching stock photos.'
+      );
+    } catch {
+      setStockSearch(null);
+      setStockMessage('Stock search failed unexpectedly.');
+    } finally {
+      setStockSearching(false);
+    }
+  }
+
+  async function chooseStockPhoto(scene: Scene, item: StockSearchResultItem): Promise<void> {
+    if (!stockSearch) {
+      return;
+    }
+    setStockSelectingId(item.id);
+    setStockMessage(`Applying ${item.provider} photo...`);
+    try {
+      const response = await fetch(`/api/projects/${draft.id}/scenes/${scene.id}/select-stock-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'choose',
+          searchId: stockSearch.searchId,
+          photoId: item.id,
+          query: stockSearch.query,
+          orientation: stockSearch.orientation
+        })
+      });
+      const body = (await response.json().catch(() => ({}))) as { message?: string; provider?: string };
+      if (!response.ok) {
+        setStockMessage(body.message || 'Stock selection failed.');
+        return;
+      }
+      setStockMessage(`Stock photo selected (${body.provider ?? item.provider}).`);
+      setStockSearch(null);
+      await refreshProject();
+    } catch {
+      setStockMessage('Stock selection failed unexpectedly.');
+    } finally {
+      setStockSelectingId(null);
+    }
+  }
+
+  async function autoSelectStock(scene: Scene): Promise<void> {
+    setStockMessage('Selecting best match...');
+    try {
+      const response = await fetch(`/api/projects/${draft.id}/scenes/${scene.id}/select-stock-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'auto' })
+      });
+      const body = (await response.json().catch(() => ({}))) as { message?: string; provider?: string };
+      if (!response.ok) {
+        setStockMessage(body.message || 'Stock selection failed.');
+        return;
+      }
+      setStockMessage(`Stock photo selected (${body.provider ?? 'provider'}).`);
+      setStockSearch(null);
+      await refreshProject();
+    } catch {
+      setStockMessage('Stock selection failed unexpectedly.');
+    }
   }
 
   async function runImageGeneration(sceneId: string, regenerate: boolean): Promise<void> {
@@ -1478,7 +1636,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                 ) : null}
                 <Field label="Duration" value={selectedScene.duration} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, duration: Number(value) }))} type="number" step="0.1" />
                 <SelectField label="Type" value={selectedScene.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, type: value as Scene['type'] }))} options={SCENE_TYPES} />
-                <SelectField label="Visual source" value={visualModeOf(selectedScene)} onChange={(value) => setVisualMode(selectedScene, value as VisualMode)} options={['asset', 'generated_image', 'generated_video', 'graphic', 'text', 'blank']} />
+                <SelectField label="Visual source" value={visualModeOf(selectedScene)} onChange={(value) => setVisualMode(selectedScene, value as VisualMode)} options={['asset', 'generated_image', 'generated_video', 'stock_image', 'graphic', 'text', 'blank']} />
                 <SelectField label="Motion" value={selectedScene.render.motion.preset} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, motion: { ...scene.render.motion, preset: value as Scene['render']['motion']['preset'] } } }))} options={MOTION_PRESETS} />
                 <SelectField label="Transition" value={selectedScene.render.transition.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, transition: { ...scene.render.transition, type: value as Scene['render']['transition']['type'] } } }))} options={TRANSITION_PRESETS} />
                 <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
@@ -1723,6 +1881,123 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                         }
                       }}
                     />
+                  </div>
+                ) : null}
+
+                {selectedScene.visual?.kind === 'stock_image' ? (
+                  <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Stock image</p>
+                    <Field
+                      label="Search query"
+                      value={selectedScene.visual.query}
+                      onChange={(value) =>
+                        updateScene(selectedScene.id, (scene) =>
+                          scene.visual?.kind === 'stock_image'
+                            ? { ...scene, visual: { ...scene.visual, query: String(value) } }
+                            : scene
+                        )
+                      }
+                    />
+                    <SelectField
+                      label="Orientation"
+                      value={selectedScene.visual.orientation ?? ''}
+                      onChange={(value) =>
+                        updateScene(selectedScene.id, (scene) =>
+                          scene.visual?.kind === 'stock_image'
+                            ? { ...scene, visual: { ...scene.visual, orientation: value ? (value as StockOrientation) : undefined } }
+                            : scene
+                        )
+                      }
+                      options={['', 'landscape', 'portrait', 'squarish']}
+                      labels={{ '': 'Any' }}
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={stockSearching}
+                        onClick={() => void runStockSearch(selectedScene)}
+                        className="rounded-2xl border border-amber-300/50 bg-amber-200/10 px-3 py-2 text-xs text-amber-100 disabled:opacity-50"
+                      >
+                        {stockSearching ? 'Searching...' : 'Search stock'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void autoSelectStock(selectedScene)}
+                        className="rounded-2xl border border-slate-700 px-3 py-2 text-xs text-slate-200"
+                      >
+                        Auto-select best match
+                      </button>
+                    </div>
+                    {stockMessage ? <p className="text-xs text-slate-300">{stockMessage}</p> : null}
+
+                    {selectedScene.visual.selection ? (
+                      <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-2 space-y-1">
+                        <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">
+                          Current selection{selectedScene.visual.selection.origin === 'manual' ? ' · pinned' : ''}
+                        </p>
+                        <p className="text-xs text-slate-200">
+                          {selectedScene.visual.selection.provider} · {selectedScene.visual.selection.photoId}
+                        </p>
+                        <p className="text-xs text-slate-400">Photographer: {selectedScene.visual.selection.attribution.photographerName}</p>
+                        <a
+                          href={selectedScene.visual.selection.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-amber-200 underline"
+                        >
+                          {selectedScene.visual.selection.attribution.providerName} source
+                        </a>
+                        <p className="text-[11px] text-slate-500">
+                          {selectedScene.visual.selection.attribution.license} · {selectedScene.visual.selection.usagePolicy}
+                        </p>
+                        {selectedScene.visual.assetId ? (
+                          <Image
+                            src={`/api/projects/${draft.id}/assets/${selectedScene.visual.assetId}/file`}
+                            alt="Selected stock photo"
+                            width={320}
+                            height={180}
+                            unoptimized
+                            className="mt-1 w-full rounded-xl border border-slate-800 object-cover"
+                          />
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {stockSearch && stockSearch.sceneId === selectedScene.id && stockSearch.results.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        {stockSearch.results.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            disabled={stockSelectingId === item.id}
+                            onClick={() => void chooseStockPhoto(selectedScene, item)}
+                            className="overflow-hidden rounded-xl border border-slate-700/70 bg-slate-950/40 text-left disabled:opacity-50"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={item.previewUrl} alt={item.description ?? item.photoId} className="h-24 w-full object-cover" />
+                            <span className="block px-2 py-1 text-[10px] text-slate-300">
+                              {item.provider} · {item.photographerName}
+                            </span>
+                            <span className="block px-2 pb-1 text-[10px] text-amber-200 underline">
+                              {stockSelectingId === item.id ? 'Applying...' : 'Use photo'}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {stockSearch && stockSearch.sceneId === selectedScene.id && stockSearch.quota.length > 0 ? (
+                      <div className="space-y-1">
+                        {stockSearch.quota.map((entry) => (
+                          <p key={entry.provider} className={`text-[11px] ${entry.allowed ? 'text-slate-400' : 'text-amber-200'}`}>
+                            {entry.provider}:{' '}
+                            {entry.configured ? `${entry.windowRemaining}/${entry.windowLimit} left` : 'not configured'}
+                            {entry.monthlyRemaining !== undefined ? ` · ${entry.monthlyRemaining} monthly` : ''}
+                            {entry.allowed ? '' : ' (quota guard)'}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 

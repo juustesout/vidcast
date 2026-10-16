@@ -13,6 +13,16 @@ export interface RunStore {
   save(run: PersistedRun): Promise<void>;
   load(projectId: string, runId: string): Promise<PersistedRun | null>;
   listAll(): Promise<PersistedRun[]>;
+  // Optional cross-process execution lock. When implemented, it lets multiple
+  // service instances (e.g. one per route worker) agree that a single run is
+  // executed by exactly one owner at a time. Stores without it keep the plain
+  // single-instance behaviour used by unit tests.
+  tryAcquireExecutionLock?(projectId: string, runId: string): Promise<RunExecutionLock | null>;
+  isExecutionLocked?(projectId: string, runId: string): Promise<boolean>;
+}
+
+export interface RunExecutionLock {
+  release(): Promise<void>;
 }
 
 interface StoredEnvelope {
@@ -146,5 +156,89 @@ export class FileRunStore implements RunStore {
     return this.projectsRoot
       ? path.join(this.projectsRoot, projectId, 'runs', `${runId}.json`)
       : getRunJsonPath(projectId, runId);
+  }
+
+  private lockFile(projectId: string, runId: string): string {
+    return this.projectsRoot
+      ? path.join(this.projectsRoot, projectId, 'runs', `${runId}.lock`)
+      : path.join(getProjectRunsRoot(projectId), `${runId}.lock`);
+  }
+
+  async tryAcquireExecutionLock(projectId: string, runId: string): Promise<RunExecutionLock | null> {
+    const target = this.lockFile(projectId, runId);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+
+    // One atomic-create attempt, plus one retry after reclaiming a stale lock.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const handle = await fs.open(target, 'wx');
+        await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), 'utf8');
+        let released = false;
+        return {
+          release: async () => {
+            if (released) {
+              return;
+            }
+            released = true;
+            try {
+              await handle.close();
+            } catch {
+              // already closed
+            }
+            try {
+              await fs.unlink(target);
+            } catch {
+              // already removed
+            }
+          }
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+
+        if (await this.isExecutionLocked(projectId, runId)) {
+          return null;
+        }
+
+        // Owner is gone (crashed/restarted); reclaim and retry once.
+        try {
+          await fs.unlink(target);
+        } catch {
+          // raced with another reclaimer; the retry will re-check
+        }
+      }
+    }
+
+    return null;
+  }
+
+  async isExecutionLocked(projectId: string, runId: string): Promise<boolean> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.lockFile(projectId, runId), 'utf8');
+    } catch {
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as { pid?: unknown };
+      if (typeof parsed.pid !== 'number' || !Number.isInteger(parsed.pid)) {
+        return false;
+      }
+      return isProcessAlive(parsed.pid);
+    } catch {
+      return false;
+    }
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but is owned by another user.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }

@@ -32,6 +32,12 @@ export async function getProjectForIdentity(identity: RequestIdentity, projectId
 
   const ownerId = project.ownerId?.trim();
   if (!ownerId) {
+    // A project holding a claim capability is not up for id-based first-claim;
+    // it can only be taken with the minted token.
+    if (await projectStore.hasPendingClaim(projectId)) {
+      return null;
+    }
+
     const claimed = await projectStore.mutateProject(projectId, (current) => {
       if (current.ownerId?.trim()) {
         return current;

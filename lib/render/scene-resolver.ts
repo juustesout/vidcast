@@ -138,6 +138,57 @@ function resolveVisualSource(project: Project, scene: Scene): {
         ]
       };
     }
+    case 'stock_image': {
+      const selection = visual.selection;
+      const asset = findAsset(project, visual.assetId);
+
+      if (asset && asset.localPath) {
+        return {
+          status: 'renderable',
+          source: {
+            kind: scene.type,
+            assetId: asset.id,
+            assetPath: asset.localPath,
+            assetType: asset.type,
+            width: asset.width,
+            height: asset.height,
+            duration: asset.duration,
+            mimeType: asset.mimeType
+          },
+          issues: []
+        };
+      }
+
+      if (asset && !asset.localPath) {
+        return {
+          status: 'planned',
+          source: { kind: scene.type, assetId: asset.id, assetType: asset.type },
+          issues: [createSceneIssue('scene.visual.stockAsset.notReady', 'Stock image asset exists but has no local file path.', 'warning')]
+        };
+      }
+
+      // Hotlink-policy selections (e.g. Unsplash) must be referenced by URL, not
+      // stored locally; the render step fetches the bytes transiently.
+      if (selection && selection.usagePolicy === 'hotlink') {
+        return {
+          status: 'renderable',
+          source: {
+            kind: scene.type,
+            remoteUrl: selection.imageUrl,
+            width: selection.width,
+            height: selection.height,
+            mimeType: 'image/jpeg'
+          },
+          issues: []
+        };
+      }
+
+      return {
+        status: 'planned',
+        source: { kind: scene.type },
+        issues: [createSceneIssue('scene.visual.stock.planned', 'Stock image has not been selected yet.', 'warning')]
+      };
+    }
     case 'graphic':
       return {
         status: 'renderable',

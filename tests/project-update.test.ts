@@ -259,3 +259,38 @@ describe('applyProjectUpdate', () => {
     expect(result.validation.errors.some((error) => error.code === 'scene.visual.generation.frameReference.missing')).toBe(true);
   });
 });
+
+describe('applyProjectUpdate ownership immutability', () => {
+  it('ignores an incoming ownerId that tries to reassign the project', () => {
+    const existing = { ...baseProject(), ownerId: 'user_owner' };
+    const result = applyProjectUpdate(existing, { ...existing, ownerId: 'user_attacker', title: 'Renamed' });
+
+    expect(result.validation.valid).toBe(true);
+    expect(result.project.ownerId).toBe('user_owner');
+    expect(result.project.title).toBe('Renamed');
+  });
+
+  it('does not let an update clear an existing owner', () => {
+    const existing = { ...baseProject(), ownerId: 'user_owner' };
+    const result = applyProjectUpdate(existing, { ...existing, ownerId: undefined });
+
+    expect(result.project.ownerId).toBe('user_owner');
+  });
+
+  it('keeps an ownerless project ownerless even when a body supplies an owner', () => {
+    const existing = baseProject();
+    expect(existing.ownerId).toBeUndefined();
+
+    const result = applyProjectUpdate(existing, { ...existing, ownerId: 'user_supplied' });
+
+    expect(result.project.ownerId).toBeUndefined();
+  });
+
+  it('preserves ownership for a partial patch that only changes other fields', () => {
+    const existing = { ...baseProject(), ownerId: 'user_owner' };
+    const result = applyProjectUpdate(existing, { title: 'Only the title changes' });
+
+    expect(result.project.ownerId).toBe('user_owner');
+    expect(result.project.title).toBe('Only the title changes');
+  });
+});

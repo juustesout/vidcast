@@ -7,6 +7,7 @@ import { validateProject } from '@/lib/validation/project-validation';
 
 export type ProductionActionType =
   | 'image_generate'
+  | 'stock_select'
   | 'video_submit'
   | 'video_poll'
   | 'narration_generate'
@@ -116,6 +117,26 @@ function isVisualGenerationRunning(scene: Scene): boolean {
     return false;
   }
   return scene.visual.generation.status === 'queued' || scene.visual.generation.status === 'generating';
+}
+
+function hasUsableStockSelection(project: Project, scene: Scene): boolean {
+  const visual = scene.visual;
+  if (!visual || visual.kind !== 'stock_image') {
+    return false;
+  }
+  const selection = visual.selection;
+  if (!selection) {
+    return false;
+  }
+  // Hotlinked selections are referenced by URL at render time and need no asset.
+  if (selection.usagePolicy === 'hotlink') {
+    return true;
+  }
+  if (!visual.assetId) {
+    return false;
+  }
+  const asset = project.assets.find((entry) => entry.id === visual.assetId);
+  return Boolean(asset && asset.status === 'available');
 }
 
 export function deriveProductionPlan(project: Project, options: DeriveProductionPlanOptions = {}): ProductionPlan {
@@ -266,6 +287,58 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       }
     }
 
+    if (scene.visual?.kind === 'stock_image') {
+      const id = actionId('stock_select', scene.id);
+      const usable = hasUsableStockSelection(project, scene);
+      // A manual, author-chosen photo is pinned: even a forced run must not
+      // silently replace it with a different provider/candidate. Auto selections
+      // remain re-runnable under force.
+      const pinnedManual = usable && scene.visual.selection?.origin === 'manual';
+
+      let actionStatus: ProductionActionStatus = 'ready';
+      let reason = 'Stock image selection is ready.';
+      let execute = true;
+
+      if (skippedActionIds.has(id)) {
+        actionStatus = 'skipped';
+        execute = false;
+        reason = 'Skipped by user.';
+      } else if (failedActionIds.has(id)) {
+        actionStatus = 'failed';
+        execute = false;
+        reason = 'Failed earlier in this run.';
+      } else if (runningGeneration) {
+        actionStatus = 'running';
+        execute = false;
+        reason = 'Stock image selection is currently running.';
+      } else if (usable && (!forceRegenerate(id) || pinnedManual)) {
+        actionStatus = 'current';
+        execute = false;
+        reason = pinnedManual ? 'Manual stock image selection is pinned.' : 'Stock image selection is current.';
+      } else if (!scene.visual.query.trim()) {
+        actionStatus = 'blocked';
+        execute = false;
+        reason = 'Stock search query is required.';
+      } else if (scene.visual.selection) {
+        actionStatus = 'ready';
+        reason = 'Retry stock image selection.';
+      }
+
+      register({
+        id,
+        type: 'stock_select',
+        sceneId: scene.id,
+        sceneOrder: scene.order,
+        status: actionStatus,
+        reason,
+        dependencyActionIds: [],
+        execute,
+        payload: {
+          regenerate: Boolean(scene.visual.selection)
+        }
+      });
+    }
+
     const narrationState = deriveNarrationFreshness(project, scene);
     const narrationId = actionId('narration_generate', scene.id);
     let narrationStatus: ProductionActionStatus = 'ready';
@@ -357,7 +430,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       renderReason = renderStatus.problems[0]?.message || 'Scene is not renderable yet.';
     }
 
-    const visualSubmit = actions.find((action) => action.sceneId === scene.id && (action.type === 'image_generate' || action.type === 'video_submit'));
+    const visualSubmit = actions.find((action) => action.sceneId === scene.id && (action.type === 'image_generate' || action.type === 'stock_select' || action.type === 'video_submit'));
     const videoPoll = actions.find((action) => action.sceneId === scene.id && action.type === 'video_poll');
     const visualPending = Boolean(
       (visualSubmit && (visualSubmit.status === 'ready' || visualSubmit.status === 'running' || visualSubmit.status === 'waiting_dependency')) ||
@@ -451,7 +524,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
     const rightOrder = right.sceneOrder ?? Number.MAX_SAFE_INTEGER;
     if (leftOrder !== rightOrder) return leftOrder - rightOrder;
 
-    const actionOrder: ProductionActionType[] = ['image_generate', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
+    const actionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
     return actionOrder.indexOf(left.type) - actionOrder.indexOf(right.type);
   });
 

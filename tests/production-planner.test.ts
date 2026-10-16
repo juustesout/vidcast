@@ -241,4 +241,164 @@ describe('deriveProductionPlan', () => {
     expect(derived.actions.find((entry) => entry.id === 'scene:scene-2:narration_generate')?.status).toBe('ready');
     expect(derived.actions.find((entry) => entry.id === 'scene:scene-2:narration_generate')?.payload?.mode).toBe('regenerate');
   });
+
+  it('blocks a stock scene until a search query is present', () => {
+    const project = createProject();
+    project.scenes[0].visual = { kind: 'stock_image', query: '  ' };
+
+    const action = deriveProductionPlan(project).actions.find((entry) => entry.id === 'scene:scene-1:stock_select');
+    expect(action?.type).toBe('stock_select');
+    expect(action?.status).toBe('blocked');
+    expect(action?.execute).toBe(false);
+  });
+
+  it('schedules a ready stock selection for a query without a prior selection', () => {
+    const project = createProject();
+    project.scenes[0].visual = { kind: 'stock_image', query: 'forest', orientation: 'landscape' };
+
+    const action = deriveProductionPlan(project).actions.find((entry) => entry.id === 'scene:scene-1:stock_select');
+    expect(action?.status).toBe('ready');
+    expect(action?.execute).toBe(true);
+    expect(action?.payload).toMatchObject({ regenerate: false });
+  });
+
+  it('treats a downloaded stock selection with an available asset as current', () => {
+    const project = createProject();
+    project.assets.push({ id: 'stock-1', type: 'image', status: 'available' } as unknown as Project['assets'][number]);
+    project.scenes[0].visual = {
+      kind: 'stock_image',
+      query: 'forest',
+      assetId: 'stock-1',
+      selection: {
+        provider: 'pexels',
+        photoId: '1',
+        query: 'forest',
+        usagePolicy: 'download',
+        attribution: {
+          provider: 'pexels',
+          providerName: 'Pexels',
+          photoId: '1',
+          photographerName: 'Alex',
+          sourceUrl: 'https://www.pexels.com/photo/1',
+          license: 'Pexels License'
+        },
+        sourceUrl: 'https://www.pexels.com/photo/1',
+        imageUrl: 'https://images.pexels.com/photos/1/large.jpg',
+        width: 1000,
+        height: 1000,
+        selectedAt: new Date().toISOString(),
+        selectionKey: 'landscape::forest'
+      }
+    };
+
+    const action = deriveProductionPlan(project).actions.find((entry) => entry.id === 'scene:scene-1:stock_select');
+    expect(action?.status).toBe('current');
+    expect(action?.execute).toBe(false);
+  });
+
+  it('treats a hotlink selection as current even without a stored asset', () => {
+    const project = createProject();
+    project.scenes[0].visual = {
+      kind: 'stock_image',
+      query: 'city',
+      selection: {
+        provider: 'unsplash',
+        photoId: 'abc',
+        query: 'city',
+        usagePolicy: 'hotlink',
+        attribution: {
+          provider: 'unsplash',
+          providerName: 'Unsplash',
+          photoId: 'abc',
+          photographerName: 'Jane',
+          sourceUrl: 'https://unsplash.com/photos/abc',
+          license: 'Unsplash License'
+        },
+        sourceUrl: 'https://unsplash.com/photos/abc',
+        imageUrl: 'https://images.unsplash.com/abc',
+        width: 1000,
+        height: 1000,
+        selectedAt: new Date().toISOString(),
+        selectionKey: 'any::city'
+      }
+    };
+
+    const action = deriveProductionPlan(project).actions.find((entry) => entry.id === 'scene:scene-1:stock_select');
+    expect(action?.status).toBe('current');
+  });
+
+  it('re-runs a current stock selection under force until it is completed', () => {
+    const project = createProject();
+    project.assets.push({ id: 'stock-1', type: 'image', status: 'available' } as unknown as Project['assets'][number]);
+    const id = 'scene:scene-1:stock_select';
+    project.scenes[0].visual = {
+      kind: 'stock_image',
+      query: 'forest',
+      assetId: 'stock-1',
+      selection: {
+        provider: 'pexels',
+        photoId: '1',
+        query: 'forest',
+        usagePolicy: 'download',
+        attribution: {
+          provider: 'pexels',
+          providerName: 'Pexels',
+          photoId: '1',
+          photographerName: 'Alex',
+          sourceUrl: 'https://www.pexels.com/photo/1',
+          license: 'Pexels License'
+        },
+        sourceUrl: 'https://www.pexels.com/photo/1',
+        imageUrl: 'https://images.pexels.com/photos/1/large.jpg',
+        width: 1000,
+        height: 1000,
+        selectedAt: new Date().toISOString(),
+        selectionKey: 'landscape::forest'
+      }
+    };
+
+    const forced = deriveProductionPlan(project, { force: true }).actions.find((entry) => entry.id === id);
+    expect(forced?.status).toBe('ready');
+    expect(forced?.payload).toMatchObject({ regenerate: true });
+
+    const completed = deriveProductionPlan(project, { force: true, completedActionIds: [id] }).actions.find((entry) => entry.id === id);
+    expect(completed?.status).toBe('current');
+  });
+
+  it('pins a manual stock selection so a forced run never replaces it', () => {
+    const project = createProject();
+    project.assets.push({ id: 'stock-1', type: 'image', status: 'available' } as unknown as Project['assets'][number]);
+    const id = 'scene:scene-1:stock_select';
+    project.scenes[0].visual = {
+      kind: 'stock_image',
+      query: 'forest',
+      assetId: 'stock-1',
+      selection: {
+        provider: 'pexels',
+        photoId: '1',
+        query: 'forest',
+        usagePolicy: 'download',
+        origin: 'manual',
+        attribution: {
+          provider: 'pexels',
+          providerName: 'Pexels',
+          photoId: '1',
+          photographerName: 'Alex',
+          sourceUrl: 'https://www.pexels.com/photo/1',
+          license: 'Pexels License'
+        },
+        sourceUrl: 'https://www.pexels.com/photo/1',
+        imageUrl: 'https://images.pexels.com/photos/1/large.jpg',
+        width: 1000,
+        height: 1000,
+        selectedAt: new Date().toISOString(),
+        selectionKey: 'landscape::forest'
+      }
+    };
+
+    const action = deriveProductionPlan(project, { force: true }).actions.find((entry) => entry.id === id);
+    expect(action?.status).toBe('current');
+    expect(action?.execute).toBe(false);
+    expect(action?.reason).toMatch(/pinned/i);
+  });
 });
