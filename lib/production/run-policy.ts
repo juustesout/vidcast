@@ -322,7 +322,7 @@ function requireEnvVar(name: string, message: string): void {
 export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnapshot): RunPolicyPreflightResult {
   // Force-aware: a forced run will regenerate current outputs, so those
   // modalities must be validated up front instead of appearing unnecessary.
-  const plan = deriveProductionPlan(project, { force: policy.force === true });
+  const plan = deriveProductionPlan(project, { force: policy.force === true, mode: policy.mode });
   const actionable = plan.actions.filter(isPotentiallyExecutable);
   const requiredActionTypes = Array.from(new Set(actionable.map((action) => action.type)));
 

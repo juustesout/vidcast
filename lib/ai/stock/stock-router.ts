@@ -137,6 +137,10 @@ export class StockRouter {
     return ordered;
   }
 
+  private isProviderAllowed(providerId: StockProviderId): boolean {
+    return !this.allowedProviders || this.allowedProviders.has(providerId);
+  }
+
   async resolve(request: StockRouterRequest): Promise<StockRouterResult> {
     const query = request.query.trim();
     if (!query) {
@@ -145,7 +149,10 @@ export class StockRouter {
 
     const key = stockSelectionKey(query, request.orientation);
     const cached = await this.store.getCachedSelection(key);
-    if (cached) {
+    // A cache hit is only valid if the cached selection's provider is allowed in
+    // this router's mode. Without this check a mock-mode fake selection would be
+    // reused verbatim by a real-mode router before `allowedProviders` is applied.
+    if (cached && this.isProviderAllowed(cached.provider)) {
       return { selection: cached, cached: true, diagnostics: [{ provider: cached.provider, outcome: 'cache_hit' }] };
     }
 
@@ -154,7 +161,7 @@ export class StockRouter {
     let attempted = false;
 
     for (const providerId of order) {
-      if (this.allowedProviders && !this.allowedProviders.has(providerId)) {
+      if (!this.isProviderAllowed(providerId)) {
         diagnostics.push({ provider: providerId, outcome: 'skipped_not_allowed' });
         continue;
       }
@@ -270,7 +277,7 @@ export class StockRouter {
         continue;
       }
 
-      if (this.allowedProviders && !this.allowedProviders.has(providerId)) {
+      if (!this.isProviderAllowed(providerId)) {
         diagnostics.push({ provider: providerId, outcome: 'skipped_not_allowed' });
         continue;
       }

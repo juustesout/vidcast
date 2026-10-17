@@ -149,6 +149,20 @@ function isSelectionCurrent(project: Project, selection: StockSelection | undefi
   return Boolean(findUsableAsset(project, assetId));
 }
 
+// A persisted selection is reusable when its provider is valid for the current
+// mode. Mock mode may reuse any existing selection because doing so never
+// contacts a provider; real mode must never treat a fake selection as current.
+function isSelectionUsableInMode(
+  provider: StockProviderId,
+  mode: RunMode,
+  allowedProviders: StockProviderId[]
+): boolean {
+  if (mode === 'mock') {
+    return true;
+  }
+  return allowedProviders.includes(provider);
+}
+
 export async function selectSceneStockImage(
   projectId: string,
   sceneId: string,
@@ -170,8 +184,22 @@ export async function selectSceneStockImage(
     const scene = getScene(project, sceneId);
     ensureStockScene(scene);
 
+    const { mode, allowedProviders, order } = resolveStockMode({ mode: options.mode });
+
     const existing = scene.visual.selection;
-    if (!options.regenerate && isSelectionCurrent(project, existing, scene.visual.assetId)) {
+    const existingUsable = existing ? isSelectionUsableInMode(existing.provider, mode, allowedProviders) : false;
+
+    // Never silently replace an author-chosen selection that is invalid for the
+    // current mode. The caller must choose a compatible photo or change modes.
+    if (existing && !existingUsable && existing.origin === 'manual') {
+      throw new StockImageSelectionError(
+        `The saved manual stock selection uses ${existing.provider}, which is not available in ${mode} mode. Choose a real stock photo or change the run mode.`,
+        409,
+        'stock.selection.incompatible'
+      );
+    }
+
+    if (!options.regenerate && existingUsable && isSelectionCurrent(project, existing, scene.visual.assetId)) {
       return {
         sceneId,
         status: 'current',
@@ -187,8 +215,6 @@ export async function selectSceneStockImage(
     if (!scene.visual.query.trim()) {
       throw new StockImageSelectionError('Stock search query is required.', 400, 'stock.scene.missingQuery');
     }
-
-    const { allowedProviders, order } = resolveStockMode({ mode: options.mode });
 
     const router = new StockRouter({
       store: dependencies.stateStore,
@@ -214,6 +240,15 @@ export async function selectSceneStockImage(
     }
 
     const { selection } = routed;
+    if (!allowedProviders.includes(selection.provider)) {
+      throw new StockImageSelectionError(
+        `Stock provider ${selection.provider} is not available in ${mode} mode.`,
+        403,
+        'stock.provider.notAllowed',
+        routed.diagnostics
+      );
+    }
+
     return await persistSceneSelection(
       dependencies,
       projectId,
@@ -253,6 +288,15 @@ export async function selectSceneStockPhoto(
     const scene = getScene(project, sceneId);
     ensureStockScene(scene);
 
+    const { allowedProviders } = resolveStockMode({ mode: options.mode });
+
+    if (!photo || !photo.provider || !photo.photoId || !photo.imageUrl) {
+      throw new StockImageSelectionError('Invalid stock photo selection.', 400, 'stock.photo.invalid');
+    }
+    if (!allowedProviders.includes(photo.provider)) {
+      throw new StockImageSelectionError(`Stock provider ${photo.provider} is not available in this mode.`, 403, 'stock.provider.notAllowed');
+    }
+
     const existing = scene.visual.selection;
     if (!options.regenerate && isSelectionCurrent(project, existing, scene.visual.assetId) && existing?.provider === photo.provider && existing?.photoId === photo.photoId) {
       return {
@@ -270,14 +314,6 @@ export async function selectSceneStockPhoto(
     const query = (options.query ?? '').trim() || scene.visual.query.trim();
     if (!query) {
       throw new StockImageSelectionError('Stock search query is required.', 400, 'stock.scene.missingQuery');
-    }
-    if (!photo || !photo.provider || !photo.photoId || !photo.imageUrl) {
-      throw new StockImageSelectionError('Invalid stock photo selection.', 400, 'stock.photo.invalid');
-    }
-
-    const { allowedProviders } = resolveStockMode({ mode: options.mode });
-    if (!allowedProviders.includes(photo.provider)) {
-      throw new StockImageSelectionError(`Stock provider ${photo.provider} is not available in this mode.`, 403, 'stock.provider.notAllowed');
     }
 
     const orientation = options.orientation ?? scene.visual.orientation;

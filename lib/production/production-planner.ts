@@ -3,7 +3,10 @@ import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveScen
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import type { Project } from '@/lib/types/render';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
+import type { StockSelection } from '@/lib/types/stock';
 import { validateProject } from '@/lib/validation/project-validation';
+
+import type { RunMode } from './run-types';
 
 export type ProductionActionType =
   | 'image_generate'
@@ -67,6 +70,9 @@ export interface DeriveProductionPlanOptions {
   // current. An action is only forced until it completes in the current run, so
   // forcing does not loop and downstream actions (render/compose) still settle.
   force?: boolean;
+  // Current run mode. Stock selections from the wrong mode (for example a fake
+  // selection carried into a real run) must not be treated as current.
+  mode?: RunMode;
 }
 
 function actionId(type: ProductionActionType, sceneId?: string): string {
@@ -137,6 +143,19 @@ function hasUsableStockSelection(project: Project, scene: Scene): boolean {
   }
   const asset = project.assets.find((entry) => entry.id === visual.assetId);
   return Boolean(asset && asset.status === 'available');
+}
+
+// Mock selections are never valid real-mode selections. Reusing a real selection
+// in mock mode is allowed: it never contacts a provider and keeps mock runs
+// network-free while remaining reproducible.
+function isStockSelectionAllowedInMode(selection: StockSelection | undefined, mode: RunMode | undefined): boolean {
+  if (!mode || !selection) {
+    return true;
+  }
+  if (mode === 'real') {
+    return selection.provider !== 'fake';
+  }
+  return true;
 }
 
 export function deriveProductionPlan(project: Project, options: DeriveProductionPlanOptions = {}): ProductionPlan {
@@ -290,10 +309,14 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
     if (scene.visual?.kind === 'stock_image') {
       const id = actionId('stock_select', scene.id);
       const usable = hasUsableStockSelection(project, scene);
+      const selection = scene.visual.selection;
+      const modeCompatible = isStockSelectionAllowedInMode(selection, options.mode);
+      const usableForMode = usable && modeCompatible;
       // A manual, author-chosen photo is pinned: even a forced run must not
       // silently replace it with a different provider/candidate. Auto selections
       // remain re-runnable under force.
-      const pinnedManual = usable && scene.visual.selection?.origin === 'manual';
+      const pinnedManual = usableForMode && selection?.origin === 'manual';
+      const incompatibleManual = usable && !modeCompatible && selection?.origin === 'manual';
 
       let actionStatus: ProductionActionStatus = 'ready';
       let reason = 'Stock image selection is ready.';
@@ -311,7 +334,12 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
         actionStatus = 'running';
         execute = false;
         reason = 'Stock image selection is currently running.';
-      } else if (usable && (!forceRegenerate(id) || pinnedManual)) {
+      } else if (incompatibleManual) {
+        // Never silently overwrite an author choice that is invalid for this mode.
+        actionStatus = 'blocked';
+        execute = false;
+        reason = `Manual stock image selection uses ${selection.provider}, which is not available in ${options.mode} mode. Choose a different photo or change the run mode.`;
+      } else if (usableForMode && (!forceRegenerate(id) || pinnedManual)) {
         actionStatus = 'current';
         execute = false;
         reason = pinnedManual ? 'Manual stock image selection is pinned.' : 'Stock image selection is current.';
@@ -319,7 +347,10 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
         actionStatus = 'blocked';
         execute = false;
         reason = 'Stock search query is required.';
-      } else if (scene.visual.selection) {
+      } else if (usable && !modeCompatible) {
+        actionStatus = 'ready';
+        reason = 'Stock image selection is not valid for this mode; re-selecting.';
+      } else if (selection) {
         actionStatus = 'ready';
         reason = 'Retry stock image selection.';
       }

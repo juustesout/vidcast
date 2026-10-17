@@ -742,7 +742,8 @@ export class HeadlessProductionRunService {
         derivePlan: (project, options) =>
           this.dependencies.derivePlan(project, {
             ...options,
-            force: run.acceptedConfig.policy.force === true
+            force: run.acceptedConfig.policy.force === true,
+            mode: run.acceptedConfig.policy.mode
           }),
         config: {
           maxIterations: run.acceptedConfig.limits.maxIterations,
