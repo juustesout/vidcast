@@ -64,6 +64,46 @@ function defaultSummary(): HeadlessRunSummary {
   };
 }
 
+function isTerminalStatus(status: HeadlessRunStatus): boolean {
+  return status !== 'queued' && status !== 'running';
+}
+
+function storedRunFromEntry(entry: RunRegistryEntry): StoredRun {
+  return {
+    runId: entry.runId,
+    projectId: entry.projectId,
+    status: entry.status,
+    createdAt: entry.createdAt,
+    startedAt: entry.startedAt,
+    finishedAt: entry.finishedAt,
+    summary: { ...defaultSummary(), ...entry.summary },
+    completedActionIds: [...entry.completedActionIds],
+    failedActionIds: [...entry.failedActionIds],
+    unresolvedActions: [...entry.unresolvedActions],
+    acceptedConfig: {
+      policy: {
+        mode: entry.acceptedConfig.policy.mode,
+        allowRealProviders: entry.acceptedConfig.policy.allowRealProviders,
+        providers: { ...entry.acceptedConfig.policy.providers },
+        force: entry.acceptedConfig.policy.force,
+        music: entry.acceptedConfig.policy.music ? { ...entry.acceptedConfig.policy.music } : undefined
+      },
+      limits: {
+        maxIterations: entry.acceptedConfig.limits.maxIterations,
+        maxActionExecutions: entry.acceptedConfig.limits.maxActionExecutions,
+        maxVideoPolls: entry.acceptedConfig.limits.maxVideoPolls,
+        perActionConcurrency: { ...entry.acceptedConfig.limits.perActionConcurrency }
+      }
+    },
+    events: entry.events.map((event) => ({ ...event, error: event.error ? { ...event.error } : undefined })),
+    eventOffset: entry.eventOffset
+  };
+}
+
+function eventPosition(run: StoredRun): number {
+  return run.eventOffset + run.events.length;
+}
+
 export class InMemoryRunRegistry {
   private readonly runs = new Map<string, StoredRun>();
   private readonly activeByProject = new Map<string, string>();
@@ -156,36 +196,7 @@ export class InMemoryRunRegistry {
       return this.snapshot(existing);
     }
 
-    const stored: StoredRun = {
-      runId: entry.runId,
-      projectId: entry.projectId,
-      status: entry.status,
-      createdAt: entry.createdAt,
-      startedAt: entry.startedAt,
-      finishedAt: entry.finishedAt,
-      summary: { ...defaultSummary(), ...entry.summary },
-      completedActionIds: [...entry.completedActionIds],
-      failedActionIds: [...entry.failedActionIds],
-      unresolvedActions: [...entry.unresolvedActions],
-      acceptedConfig: {
-        policy: {
-          mode: entry.acceptedConfig.policy.mode,
-          allowRealProviders: entry.acceptedConfig.policy.allowRealProviders,
-          providers: { ...entry.acceptedConfig.policy.providers },
-          force: entry.acceptedConfig.policy.force,
-          music: entry.acceptedConfig.policy.music ? { ...entry.acceptedConfig.policy.music } : undefined
-        },
-        limits: {
-          maxIterations: entry.acceptedConfig.limits.maxIterations,
-          maxActionExecutions: entry.acceptedConfig.limits.maxActionExecutions,
-          maxVideoPolls: entry.acceptedConfig.limits.maxVideoPolls,
-          perActionConcurrency: { ...entry.acceptedConfig.limits.perActionConcurrency }
-        }
-      },
-      events: entry.events.map((event) => ({ ...event, error: event.error ? { ...event.error } : undefined })),
-      eventOffset: entry.eventOffset
-    };
-
+    const stored = storedRunFromEntry(entry);
     this.runs.set(stored.runId, stored);
 
     if (stored.status === 'queued' || stored.status === 'running') {
@@ -195,6 +206,50 @@ export class InMemoryRunRegistry {
       if (!hasActive) {
         this.activeByProject.set(stored.projectId, stored.runId);
       }
+    }
+
+    return this.snapshot(stored);
+  }
+
+  // Rehydrates or refreshes a run from persisted data. A terminal in-memory
+  // state is never downgraded to a non-terminal persisted state. Otherwise the
+  // copy with the furthest event position wins, with a terminal persisted state
+  // accepted when it is at least as recent as the in-memory state.
+  refreshRun(entry: RunRegistryEntry): HeadlessRunSnapshot {
+    const existing = this.runs.get(entry.runId);
+    if (!existing) {
+      return this.importRun(entry);
+    }
+
+    const existingTerminal = isTerminalStatus(existing.status);
+    const incomingTerminal = isTerminalStatus(entry.status);
+
+    if (existingTerminal && !incomingTerminal) {
+      return this.snapshot(existing);
+    }
+
+    const existingPosition = eventPosition(existing);
+    const incomingPosition = entry.eventOffset + entry.events.length;
+    const shouldReplace = incomingTerminal
+      ? !existingTerminal || incomingPosition >= existingPosition
+      : incomingPosition > existingPosition;
+
+    if (!shouldReplace) {
+      return this.snapshot(existing);
+    }
+
+    const stored = storedRunFromEntry(entry);
+    this.runs.set(stored.runId, stored);
+
+    if (stored.status === 'queued' || stored.status === 'running') {
+      const currentActiveId = this.activeByProject.get(stored.projectId);
+      const currentActive = currentActiveId ? this.runs.get(currentActiveId) : undefined;
+      const hasActive = Boolean(currentActive && (currentActive.status === 'queued' || currentActive.status === 'running'));
+      if (!hasActive) {
+        this.activeByProject.set(stored.projectId, stored.runId);
+      }
+    } else if (this.activeByProject.get(stored.projectId) === stored.runId) {
+      this.activeByProject.delete(stored.projectId);
     }
 
     return this.snapshot(stored);

@@ -13,6 +13,9 @@ export interface RunStore {
   save(run: PersistedRun): Promise<void>;
   load(projectId: string, runId: string): Promise<PersistedRun | null>;
   listAll(): Promise<PersistedRun[]>;
+  // Looks up a run without knowing its project. Used by status/log reads so a
+  // route instance that never saw the run can recover it from durable state.
+  findByRunId?(runId: string): Promise<PersistedRun | null>;
   // Optional cross-process execution lock. When implemented, it lets multiple
   // service instances (e.g. one per route worker) agree that a single run is
   // executed by exactly one owner at a time. Stores without it keep the plain
@@ -75,6 +78,9 @@ export interface FileRunStoreOptions {
 
 export class FileRunStore implements RunStore {
   private readonly projectsRoot: string | null;
+  // runId -> projectId. Avoids scanning every project for repeated status/log
+  // polls. Entries are refreshed by save/load and removed when a lookup misses.
+  private readonly runProjects = new Map<string, string>();
 
   constructor(options: FileRunStoreOptions = {}) {
     this.projectsRoot = options.projectsRoot ?? null;
@@ -93,15 +99,51 @@ export class FileRunStore implements RunStore {
 
     await fs.writeFile(temp, JSON.stringify(envelope), 'utf8');
     await fs.rename(temp, target);
+    this.runProjects.set(run.runId, run.projectId);
   }
 
   async load(projectId: string, runId: string): Promise<PersistedRun | null> {
     try {
       const raw = await fs.readFile(this.runFile(projectId, runId), 'utf8');
-      return parseEnvelope(raw);
+      const parsed = parseEnvelope(raw);
+      if (parsed) {
+        this.runProjects.set(runId, projectId);
+      }
+      return parsed;
     } catch {
       return null;
     }
+  }
+
+  async findByRunId(runId: string): Promise<PersistedRun | null> {
+    const knownProjectId = this.runProjects.get(runId);
+    if (knownProjectId) {
+      const known = await this.load(knownProjectId, runId);
+      if (known) {
+        return known;
+      }
+      this.runProjects.delete(runId);
+    }
+
+    const root = this.rootDir();
+    let projectEntries;
+    try {
+      projectEntries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+
+    for (const projectEntry of projectEntries) {
+      if (!projectEntry.isDirectory()) {
+        continue;
+      }
+      const loaded = await this.load(projectEntry.name, runId);
+      if (loaded) {
+        return loaded;
+      }
+    }
+
+    return null;
   }
 
   async listAll(): Promise<PersistedRun[]> {

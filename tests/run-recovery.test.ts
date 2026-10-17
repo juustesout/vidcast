@@ -578,3 +578,106 @@ describe('headless run execution lock (cross-process dedupe)', () => {
     expect(await runStore.isExecutionLocked('project-r', 'run-stale')).toBe(false);
   });
 });
+
+describe('run status read-through across service instances', () => {
+  it('reads a persisted run and its log without requiring local discovery', async () => {
+    const root = await tempRoot();
+    const runStore = new FileRunStore({ projectsRoot: root });
+    await runStore.save(
+      createPersistedRun({
+        runId: 'run-complete',
+        status: 'completed',
+        finishedAt: new Date().toISOString(),
+        summary: { completed: 1, failed: 0, running: 0, waiting: 0 },
+        completedActionIds: ['scene:scene-1:image_generate'],
+        events: [
+          {
+            timestamp: new Date().toISOString(),
+            iteration: 1,
+            code: 'run_completed',
+            status: 'completed',
+            message: 'Production run completed.'
+          }
+        ]
+      })
+    );
+
+    const observer = new HeadlessProductionRunService(
+      SERVICE_CONFIG,
+      { store: mutableStore(project('project-r', [imageScene(1, 'generated')])) },
+      { runStore, autoRecover: false }
+    );
+
+    const run = await observer.getRunForRead('run-complete');
+    expect(run.status).toBe('completed');
+    expect(run.summary.completed).toBe(1);
+
+    const log = await observer.getRunLogForRead('run-complete', { limit: 10 });
+    expect(log.items.map((item) => item.event.code)).toEqual(['run_completed']);
+  });
+
+  it('recovers a non-terminal persisted run on status read and does not execute it twice', async () => {
+    const root = await tempRoot();
+    const runStore = new FileRunStore({ projectsRoot: root });
+    await runStore.save(createPersistedRun({ runId: 'run-resume' }));
+
+    const batches: Array<{ initialFailedActionIds: string[] }> = [];
+    const observer = new HeadlessProductionRunService(
+      SERVICE_CONFIG,
+      { store: mutableStore(project('project-r', [imageScene(1, 'planned')])), runBatch: makeRunBatch(batches) },
+      { runStore, autoRecover: false }
+    );
+
+    const first = await observer.getRunForRead('run-resume');
+    expect(['queued', 'running']).toContain(first.status);
+
+    await waitForStatus(observer, 'run-resume', ['completed']);
+    expect(batches).toHaveLength(1);
+
+    const second = await observer.getRunForRead('run-resume');
+    expect(second.status).toBe('completed');
+    expect(batches).toHaveLength(1);
+  });
+
+  it('serves an active run owned by another live instance without NOT_FOUND or duplicate work', async () => {
+    const root = await tempRoot();
+    const runStore = new FileRunStore({ projectsRoot: root });
+    const store = mutableStore(project('project-r', [imageScene(1, 'planned')]));
+
+    let releaseGate: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const entered: number[] = [];
+    const runBatch = async (input: Parameters<RunBatch>[0]) => {
+      entered.push(Date.now());
+      await gate;
+      return {
+        status: 'completed',
+        project: input.initialProject,
+        iterations: 1,
+        completedActionIds: [],
+        failedActionIds: [],
+        unresolvedActions: [],
+        events: []
+      } satisfies ProductionRunnerResult;
+    };
+
+    const owner = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch }, { runStore, autoRecover: false });
+    const started = await owner.startOrReuseRun({ projectId: 'project-r' });
+    await waitForStatus(owner, started.run.runId, ['running']);
+    await owner.flushPersists();
+
+    // A status route in another worker never saw the run locally. The durable
+    // copy must make it readable, while the live execution lock prevents this
+    // instance from starting a second batch.
+    const observer = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch }, { runStore, autoRecover: false });
+    const observed = await observer.getRunForRead(started.run.runId);
+    expect(observed.status).toBe('running');
+    expect(entered).toHaveLength(1);
+
+    releaseGate!();
+    await waitForStatus(owner, started.run.runId, ['completed']);
+    expect(entered).toHaveLength(1);
+  });
+});

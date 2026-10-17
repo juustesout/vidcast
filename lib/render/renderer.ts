@@ -4,7 +4,7 @@ import sharp from 'sharp';
 
 import type { RenderPlan, RenderPlanScene, SceneRenderResult } from '@/lib/types/render';
 import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
-import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
+import { ProcessExecutionError, runFfmpeg } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia, FFprobeError } from './ffprobe';
 import { buildSceneFadeFilters, createStillSceneSvg, sceneMotionToZoomPan } from './render-source';
 import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
@@ -388,7 +388,7 @@ export class LocalFFmpegRenderer implements Renderer {
         : buildStillArgs(scene, options, sourcePath, overlayFilter);
 
       const command = this.runtime.ffmpegPath;
-      await runProcess(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() });
+      await runFfmpeg(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() }, 'scene_render');
       const validated = await validateOutputFile(outputPath, options.sceneWidth, options.sceneHeight, options.sceneFps, scene.duration, this.runtime);
 
       return {

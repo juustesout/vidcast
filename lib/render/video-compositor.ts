@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
-import { ProcessExecutionError, runProcess } from './ffmpeg-executor';
+import { ProcessExecutionError, runFfmpeg } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia } from './ffprobe';
 import { getFinalComposeTimeoutMs } from './render-timeouts';
 import { formatVolumeFilter } from './audio-mix';
@@ -178,7 +178,7 @@ async function normalizeInput(
     inputHasAudio
   });
 
-  await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
+  await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() }, 'final_compose');
 }
 
 export function buildMusicMixArgs(
@@ -234,7 +234,7 @@ export function buildMusicMixArgs(
 
 async function mixMusic(concatVideoPath: string, musicPath: string, outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<void> {
   const args = buildMusicMixArgs(concatVideoPath, musicPath, outputPath, plan);
-  await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
+  await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() }, 'final_compose');
 }
 
 async function composeConcat(normalizedPaths: string[], outputPath: string, plan: CompositionPlan, tempDir: string, runtime: FFmpegRuntime): Promise<void> {
@@ -244,7 +244,7 @@ async function composeConcat(normalizedPaths: string[], outputPath: string, plan
 
   const args = buildComposeArgs(listPath, outputPath, plan, { limitAudio: !plan.music });
 
-  await runProcess(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() });
+  await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() }, 'final_compose');
 }
 
 async function validateOutput(outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<{ filesize: number; duration: number }> {

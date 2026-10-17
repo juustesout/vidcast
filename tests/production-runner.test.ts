@@ -215,6 +215,53 @@ describe('runProductionBatch', () => {
     expect(codes[codes.length - 1]).toBe('run_completed');
   });
 
+  it('publishes per-action running and completion progress before the batch ends', async () => {
+    const firstPlan = makePlan([makeAction('img-1', 'image_generate', 'ready', 's1')]);
+    const emptyPlan = makePlan([]);
+    let pointer = 0;
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const progress: Array<{ completedActionIds: string[]; runningActionIds: string[] }> = [];
+    let sawRunningWhileExecuting = false;
+
+    const running = runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => {
+        const plan = pointer === 0 ? firstPlan : emptyPlan;
+        return plan;
+      },
+      refreshProject: async () => {
+        pointer += 1;
+        return emptyProject;
+      },
+      config: { maxIterations: 2 },
+      executeAction: async () => {
+        sawRunningWhileExecuting = progress.some((entry) => entry.runningActionIds.includes('img-1'));
+        await gate;
+        return { message: 'ok' };
+      },
+      onProgress: (entry) => {
+        progress.push({
+          completedActionIds: [...entry.completedActionIds],
+          runningActionIds: [...entry.runningActionIds]
+        });
+      }
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sawRunningWhileExecuting).toBe(true);
+    expect(progress.at(-1)?.completedActionIds).not.toContain('img-1');
+
+    release!();
+    await running;
+
+    const completed = progress.find((entry) => entry.completedActionIds.includes('img-1'));
+    expect(completed).toBeDefined();
+    expect(completed?.runningActionIds).not.toContain('img-1');
+  });
+
   it('logs failed action diagnostics and excludes sensitive fields', async () => {
     const plan = makePlan([makeAction('img-1', 'image_generate', 'ready', 's1')]);
     const result = await runProductionBatch({

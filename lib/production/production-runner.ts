@@ -454,6 +454,15 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
           sceneId: action.sceneId,
           message: `${createActionLabel(action)} started.`
         });
+        input.onProgress?.({
+          iteration,
+          project,
+          plan,
+          completedActionIds: Array.from(completedActionIds),
+          failedActionIds: Array.from(failedActionIds),
+          runningActionIds: Array.from(runningActionIds),
+          events: [...events]
+        });
 
         try {
           return await input.executeAction(action);
@@ -511,6 +520,16 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
               : undefined
           });
         }
+
+        input.onProgress?.({
+          iteration,
+          project,
+          plan,
+          completedActionIds: Array.from(completedActionIds),
+          failedActionIds: Array.from(failedActionIds),
+          runningActionIds: Array.from(runningActionIds),
+          events: [...events]
+        });
       }
     }
 

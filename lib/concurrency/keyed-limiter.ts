@@ -38,14 +38,53 @@ export function resolveProviderConcurrencyLimit(raw: string | undefined, fallbac
   return Math.min(max, parsed);
 }
 
+export interface KeyedLimitOptions {
+  // Optional bound on waiters for a key. The default is unbounded so existing
+  // provider callers keep their behaviour; callers that share a scarce local
+  // resource (FFmpeg) pass a finite value to avoid an unbounded queue.
+  maxQueue?: number;
+}
+
+export class KeyedLimitQueueFullError extends Error {
+  readonly key: string;
+  readonly limit: number;
+  readonly maxQueue: number;
+
+  constructor(key: string, limit: number, maxQueue: number) {
+    super(`Concurrency queue for "${key}" is full (${maxQueue} waiters).`);
+    this.name = 'KeyedLimitQueueFullError';
+    this.key = key;
+    this.limit = limit;
+    this.maxQueue = maxQueue;
+  }
+}
+
+export function getKeyedLimitActiveCount(key: string): number {
+  return limiterState().active.get(key) ?? 0;
+}
+
+export function getKeyedLimitQueueLength(key: string): number {
+  return limiterState().queues.get(key)?.length ?? 0;
+}
+
 // Runs `task` while holding one of `limit` slots for `key`. Slots are released
 // even when the task throws. `limit` values below 1 are treated as 1.
-export async function withKeyedLimit<T>(key: string, limit: number, task: () => Promise<T>): Promise<T> {
+export async function withKeyedLimit<T>(
+  key: string,
+  limit: number,
+  task: () => Promise<T>,
+  options: KeyedLimitOptions = {}
+): Promise<T> {
   const state = limiterState();
   const safeLimit = Math.max(1, Math.floor(limit) || 1);
 
   const active = state.active.get(key) ?? 0;
   if (active >= safeLimit) {
+    const existingQueue = state.queues.get(key) ?? [];
+    const maxQueue = options.maxQueue;
+    if (typeof maxQueue === 'number' && Number.isFinite(maxQueue) && existingQueue.length >= Math.max(0, Math.floor(maxQueue))) {
+      throw new KeyedLimitQueueFullError(key, safeLimit, Math.max(0, Math.floor(maxQueue)));
+    }
     await new Promise<void>((resolve) => {
       const queue = state.queues.get(key) ?? [];
       queue.push(resolve);

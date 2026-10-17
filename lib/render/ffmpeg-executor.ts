@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 
+import { withFfmpegSlot, type FfmpegOperation } from './ffmpeg-limiter';
+
 export type ProcessFailureReason = 'spawn_error' | 'timeout' | 'exit' | 'signal';
 
 export interface ProcessExecutionOptions {
@@ -148,4 +150,19 @@ export async function runProcess(command: string, args: string[], options: Proce
       }, options.timeoutMs);
     }
   });
+}
+
+
+// Every local FFmpeg invocation must go through this wrapper. It acquires the
+// process-global FFmpeg slot before spawning, so scene renders and composition
+// subprocesses share one memory ceiling even when they belong to different runs
+// or route instances. The queue wait is outside the process timeout: a render
+// that waits for backpressure does not lose part of its FFmpeg timeout budget.
+export async function runFfmpeg(
+  command: string,
+  args: string[],
+  options: ProcessExecutionOptions = {},
+  operation: FfmpegOperation = 'scene_render'
+): Promise<ProcessExecutionResult> {
+  return withFfmpegSlot(operation, () => runProcess(command, args, options));
 }

@@ -3,6 +3,7 @@ import { generateProjectMusic, ProjectMusicGenerationError, selectProjectMusic }
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
 import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
 import { selectSceneStockImage, StockImageSelectionError } from '@/lib/generation/stock-image-service';
+import { getFfmpegConcurrencyLimit } from '@/lib/render/ffmpeg-limiter';
 import { isMusicAsset, resolveSelectedMusicAsset } from '@/lib/render/music-mix';
 import { CompositionServiceError, videoCompositionService } from '@/lib/render/video-composition-service';
 import { SceneRenderError } from '@/lib/render/renderer';
@@ -136,6 +137,13 @@ function envInt(value: string | undefined, fallback: number, min = 1, max = Numb
   return Math.min(max, Math.max(min, parsed));
 }
 
+function clampLocalFfmpegConcurrency(value: number): number {
+  // Scene renders and final compose share one local FFmpeg semaphore. A run
+  // request may lower the action fan-out but can never raise it above the
+  // server-managed local ceiling.
+  return Math.max(1, Math.min(value, getFfmpegConcurrencyLimit()));
+}
+
 function defaultActionLimits(): Record<ProductionActionType, number> {
   return {
     image_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_IMAGE, 2, 1, 16),
@@ -143,8 +151,8 @@ function defaultActionLimits(): Record<ProductionActionType, number> {
     video_submit: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_SUBMIT, 2, 1, 16),
     video_poll: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_POLL, 4, 1, 32),
     narration_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_NARRATION, 2, 1, 16),
-    scene_render: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_RENDER, 1, 1, 8),
-    final_compose: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_COMPOSE, 1, 1, 4)
+    scene_render: clampLocalFfmpegConcurrency(envInt(process.env.PRODUCTION_RUN_CONCURRENCY_RENDER, 1, 1, 8)),
+    final_compose: clampLocalFfmpegConcurrency(envInt(process.env.PRODUCTION_RUN_CONCURRENCY_COMPOSE, 1, 1, 4))
   };
 }
 
@@ -171,7 +179,11 @@ function mergePerActionLimits(
   override: Partial<Record<ProductionActionType, number>> | undefined
 ): Record<ProductionActionType, number> {
   if (!override) {
-    return { ...defaults };
+    return {
+      ...defaults,
+      scene_render: clampLocalFfmpegConcurrency(defaults.scene_render),
+      final_compose: clampLocalFfmpegConcurrency(defaults.final_compose)
+    };
   }
 
   return {
@@ -180,8 +192,12 @@ function mergePerActionLimits(
     video_submit: envInt(String(override.video_submit ?? defaults.video_submit), defaults.video_submit, 1, 64),
     video_poll: envInt(String(override.video_poll ?? defaults.video_poll), defaults.video_poll, 1, 64),
     narration_generate: envInt(String(override.narration_generate ?? defaults.narration_generate), defaults.narration_generate, 1, 64),
-    scene_render: envInt(String(override.scene_render ?? defaults.scene_render), defaults.scene_render, 1, 64),
-    final_compose: envInt(String(override.final_compose ?? defaults.final_compose), defaults.final_compose, 1, 64)
+    scene_render: clampLocalFfmpegConcurrency(
+      envInt(String(override.scene_render ?? defaults.scene_render), defaults.scene_render, 1, 64)
+    ),
+    final_compose: clampLocalFfmpegConcurrency(
+      envInt(String(override.final_compose ?? defaults.final_compose), defaults.final_compose, 1, 64)
+    )
   };
 }
 
@@ -274,6 +290,8 @@ export class HeadlessProductionRunService {
   private readonly persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly persistQueue = new Map<string, Promise<void>>();
   private readonly recoveredRunIds = new Set<string>();
+  private readonly recoveringRunIds = new Set<string>();
+  private readonly executingRunIds = new Set<string>();
   // In-flight start requests keyed by projectId. Set synchronously before the
   // first await so concurrent starts for the same project coalesce onto one run.
   private readonly pendingStarts = new Map<string, Promise<StartProductionRunResponse>>();
@@ -339,6 +357,19 @@ export class HeadlessProductionRunService {
   }
 
   private async performStart(projectId: string, input: StartProductionRunRequest): Promise<StartProductionRunResponse> {
+    const persistedActive = this.runStore ? await this.findPersistedActiveRun(projectId) : null;
+    if (persistedActive) {
+      this.registry.refreshRun(persistedActive);
+      const snapshot = this.registry.getRunUnsafe(persistedActive.runId);
+      if (snapshot) {
+        await this.ensureRunActive(persistedActive);
+        return {
+          run: this.registry.getRunUnsafe(persistedActive.runId) ?? snapshot,
+          reused: true
+        };
+      }
+    }
+
     const project = await this.dependencies.store.getProject(projectId);
     if (!project) {
       throw new RunServiceError('Project not found.', 'NOT_FOUND', 404, { projectId });
@@ -373,6 +404,11 @@ export class HeadlessProductionRunService {
     this.queue.push(runId);
     this.scheduleDispatchLoop();
 
+    // Make the run discoverable by other route instances before the start
+    // response returns. Without this, a status request in another instance can
+    // race the debounced first save and report NOT_FOUND for an active run.
+    await this.flushRun(runId);
+
     return {
       run,
       reused: false
@@ -387,6 +423,44 @@ export class HeadlessProductionRunService {
     return value;
   }
 
+  // Read path for HTTP status routes. The local registry is only a cache: if
+  // this route instance never saw the run, or its snapshot is older than the
+  // durable copy, load/refresh from the run store. A non-terminal run with no
+  // live owner is resumed here, using the existing execution lock for dedupe.
+  async getRunForRead(runId: string): Promise<HeadlessRunSnapshot> {
+    const persisted = await this.loadPersistedRun(runId);
+
+    if (!persisted) {
+      const local = this.registry.getRun(runId);
+      if (local) {
+        return local;
+      }
+      throw this.notFoundRunError(runId);
+    }
+
+    if (this.isPersistedRunExpired(persisted)) {
+      throw this.notFoundRunError(runId);
+    }
+
+    this.registry.refreshRun(persisted);
+    const snapshot = this.registry.getRunUnsafe(runId);
+    if (!snapshot) {
+      throw this.notFoundRunError(runId);
+    }
+
+    if (snapshot.status === 'queued' || snapshot.status === 'running') {
+      await this.ensureRunActive(persisted);
+      return this.registry.getRunUnsafe(runId) ?? snapshot;
+    }
+
+    return snapshot;
+  }
+
+  async getRunLogForRead(runId: string, options: { cursor?: number; limit?: number } = {}): Promise<HeadlessRunLogPage> {
+    await this.getRunForRead(runId);
+    return this.getRunLog(runId, options);
+  }
+
   getRunLog(runId: string, options: { cursor?: number; limit?: number } = {}): HeadlessRunLogPage {
     const page = this.registry.getLogPage(runId, options);
     if (!page) {
@@ -399,6 +473,79 @@ export class HeadlessProductionRunService {
   clearStateForTests(): void {
     this.queue.splice(0, this.queue.length);
     this.recoveredRunIds.clear();
+    this.recoveringRunIds.clear();
+    this.executingRunIds.clear();
+  }
+
+  private async findPersistedActiveRun(projectId: string): Promise<PersistedRun | null> {
+    if (!this.runStore) {
+      return null;
+    }
+    let entries: PersistedRun[];
+    try {
+      entries = await this.runStore.listAll();
+    } catch {
+      return null;
+    }
+    return entries
+      .filter((entry) => entry.projectId === projectId && (entry.status === 'queued' || entry.status === 'running'))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }
+
+  private async loadPersistedRun(runId: string): Promise<PersistedRun | null> {
+    if (!this.runStore?.findByRunId) {
+      return null;
+    }
+    try {
+      return await this.runStore.findByRunId(runId);
+    } catch {
+      return null;
+    }
+  }
+
+  private isPersistedRunExpired(entry: PersistedRun): boolean {
+    if (entry.status === 'queued' || entry.status === 'running') {
+      return false;
+    }
+    if (!entry.finishedAt) {
+      return false;
+    }
+    const finishedAt = Date.parse(entry.finishedAt);
+    if (!Number.isFinite(finishedAt)) {
+      return false;
+    }
+    return Date.now() - finishedAt > this.config.registry.retentionMs;
+  }
+
+  private async ensureRunActive(entry: PersistedRun): Promise<void> {
+    const runId = entry.runId;
+    if (entry.status !== 'queued' && entry.status !== 'running') {
+      return;
+    }
+    if (
+      this.recoveredRunIds.has(runId)
+      || this.recoveringRunIds.has(runId)
+      || this.executingRunIds.has(runId)
+      || this.queue.includes(runId)
+    ) {
+      return;
+    }
+
+    if (this.runStore?.isExecutionLocked && (await this.runStore.isExecutionLocked(entry.projectId, runId))) {
+      return;
+    }
+
+    this.recoveringRunIds.add(runId);
+    try {
+      const snapshot = await this.recoverRun(entry);
+      if (snapshot) {
+        this.recoveredRunIds.add(runId);
+      }
+    } catch {
+      // A status/log read must remain readable even if recovery cannot start.
+    } finally {
+      this.recoveringRunIds.delete(runId);
+    }
   }
 
   // Rehydrates persisted runs and resumes any that were non-terminal when the
@@ -416,7 +563,7 @@ export class HeadlessProductionRunService {
     }
 
     for (const entry of entries) {
-      this.registry.importRun(entry);
+      this.registry.refreshRun(entry);
     }
 
     const recovered: HeadlessRunSnapshot[] = [];
@@ -702,8 +849,23 @@ export class HeadlessProductionRunService {
     }
 
     try {
+      // The lock may have been acquired after another worker already completed
+      // this run (for example two route instances both recovered the same
+      // queued run). Refresh from durable state and never execute terminal work
+      // a second time.
+      const persisted = await this.loadPersistedRun(runId);
+      if (persisted) {
+        this.registry.refreshRun(persisted);
+        const current = this.registry.getRunUnsafe(runId);
+        if (current && current.status !== 'queued' && current.status !== 'running') {
+          return;
+        }
+      }
+
+      this.executingRunIds.add(runId);
       await this.executeRunInternal(runId);
     } finally {
+      this.executingRunIds.delete(runId);
       await lock?.release();
     }
   }

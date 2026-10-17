@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import * as z from 'zod/v4';
 
 import { headlessProductionRunService, RunServiceError } from '@/lib/production/run-service';
+import { MAX_FFMPEG_CONCURRENCY } from '@/lib/render/ffmpeg-limiter';
 import { AccessControlError, enforceThrottle, requireProjectAccess } from '@/lib/security/access-control';
 import { toAccessControlResponse } from '@/lib/security/http-response';
 
@@ -40,8 +41,8 @@ const startRunSchema = z.object({
       video_submit: z.number().int().positive().max(128).optional(),
       video_poll: z.number().int().positive().max(128).optional(),
       narration_generate: z.number().int().positive().max(128).optional(),
-      scene_render: z.number().int().positive().max(128).optional(),
-      final_compose: z.number().int().positive().max(128).optional()
+      scene_render: z.number().int().positive().max(MAX_FFMPEG_CONCURRENCY).optional(),
+      final_compose: z.number().int().positive().max(MAX_FFMPEG_CONCURRENCY).optional()
     })
     .optional()
 });

@@ -1,6 +1,12 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { HeadlessProductionRunService } from '@/lib/production/run-service';
+import { runFfmpeg } from '@/lib/render/ffmpeg-executor';
+import { getFfmpegLimiterStats as getFfmpegStats, resetFfmpegLimiterForTests } from '@/lib/render/ffmpeg-limiter';
 import type { Project } from '@/lib/types/render';
 
 function createProject(id: string): Project {
@@ -209,6 +215,187 @@ describe('headless production run service', () => {
 
     resolveRun?.();
     await waitForStatus(service, first.run.runId, ['completed', 'failed']);
+  });
+
+  it('clamps requested scene_render and final_compose to the server FFmpeg limit', async () => {
+    const project = createProject('project-clamp');
+    const original = process.env.FFMPEG_MAX_CONCURRENCY;
+    process.env.FFMPEG_MAX_CONCURRENCY = '1';
+    let resolveRun: (() => void) | undefined;
+
+    try {
+      const service = new HeadlessProductionRunService(
+        {
+          maxConcurrentRuns: 1,
+          runner: {
+            maxIterations: 5,
+            maxActionExecutions: 5,
+            maxVideoPolls: 5,
+            limits: {
+              image_generate: 1,
+              stock_select: 1,
+              video_submit: 1,
+              video_poll: 1,
+              narration_generate: 1,
+              scene_render: 4,
+              final_compose: 2
+            }
+          },
+          registry: {
+            maxEventsPerRun: 100,
+            retentionMs: 60_000,
+            maxLogPageLimit: 100
+          },
+          policy: {
+            allowRealProviders: true,
+            defaultMode: 'mock'
+          }
+        },
+        {
+          store: {
+            async getProject(projectId: string) {
+              return projectId === project.id ? project : null;
+            }
+          },
+          runBatch: async (input) => {
+            await new Promise<void>((resolve) => {
+              resolveRun = resolve;
+            });
+            return {
+              status: 'completed',
+              project: input.initialProject,
+              iterations: 1,
+              completedActionIds: [],
+              failedActionIds: [],
+              unresolvedActions: [],
+              events: []
+            };
+          }
+        }
+      );
+
+      const started = await service.startOrReuseRun({
+        projectId: project.id,
+        limits: { scene_render: 8, final_compose: 8 }
+      });
+
+      expect(started.run.acceptedConfig.limits.perActionConcurrency.scene_render).toBe(1);
+      expect(started.run.acceptedConfig.limits.perActionConcurrency.final_compose).toBe(1);
+
+      for (let attempt = 0; attempt < 100 && !resolveRun; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      resolveRun?.();
+      await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+    } finally {
+      if (original === undefined) {
+        delete process.env.FFMPEG_MAX_CONCURRENCY;
+      } else {
+        process.env.FFMPEG_MAX_CONCURRENCY = original;
+      }
+    }
+  });
+
+  it('shares one FFmpeg slot across two concurrent runs', async () => {
+    const original = process.env.FFMPEG_MAX_CONCURRENCY;
+    process.env.FFMPEG_MAX_CONCURRENCY = '1';
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'run-ffmpeg-limit-'));
+    const probeScript = `
+const fs = require('node:fs');
+const [id, lockPath, logPath, sleepRaw] = process.argv.slice(1);
+const sleepMs = Number(sleepRaw);
+try {
+  fs.writeFileSync(lockPath, id, { flag: 'wx' });
+} catch {
+  fs.appendFileSync(logPath + '.violations', 'overlap\n');
+}
+fs.appendFileSync(logPath, 'start ' + id + '\n');
+setTimeout(() => {
+  fs.appendFileSync(logPath, 'end ' + id + '\n');
+  try { fs.unlinkSync(lockPath); } catch {}
+}, sleepMs);
+`;
+    const projectA = createProject('project-a');
+    const projectB = createProject('project-b');
+
+    try {
+      const service = new HeadlessProductionRunService(
+        {
+          maxConcurrentRuns: 2,
+          runner: {
+            maxIterations: 5,
+            maxActionExecutions: 5,
+            maxVideoPolls: 5,
+            limits: {
+              image_generate: 1,
+              stock_select: 1,
+              video_submit: 1,
+              video_poll: 1,
+              narration_generate: 1,
+              scene_render: 1,
+              final_compose: 1
+            }
+          },
+          registry: {
+            maxEventsPerRun: 100,
+            retentionMs: 60_000,
+            maxLogPageLimit: 100
+          },
+          policy: {
+            allowRealProviders: true,
+            defaultMode: 'mock'
+          }
+        },
+        {
+          store: {
+            async getProject(projectId: string) {
+              if (projectId === projectA.id) return projectA;
+              if (projectId === projectB.id) return projectB;
+              return null;
+            }
+          },
+          runBatch: async (input) => {
+            const id = input.initialProject.id;
+            await runFfmpeg(
+              process.execPath,
+              ['-e', probeScript, id, path.join(tempRoot, `lock-${id}`), path.join(tempRoot, 'events.log'), '120'],
+              {},
+              id === projectA.id ? 'scene_render' : 'final_compose'
+            );
+            return {
+              status: 'completed',
+              project: input.initialProject,
+              iterations: 1,
+              completedActionIds: [],
+              failedActionIds: [],
+              unresolvedActions: [],
+              events: []
+            };
+          }
+        }
+      );
+
+      const [first, second] = await Promise.all([
+        service.startOrReuseRun({ projectId: projectA.id }),
+        service.startOrReuseRun({ projectId: projectB.id })
+      ]);
+      await Promise.all([
+        waitForStatus(service, first.run.runId, ['completed', 'failed'], 400),
+        waitForStatus(service, second.run.runId, ['completed', 'failed'], 400)
+      ]);
+
+      const violations = await fs.readFile(path.join(tempRoot, 'events.log.violations'), 'utf8').catch(() => '');
+      expect(violations).toBe('');
+      expect(getFfmpegStats()).toMatchObject({ limit: 1, active: 0, queued: 0 });
+    } finally {
+      resetFfmpegLimiterForTests();
+      if (original === undefined) {
+        delete process.env.FFMPEG_MAX_CONCURRENCY;
+      } else {
+        process.env.FFMPEG_MAX_CONCURRENCY = original;
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 
   it('queues runs across projects when global concurrency is saturated', async () => {

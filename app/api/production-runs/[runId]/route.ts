@@ -15,7 +15,7 @@ export async function GET(_request: Request, context: RouteContext) {
     const identity = requireIdentity(_request);
     enforceThrottle(identity, 'run_status');
 
-    const run = headlessProductionRunService.getRun(runId);
+    const run = await headlessProductionRunService.getRunForRead(runId);
     await requireProjectAccess(_request, run.projectId);
     return NextResponse.json({ run }, { status: 200 });
   } catch (error) {

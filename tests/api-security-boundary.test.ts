@@ -5,6 +5,7 @@ import { GET as runStatusRoute } from '@/app/api/production-runs/[runId]/route';
 import { AccessControlError, clearThrottleStateForTests, enforceThrottle, requireProjectAccess } from '@/lib/security/access-control';
 import { createUserSessionCookie, SESSION_COOKIE_NAME } from '@/lib/security/auth';
 import { headlessProductionRunService } from '@/lib/production/run-service';
+import { MAX_FFMPEG_CONCURRENCY } from '@/lib/render/ffmpeg-limiter';
 import { projectStore } from '@/lib/storage/project-store';
 
 function withSession(subject: string): string {
@@ -110,6 +111,26 @@ describe('protected route behavior', () => {
     expect(response.status).toBe(202);
   });
 
+  it('rejects scene_render concurrency above the server maximum', async () => {
+    vi.spyOn(projectStore, 'getProject').mockImplementation(async (projectId: string) => ({ id: projectId, ownerId: 'user-a' } as never));
+    const start = vi.spyOn(headlessProductionRunService, 'startOrReuseRun');
+
+    const response = await startRunRoute(
+      new Request('http://localhost/api/projects/project-1/production-runs', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: withSession('user-a')
+        },
+        body: JSON.stringify({ mode: 'mock', limits: { scene_render: MAX_FFMPEG_CONCURRENCY + 1 } })
+      }),
+      { params: Promise.resolve({ id: 'project-1' }) }
+    );
+
+    expect(response.status).toBe(400);
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it('hides unauthorized project ownership on run start', async () => {
     vi.spyOn(projectStore, 'getProject').mockResolvedValue({ id: 'project-1', ownerId: 'user-b' } as never);
 
@@ -129,7 +150,7 @@ describe('protected route behavior', () => {
   });
 
   it('enforces run-status ownership via run project resolution', async () => {
-    vi.spyOn(headlessProductionRunService, 'getRun').mockReturnValue({
+    vi.spyOn(headlessProductionRunService, 'getRunForRead').mockResolvedValue({
       runId: 'run-1',
       projectId: 'project-2',
       status: 'running'

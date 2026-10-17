@@ -50,10 +50,10 @@ export async function GET(request: Request, context: RouteContext) {
     const identity = requireIdentity(request);
     enforceThrottle(identity, 'run_log');
 
-    const run = headlessProductionRunService.getRun(runId);
+    const run = await headlessProductionRunService.getRunForRead(runId);
     await requireProjectAccess(request, run.projectId);
 
-    const log = headlessProductionRunService.getRunLog(runId, {
+    const log = await headlessProductionRunService.getRunLogForRead(runId, {
       cursor,
       limit
     });
