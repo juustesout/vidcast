@@ -234,8 +234,14 @@ export function deriveCompositionArtifactStatus(project: Project, renderPlan: Re
 
     if (artifact.inputFingerprint?.version === 'p10.1') {
       const fingerprintScene = artifact.inputFingerprint.scenes.find((entry) => entry.sceneId === scene.id);
-      if (fingerprintScene && fingerprintScene.narrationSignature !== narrationFreshness.narrationSignature) {
-        reasons.push(`Scene ${scene.order} narration changed since the final composition was created.`);
+      if (fingerprintScene) {
+        if (fingerprintScene.narrationSignature !== narrationFreshness.narrationSignature) {
+          reasons.push(`Scene ${scene.order} narration changed since the final composition was created.`);
+        }
+        const currentRenderId = renderStatus.latestCompletedRender?.renderId;
+        if (currentRenderId && fingerprintScene.renderId !== currentRenderId) {
+          reasons.push(`Scene ${scene.order} was re-rendered since the final composition was created.`);
+        }
       }
     }
   }
