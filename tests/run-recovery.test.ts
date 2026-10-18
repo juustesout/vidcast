@@ -247,6 +247,86 @@ describe('reconcileInterruptedGenerations', () => {
     expect(result.suppressedActionIds).toEqual(['scene:scene-1:video_submit']);
   });
 
+  it('fails an unconfirmed real video submit even when an older asset exists, and suppresses resubmit', () => {
+    const assets = [{ id: 'asset-old', status: 'available' }] as unknown as Project['assets'];
+    const scene: Scene = {
+      ...imageScene(1, 'queued', 'asset-old'),
+      visual: {
+        kind: 'generated_video',
+        assetId: 'asset-old',
+        generation: generation({
+          id: 'gen-v',
+          kind: 'video',
+          status: 'queued',
+          providerStatus: 'submit_unresolved',
+          metadata: { submitUnresolved: true, idempotencyKey: 'gen-v' }
+        })
+      }
+    };
+
+    const result = reconcileInterruptedGenerations(project('p', [scene], assets), 'real');
+
+    expect(result.updatedProject?.scenes[0].visual).toMatchObject({
+      assetId: 'asset-old',
+      generation: {
+        status: 'failed',
+        providerStatus: 'submit_unresolved',
+        metadata: { submitUnresolved: true }
+      }
+    });
+    expect(result.suppressedActionIds).toEqual(['scene:scene-1:video_submit']);
+  });
+
+  it('treats an unflagged real video submit without a job id as unconfirmed even with an older asset', () => {
+    const assets = [{ id: 'asset-old', status: 'available' }] as unknown as Project['assets'];
+    const scene: Scene = {
+      ...imageScene(1, 'queued', 'asset-old'),
+      visual: {
+        kind: 'generated_video',
+        assetId: 'asset-old',
+        generation: generation({
+          id: 'gen-v',
+          kind: 'video',
+          status: 'queued',
+          providerStatus: 'queued',
+          metadata: { idempotencyKey: 'gen-v' }
+        })
+      }
+    };
+
+    const result = reconcileInterruptedGenerations(project('p', [scene], assets), 'real');
+
+    expect(result.updatedProject?.scenes[0].visual).toMatchObject({
+      assetId: 'asset-old',
+      generation: {
+        status: 'failed',
+        providerStatus: 'submit_unresolved',
+        errorCode: 'PROVIDER_FAILED'
+      }
+    });
+    expect(result.suppressedActionIds).toEqual(['scene:scene-1:video_submit']);
+  });
+
+  it('keeps the mock restore-from-asset behaviour for an unflagged video attempt', () => {
+    const assets = [{ id: 'asset-old', status: 'available' }] as unknown as Project['assets'];
+    const scene: Scene = {
+      ...imageScene(1, 'queued', 'asset-old'),
+      visual: {
+        kind: 'generated_video',
+        assetId: 'asset-old',
+        generation: generation({ id: 'gen-v', kind: 'video', status: 'queued' })
+      }
+    };
+
+    const result = reconcileInterruptedGenerations(project('p', [scene], assets), 'mock');
+
+    expect(result.updatedProject?.scenes[0].visual).toMatchObject({
+      assetId: 'asset-old',
+      generation: { status: 'generated' }
+    });
+    expect(result.suppressedActionIds).toEqual([]);
+  });
+
   it('does not suppress interrupted work in mock mode', () => {
     const result = reconcileInterruptedGenerations(project('p', [imageScene(1, 'generating')]), 'mock');
 

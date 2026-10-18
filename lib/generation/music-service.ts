@@ -1,7 +1,8 @@
 import { createMusicRegistry, type MusicRegistry } from '@/lib/ai/music/registry';
 import { DEFAULT_ELEVENLABS_MUSIC_MODEL } from '@/lib/ai/music/elevenlabs-provider';
 import { MusicProviderError } from '@/lib/ai/music/provider';
-import { clampMusicLengthMs } from '@/lib/render/music-mix';
+import { clampMusicLengthMs, resolveTimelineMusicLengthMs } from '@/lib/render/music-mix';
+import { resolveProjectTimelineDurationSeconds } from '@/lib/render/scene-resolver';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -164,7 +165,14 @@ export async function generateProjectMusic(
       throw new ProjectMusicGenerationError('A music prompt is required before generating background music.', 400, 'music.invalid');
     }
 
-    const musicLengthMs = clampMusicLengthMs(options.musicLengthMs ?? existingMusic.musicLengthMs);
+    // Explicit lengths (manual UI/MCP or a run plan) always win, and a previous
+    // length is preserved across regeneration. Only a request without any length
+    // derives from the authoritative render timeline.
+    const requestedLengthMs = options.musicLengthMs ?? existingMusic.musicLengthMs;
+    const musicLengthMs =
+      requestedLengthMs === undefined
+        ? resolveTimelineMusicLengthMs(resolveProjectTimelineDurationSeconds(project))
+        : clampMusicLengthMs(requestedLengthMs);
     const instrumental = options.instrumental ?? existingMusic.instrumental ?? true;
     const model = options.model ?? existingMusic.model ?? resolveDefaultModel();
     const seed = options.seed ?? existingMusic.seed;

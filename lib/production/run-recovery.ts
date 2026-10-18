@@ -63,6 +63,43 @@ export function reconcileInterruptedGenerations(project: Project, mode: RunMode)
             actionType: 'video_poll',
             message: `Resuming stored video generation job for scene ${scene.order}.`
           });
+        } else if (
+          visual.kind === 'generated_video' &&
+          (generation.metadata?.submitUnresolved === true || mode === 'real')
+        ) {
+          // The provider may have accepted (and billed) the submit before the
+          // response was lost. There is no job id to poll, so the attempt is
+          // never treated as resumable and is suppressed in real mode instead of
+          // being auto-resubmitted. A previous asset (if any) is left attached
+          // for rendering, but the unconfirmed generation is surfaced as failed.
+          // In real mode this also covers a hard crash during the submit itself,
+          // which never reached the catch handler that sets the metadata flag.
+          // A video render without an external submit is impossible, so an
+          // active video attempt without a job id is always unconfirmed.
+          sceneChanged = true;
+          notes.push({
+            sceneId: scene.id,
+            actionType,
+            message: `Unconfirmed video submit for scene ${scene.order} cannot be resumed; marked as failed without resubmitting.`
+          });
+          if (mode === 'real') {
+            suppressedActionIds.push(sceneActionId(actionType, scene.id));
+          }
+          nextScene = {
+            ...nextScene,
+            visual: {
+              ...visual,
+              assetId,
+              generation: {
+                ...generation,
+                status: 'failed' as const,
+                providerStatus: 'submit_unresolved',
+                error: 'The provider submit outcome could not be confirmed.',
+                errorMessage: 'The provider submit outcome could not be confirmed.',
+                errorCode: 'PROVIDER_FAILED' as const
+              }
+            }
+          };
         } else if (hasUsableAsset(project, assetId)) {
           sceneChanged = true;
           notes.push({

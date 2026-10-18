@@ -4,7 +4,8 @@ import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/gen
 import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
 import { selectSceneStockImage, StockImageSelectionError } from '@/lib/generation/stock-image-service';
 import { getFfmpegConcurrencyLimit } from '@/lib/render/ffmpeg-limiter';
-import { isMusicAsset, resolveSelectedMusicAsset } from '@/lib/render/music-mix';
+import { isMusicAsset, resolveSelectedMusicAsset, resolveTimelineMusicLengthMs } from '@/lib/render/music-mix';
+import { resolveProjectTimelineDurationSeconds } from '@/lib/render/scene-resolver';
 import { CompositionServiceError, videoCompositionService } from '@/lib/render/video-composition-service';
 import { SceneRenderError } from '@/lib/render/renderer';
 import { sceneRenderService } from '@/lib/render/scene-render-service';
@@ -1029,9 +1030,16 @@ export class HeadlessProductionRunService {
         return 'Background music selected from an existing asset.';
       }
 
+      // The final timeline (P32.1) is the only source for the requested track
+      // length. An explicit run-plan length still wins; otherwise a track is
+      // requested for the full timeline, clamped to provider bounds and looped
+      // by the compositor when the timeline is longer than the maximum.
+      const musicLengthMs =
+        plan.musicLengthMs ?? resolveTimelineMusicLengthMs(resolveProjectTimelineDurationSeconds(project));
+
       await this.dependencies.generateMusic(projectId, {
         prompt: plan.prompt,
-        musicLengthMs: plan.musicLengthMs,
+        musicLengthMs,
         instrumental: plan.instrumental,
         model: plan.model,
         seed: plan.seed,

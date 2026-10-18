@@ -54,6 +54,21 @@ function createProject(overrides: Partial<Project> = {}): Project {
 
 const noopRefresh = async (): Promise<Project | null> => null;
 
+function createScene(id: string, duration: number) {
+  return {
+    id,
+    order: Number(id.replace(/\D/g, '')) || 1,
+    duration,
+    type: 'blank' as const,
+    narration: { text: '' },
+    visual: { kind: 'blank' as const },
+    render: { motion: { preset: 'none' as const }, transition: { type: 'none' as const } },
+    overlay: { type: 'none' as const },
+    referenceIds: [],
+    notes: ''
+  };
+}
+
 describe('BackgroundMusicPanel', () => {
   it('renders the generate form when no music is selected', () => {
     const html = renderToStaticMarkup(React.createElement(BackgroundMusicPanel, { project: createProject(), onRefresh: noopRefresh }));
@@ -108,5 +123,14 @@ describe('BackgroundMusicPanel', () => {
 
     expect(html).toContain('Use an existing asset');
     expect(html).toContain('asset-audio.mp3');
+  });
+
+  it('defaults the duration input to the resolved video timeline', () => {
+    const project = createProject({ scenes: [createScene('scene-1', 4), createScene('scene-2', 6)] });
+
+    const html = renderToStaticMarkup(React.createElement(BackgroundMusicPanel, { project, onRefresh: noopRefresh }));
+
+    expect(html).toContain('placeholder="10"');
+    expect(html).toContain('match the video timeline');
   });
 });

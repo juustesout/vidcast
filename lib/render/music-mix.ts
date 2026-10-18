@@ -19,6 +19,21 @@ export function clampMusicLengthMs(value: unknown, fallback: number = DEFAULT_MU
   return Math.min(MAX_MUSIC_LENGTH_MS, Math.max(MIN_MUSIC_LENGTH_MS, rounded));
 }
 
+// Requested track length for a final timeline. Timelines longer than the
+// provider maximum are clamped: the compositor keeps `-stream_loop -1`, so the
+// track loops instead of being time-stretched. Empty timelines fall back to the
+// historical default rather than requesting a provider-minimum stub.
+export function resolveTimelineMusicLengthMs(
+  timelineSeconds: number,
+  fallbackMs: number = DEFAULT_MUSIC_LENGTH_MS
+): number {
+  const lengthMs = Math.round(timelineSeconds * 1000);
+  if (!Number.isFinite(lengthMs) || lengthMs <= 0) {
+    return clampMusicLengthMs(fallbackMs);
+  }
+  return clampMusicLengthMs(lengthMs);
+}
+
 export function isMusicAsset(asset: Asset | undefined): boolean {
   return Boolean(asset && (asset.type === 'music' || asset.type === 'audio'));
 }

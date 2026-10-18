@@ -61,6 +61,11 @@ export interface VideoGenerationDownload {
 export interface VideoGenerationProvider {
   readonly providerId: string;
   getCapabilities(): VideoGenerationCapabilities;
+  // Optional model-aware capabilities. Providers whose models expose different
+  // modes (for example a FAL text-to-video vs. image-to-video endpoint) implement
+  // this so the central resolver can reject an incompatible model/mode pair
+  // before building an external request.
+  getCapabilitiesForModel?(model?: string): VideoGenerationCapabilities;
   submit(request: VideoGenerationRequest): Promise<VideoGenerationSubmission>;
   getStatus(providerJobId: string): Promise<VideoGenerationStatusResult>;
   download(providerJobId: string): Promise<VideoGenerationDownload>;

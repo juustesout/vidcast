@@ -8,7 +8,8 @@ import {
   deriveMusicSignature,
   isMusicAsset,
   resolveMusicFade,
-  resolveSelectedMusicAsset
+  resolveSelectedMusicAsset,
+  resolveTimelineMusicLengthMs
 } from '@/lib/render/music-mix';
 import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
@@ -109,6 +110,15 @@ describe('music mix helpers', () => {
 
     expect(deriveMusicSignature(project)).not.toBe(deriveMusicSignature(replaced));
     expect(deriveMusicSignature(project)).toContain(`asset:${asset.id}`);
+  });
+
+  it('derives a provider-safe requested length from the timeline', () => {
+    expect(resolveTimelineMusicLengthMs(42.5)).toBe(42_500);
+    expect(resolveTimelineMusicLengthMs(1)).toBe(MIN_MUSIC_LENGTH_MS);
+    expect(resolveTimelineMusicLengthMs(900)).toBe(MAX_MUSIC_LENGTH_MS);
+    expect(resolveTimelineMusicLengthMs(0)).toBe(DEFAULT_MUSIC_LENGTH_MS);
+    expect(resolveTimelineMusicLengthMs(-10)).toBe(DEFAULT_MUSIC_LENGTH_MS);
+    expect(resolveTimelineMusicLengthMs(Number.NaN)).toBe(DEFAULT_MUSIC_LENGTH_MS);
   });
 
   it('produces deterministic, non-overlapping fades bounded by the duration', () => {

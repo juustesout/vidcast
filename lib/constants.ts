@@ -44,13 +44,10 @@ export const GENERATION_PROVIDERS: GenerationProvider[] = ['openai', 'gemini', '
 // GENERATION_PROVIDERS without `fal`. Existing providers/defaults are unchanged.
 export const VIDEO_GENERATION_PROVIDERS: GenerationProvider[] = ['openai', 'fal', 'local', 'other'];
 
-// Validated FAL video model endpoints offered as authoring suggestions. These
-// mirror the adapter defaults in lib/ai/video-generation/fal-provider.ts
-// (DEFAULT_FAL_VIDEO_ENDPOINT and the image-to-video variant) and are not new ids.
-export const FAL_VIDEO_MODEL_ENDPOINTS: string[] = [
-  'minimax/h3-max-turbo/text-to-video',
-  'minimax/h3-max-turbo/image-to-video'
-];
+// Validated FAL video model endpoints offered as authoring suggestions. The
+// catalog lives next to the video adapters so UI hints and server validation do
+// not drift apart. These are hints, not a new provider contract.
+export { FAL_VIDEO_MODEL_ENDPOINTS } from './ai/video-generation/models';
 
 export const GENERATION_STATUSES: GenerationStatus[] = ['planned', 'queued', 'generating', 'generated', 'failed', 'rejected'];
 
@@ -82,3 +79,9 @@ export const DEFAULT_RENDER_SETTINGS = {
 export const DEFAULT_PROJECT_TITLE = 'Untitled Explainer';
 export const DEFAULT_PROJECT_DESCRIPTION = 'A locally authored explainer video project.';
 export const DEFAULT_PROJECT_DURATION = 60;
+
+// Scene timing bounds used by the audio-aware timeline. The maximum matches the
+// largest accepted project duration target (600 s) and exists so a runaway TTS
+// result is surfaced as a validation error instead of an unbounded render.
+export const MIN_SCENE_DURATION_SECONDS = 0.1;
+export const MAX_SCENE_DURATION_SECONDS = 600;

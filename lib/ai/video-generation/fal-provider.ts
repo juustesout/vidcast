@@ -408,16 +408,23 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
   }
 
   getCapabilities(): VideoGenerationCapabilities {
-    const imageToVideo = isImageToVideoEndpoint(this.endpoint);
+    return this.getCapabilitiesForModel();
+  }
+
+  // The selected endpoint decides the supported generation mode. A per-request
+  // `model` override is resolved here too, so an incompatible model/mode pair is
+  // rejected before `submit` builds a request (or touches the network).
+  getCapabilitiesForModel(model?: string): VideoGenerationCapabilities {
+    const endpoint = resolveEndpoint(model?.trim() || this.endpoint);
+    const imageToVideo = isImageToVideoEndpoint(endpoint);
     return {
-      supportsTextToVideo: true,
-      // Reflects the configured default endpoint; a per-request `model` override
-      // is the authority at submit time (see `submit`).
+      supportsTextToVideo: !imageToVideo,
       supportsImageToVideo: imageToVideo,
       // Generic reference conditioning is not supported; image-to-video consumes
       // only the explicitly designated start/end keyframes.
       supportsReferences: false,
-      supportedAspectRatios: SUPPORTED_ASPECT_RATIOS,
+      // The i2v canvas follows the frame image, so aspect ratio is not an input.
+      supportedAspectRatios: imageToVideo ? undefined : SUPPORTED_ASPECT_RATIOS,
       supportsCancellation: true
     };
   }

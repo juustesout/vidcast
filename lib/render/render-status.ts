@@ -5,6 +5,7 @@ import { createSceneRenderFingerprint } from './render-fingerprint';
 import { audioMixesEqual, normalizeAudioMix } from './audio-mix';
 import { MUSIC_FADE_IN_SECONDS, MUSIC_FADE_OUT_SECONDS, deriveMusicSignature, resolveSelectedMusicAsset } from './music-mix';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
+import { sceneDurationMatches } from './scene-timing';
 
 export type SceneRenderLifecycleStatus = 'not_rendered' | 'rendering' | 'rendered' | 'render_failed' | 'stale';
 export type SceneRenderProblemSeverity = 'info' | 'warning' | 'blocking';
@@ -53,7 +54,18 @@ export function deriveSceneRenderStatus(project: Project, scene: Scene, renderPl
   const latest = latestRender(scene);
   const completed = latestCompletedRender(scene);
   const isRenderable = planScene?.status === 'renderable';
-  const isStale = Boolean(completed && currentFingerprint && completed.renderFingerprint && completed.renderFingerprint !== currentFingerprint);
+  // A legacy render may predate fingerprints. Duration is still a meaningful
+  // staleness signal, especially after audio-driven fitting extended a scene:
+  // composing that render would either cut narration or fail the timing guard.
+  const durationMismatch = Boolean(
+    completed &&
+    planScene &&
+    !sceneDurationMatches(completed.duration, planScene.duration, project.renderSettings.fps)
+  );
+  const isStale = Boolean(
+    completed &&
+    ((currentFingerprint && completed.renderFingerprint && completed.renderFingerprint !== currentFingerprint) || durationMismatch)
+  );
   const problems: SceneRenderStatus['problems'] = [];
 
   if (options.isRendering) {

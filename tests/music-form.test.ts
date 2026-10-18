@@ -4,6 +4,7 @@ import {
   describeMusicError,
   formatMusicSeconds,
   listMusicCandidateAssets,
+  resolveMusicDefaultDurationSeconds,
   resolveSelectedMusicAsset,
   validateMusicForm
 } from '@/lib/music/music-form';
@@ -57,6 +58,21 @@ function createProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
+function createScene(id: string, duration: number) {
+  return {
+    id,
+    order: Number(id.replace(/\D/g, '')) || 1,
+    duration,
+    type: 'blank' as const,
+    narration: { text: '' },
+    visual: { kind: 'blank' as const },
+    render: { motion: { preset: 'none' as const }, transition: { type: 'none' as const } },
+    overlay: { type: 'none' as const },
+    referenceIds: [],
+    notes: ''
+  };
+}
+
 describe('validateMusicForm', () => {
   it('requires a non-empty prompt', () => {
     const result = validateMusicForm({ prompt: '   ' });
@@ -93,6 +109,16 @@ describe('validateMusicForm', () => {
   it('ignores an out-of-range default duration and uses the built-in default', () => {
     const result = validateMusicForm({ prompt: 'calm' }, { defaultDurationSeconds: 9000 });
     expect(result.payload?.musicLengthMs).toBe(60000);
+  });
+});
+
+describe('resolveMusicDefaultDurationSeconds', () => {
+  it('uses the resolved timeline clamped to the UI bounds', () => {
+    expect(
+      resolveMusicDefaultDurationSeconds(createProject({ scenes: [createScene('scene-1', 4), createScene('scene-2', 6)] }))
+    ).toBe(10);
+    expect(resolveMusicDefaultDurationSeconds(createProject({ scenes: [createScene('scene-1', 900)] }))).toBe(600);
+    expect(resolveMusicDefaultDurationSeconds(createProject())).toBe(60);
   });
 });
 

@@ -47,7 +47,9 @@ describe('ProjectWorkspace image-to-video authoring', () => {
 
     expect(source).toContain('label="Model"');
     expect(source).toContain('selectedScene.visual.generation.model ?? ');
-    expect(source).toContain('FAL_VIDEO_MODEL_ENDPOINTS');
+    expect(source).toContain('resolveVideoModelAuthoringHints');
+    expect(source).toContain('videoModelHints.suggestions');
+    expect(source).not.toContain("generation.provider === 'fal'");
     expect(source).toContain('generation: { ...scene.visual.generation, model: trimmed ? trimmed : undefined }');
   });
 

@@ -24,7 +24,6 @@ export class FakeVideoGenerationProvider implements VideoGenerationProvider {
       supportsReferences: true,
       maxReferences: 8,
       supportedAspectRatios: ['16:9', '1:1', '9:16'],
-      supportedDurationsSeconds: [4, 5, 6, 8, 10],
       supportsCancellation: false
     };
   }

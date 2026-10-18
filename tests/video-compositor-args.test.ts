@@ -116,6 +116,23 @@ describe('video compositor args', () => {
     expect(joined).toContain('-c:v copy');
   });
 
+  it('loops a track shorter than the timeline and fades out at the timeline end', () => {
+    const shortMusicPlan: CompositionPlan = {
+      ...plan,
+      totalDuration: 30,
+      music: { path: '/tmp/music.wav', duration: 5 }
+    };
+
+    const args = buildMusicMixArgs('/tmp/concat.mp4', '/tmp/music.wav', '/tmp/final.mp4', shortMusicPlan);
+    const joined = args.join(' ');
+
+    expect(args).toContain('-stream_loop');
+    expect(joined).toContain('atrim=0:30.000');
+    expect(joined).toContain('afade=t=out:st=28.000:d=2.000');
+    expect(args).toContain('-t');
+    expect(args).toContain('30.000');
+  });
+
   it('applies the configured music volume and skips fades for very short outputs', () => {
     const shortPlan: CompositionPlan = {
       ...plan,

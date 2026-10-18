@@ -6,9 +6,9 @@ import { clearProjectMusicRequest, generateProjectMusicRequest, selectProjectMus
 import {
   formatMusicSeconds,
   listMusicCandidateAssets,
-  MUSIC_DEFAULT_DURATION_SECONDS,
   MUSIC_MAX_DURATION_SECONDS,
   MUSIC_MIN_DURATION_SECONDS,
+  resolveMusicDefaultDurationSeconds,
   resolveSelectedMusicAsset,
   validateMusicForm
 } from '@/lib/music/music-form';
@@ -28,6 +28,7 @@ export function BackgroundMusicPanel({ project, onRefresh }: BackgroundMusicPane
   const selectedAsset = resolveSelectedMusicAsset(project);
   const candidates = listMusicCandidateAssets(project);
   const existingSeconds = typeof music?.musicLengthMs === 'number' ? Math.round(music.musicLengthMs / 1000) : undefined;
+  const defaultSeconds = existingSeconds ?? resolveMusicDefaultDurationSeconds(project);
 
   const [prompt, setPrompt] = useState(music?.prompt ?? '');
   const [durationSeconds, setDurationSeconds] = useState<string>(existingSeconds ? String(existingSeconds) : '');
@@ -56,7 +57,7 @@ export function BackgroundMusicPanel({ project, onRefresh }: BackgroundMusicPane
   async function submitForm(regenerate: boolean): Promise<void> {
     const validation = validateMusicForm(
       { prompt, durationSeconds, instrumental },
-      { defaultDurationSeconds: existingSeconds ?? MUSIC_DEFAULT_DURATION_SECONDS }
+      { defaultDurationSeconds: defaultSeconds }
     );
 
     if (!validation.ok || !validation.payload) {
@@ -144,10 +145,10 @@ export function BackgroundMusicPanel({ project, onRefresh }: BackgroundMusicPane
                 step={1}
                 value={durationSeconds}
                 onChange={(event) => setDurationSeconds(event.target.value)}
-                placeholder={String(existingSeconds ?? MUSIC_DEFAULT_DURATION_SECONDS)}
+                placeholder={String(defaultSeconds)}
                 className="w-40 rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
               />
-              <span className="text-xs text-slate-500">{MUSIC_MIN_DURATION_SECONDS}-{MUSIC_MAX_DURATION_SECONDS} seconds. Leave empty for the default.</span>
+              <span className="text-xs text-slate-500">{MUSIC_MIN_DURATION_SECONDS}-{MUSIC_MAX_DURATION_SECONDS} seconds. Leave empty to match the video timeline.</span>
             </label>
 
             <label className="flex items-center gap-2 rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100">

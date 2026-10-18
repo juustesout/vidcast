@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { resolveCompositionPlan, CompositionServiceError } from '@/lib/render/video-composition-service';
+import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { Project } from '@/lib/types/render';
 
@@ -380,7 +381,7 @@ describe('composition plan resolver', () => {
     expect(plan.items[1].narrationAudioPath).toBeUndefined();
   });
 
-  it('fails when linked narration audio is longer than scene duration', async () => {
+  it('rejects a render made for the authored duration when narration extends the scene', async () => {
     const project = createProject('project-composition-plan-test');
     project.assets.push({
       id: 'audio-long',
@@ -438,7 +439,11 @@ describe('composition plan resolver', () => {
     await writeRenderFile(project.id, 'renders/scene-2.mp4');
     await writeAssetFile(project.id, 'assets/long.mp3');
 
-    await expect(resolveCompositionPlan(project, { type: 'none' })).rejects.toMatchObject({ code: 'INCOMPATIBLE_RENDER' });
+    const renderPlan = resolveRenderPlan(project);
+    const planScene = renderPlan.scenes.find((entry) => entry.sceneId === 'scene-1');
+    expect(planScene?.duration).toBeCloseTo(5.25, 5);
+
+    await expect(resolveCompositionPlan(project, { type: 'none' })).rejects.toThrow(/re-render the scene/);
   });
 
   it('leaves the plan without music when no track is selected', async () => {

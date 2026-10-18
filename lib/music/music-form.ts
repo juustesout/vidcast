@@ -1,5 +1,7 @@
 import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
+import { resolveTimelineMusicLengthMs } from '@/lib/render/music-mix';
+import { resolveProjectTimelineDurationSeconds } from '@/lib/render/scene-resolver';
 
 // Mirrors the ElevenLabs Music API bounds surfaced in the UI (in seconds).
 export const MUSIC_MIN_DURATION_SECONDS = 3;
@@ -125,4 +127,11 @@ export function formatMusicSeconds(value?: number): string {
     return 'Unknown';
   }
   return `${value.toFixed(2)}s`;
+}
+
+// Default length surfaced by the manual music form: the authoritative render
+// timeline, clamped to the provider/UI bounds. Returns the historical 60 s
+// default only when the project has no timeline (for example no scenes yet).
+export function resolveMusicDefaultDurationSeconds(project: Project): number {
+  return Math.round(resolveTimelineMusicLengthMs(resolveProjectTimelineDurationSeconds(project)) / 1000);
 }

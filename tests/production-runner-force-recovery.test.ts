@@ -153,7 +153,7 @@ function withCompletedRender(project: Project, sceneId: string): Project {
     width: 1920,
     height: 1080,
     fps: 30,
-    duration: 3,
+    duration: planScene?.duration ?? 3,
     filesize: 4096,
     mimeType: 'video/mp4',
     renderer: 'ffmpeg',

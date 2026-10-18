@@ -10,6 +10,7 @@ import { buildSceneFadeFilters, createStillSceneSvg, sceneMotionToZoomPan } from
 import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
 import type { RenderFit } from '@/lib/types/render';
 import { createSceneRenderFingerprint } from './render-fingerprint';
+import { sceneDurationMatches } from './scene-timing';
 import { getSceneRenderTimeoutMs } from './render-timeouts';
 import { buildSceneOverlayFilter } from './text-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
@@ -330,7 +331,7 @@ async function validateOutputFile(outputPath: string, expectedWidth: number, exp
   const formatDuration = parseDurationSeconds(probe.format?.duration);
   const streamDuration = parseDurationSeconds(videoStream.duration);
   const actualDuration = formatDuration ?? streamDuration;
-  if (typeof actualDuration !== 'number' || Math.abs(actualDuration - expectedDuration) > Math.max(0.25, 1 / Math.max(1, expectedFps))) {
+  if (typeof actualDuration !== 'number' || !sceneDurationMatches(actualDuration, expectedDuration, expectedFps)) {
     throw new SceneRenderError('Rendered output duration is invalid.', 'OUTPUT_INVALID');
   }
 

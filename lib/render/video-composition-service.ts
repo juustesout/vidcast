@@ -20,6 +20,7 @@ import { COMPOSER_VERSION, LocalFFmpegVideoCompositor, VideoCompositionError } f
 import { sceneRenderService } from './scene-render-service';
 import { deriveCompositionReadiness } from './render-status';
 import { resolveRenderPlan } from './scene-resolver';
+import { resolveMeasuredNarrationDuration, sceneDurationMatches } from './scene-timing';
 
 const activeCompositionLocks = new Set<string>();
 
@@ -103,7 +104,7 @@ function resolveLatestCompletedRender(scene: Project['scenes'][number]) {
   return render;
 }
 
-async function resolveNarrationAudioPath(project: Project, scene: Project['scenes'][number]): Promise<{ path: string; duration?: number } | undefined> {
+async function resolveNarrationAudioPath(project: Project, scene: Project['scenes'][number], effectiveSceneDuration: number): Promise<{ path: string; duration?: number } | undefined> {
   const narration = scene.narration;
   if (!narration?.audioAssetId) {
     return undefined;
@@ -119,14 +120,18 @@ async function resolveNarrationAudioPath(project: Project, scene: Project['scene
     throw new CompositionServiceError(`Scene ${scene.id} narration asset is not a valid local audio source.`, 'INCOMPATIBLE_RENDER');
   }
 
-  if (typeof asset.duration === 'number' && asset.duration > scene.duration + 0.01) {
-    throw new CompositionServiceError(`Scene ${scene.id} narration duration exceeds scene duration.`, 'INCOMPATIBLE_RENDER');
+  // Use the same measured duration as the render plan instead of the raw asset
+  // metadata. The plan already guarantees this value fits; a second source of
+  // truth could only disagree with the timeline or cut speech.
+  const measuredDuration = resolveMeasuredNarrationDuration(narration, project.assets);
+  if (measuredDuration !== undefined && measuredDuration > effectiveSceneDuration + 0.01) {
+    throw new CompositionServiceError(`Scene ${scene.id} narration duration exceeds its resolved scene duration.`, 'INCOMPATIBLE_RENDER');
   }
 
   const relativePath = asRelativeProjectPath(asset.localPath);
   return {
     path: await assertAssetFile(project, relativePath),
-    duration: asset.duration
+    duration: measuredDuration
   };
 }
 
@@ -165,18 +170,47 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
     throw new CompositionServiceError('Project has no scenes to compose.', 'SCENE_MISSING');
   }
 
+  // Use the exact same resolved timing as production planning and scene
+  // rendering. A completed render created against a different scene duration is
+  // stale and must be re-rendered instead of being composed silently.
+  const renderPlan = resolveRenderPlan(project);
   const items: CompositionPlan['items'] = [];
 
   for (const scene of orderedScenes) {
     const render = resolveLatestCompletedRender(scene);
     const relativeOutputPath = asRelativeProjectPath(render.outputPath);
     const absolutePath = await assertRenderFile(project, relativeOutputPath);
+    const planScene = renderPlan.scenes.find((entry) => entry.sceneId === scene.id);
+
+    if (!planScene) {
+      throw new CompositionServiceError(`Scene ${scene.id} is missing from the resolved render plan.`, 'INCOMPATIBLE_RENDER');
+    }
+
+    if (planScene.timing?.exceedsMax) {
+      throw new CompositionServiceError(
+        `Scene ${scene.id} narration requires more than the maximum scene duration.`,
+        'INCOMPATIBLE_RENDER'
+      );
+    }
 
     if (render.width !== project.renderSettings.width || render.height !== project.renderSettings.height) {
       throw new CompositionServiceError(`Scene ${scene.id} render dimensions are incompatible with project settings.`, 'INCOMPATIBLE_RENDER');
     }
 
-    const narrationAudio = await resolveNarrationAudioPath(project, scene);
+    if (!sceneDurationMatches(render.duration, planScene.duration, project.renderSettings.fps)) {
+      throw new CompositionServiceError(
+        `Scene ${scene.id} render duration (${render.duration}s) does not match the resolved scene timing (${planScene.duration.toFixed(2)}s); re-render the scene.`,
+        'INCOMPATIBLE_RENDER'
+      );
+    }
+
+    const narrationAudio = await resolveNarrationAudioPath(project, scene, planScene.duration);
+    if (narrationAudio?.duration && narrationAudio.duration > render.duration + 0.01) {
+      throw new CompositionServiceError(
+        `Scene ${scene.id} render (${render.duration}s) is shorter than its narration (${narrationAudio.duration}s); re-render the scene.`,
+        'INCOMPATIBLE_RENDER'
+      );
+    }
 
     items.push({
       sceneId: scene.id,

@@ -222,19 +222,24 @@ describe('narration generation service', () => {
     expect(deps.state.project.assets.length).toBe(1);
   });
 
-  it('fails with controlled validation error when narration is longer than scene', async () => {
+  it('accepts narration longer than the authored scene duration', async () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project, { durationSeconds: 3.1 });
 
-    await expect(generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
+    const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
       store: deps.store,
       media: deps.media,
       registry: deps.registry as never
-    })).rejects.toMatchObject({ code: 'narration.invalid' });
+    });
+
+    expect(result.status).toBe('generated');
+    expect(result.duration).toBe(3.1);
 
     const scene = deps.state.project.scenes[0];
-    expect(scene.narration?.audioAssetId).toBe('asset-old-audio');
-    expect(scene.narration?.status).toBe('failed');
-    expect(deps.state.project.assets.length).toBe(1);
+    expect(scene.narration?.audioAssetId).toBe(result.assetId);
+    expect(scene.narration?.status).toBe('generated');
+    expect(scene.narration?.duration).toBe(3.1);
+    expect(scene.duration).toBe(2);
+    expect(deps.state.project.assets.length).toBe(2);
   });
 });

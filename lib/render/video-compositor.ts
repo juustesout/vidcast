@@ -8,6 +8,7 @@ import { getFinalComposeTimeoutMs } from './render-timeouts';
 import { formatVolumeFilter } from './audio-mix';
 import { resolveMusicFade } from './music-mix';
 import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
+import { sceneDurationMatches } from './scene-timing';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p8';
@@ -265,7 +266,7 @@ async function validateOutput(outputPath: string, plan: CompositionPlan, runtime
   }
 
   const duration = parseDurationSeconds(probe.format?.duration) ?? parseDurationSeconds(videoStream.duration);
-  if (typeof duration !== 'number' || Math.abs(duration - plan.totalDuration) > Math.max(0.35, 1 / Math.max(1, plan.fps))) {
+  if (typeof duration !== 'number' || !sceneDurationMatches(duration, plan.totalDuration, plan.fps)) {
     throw new VideoCompositionError('Composed output duration is invalid.', 'OUTPUT_INVALID');
   }
 

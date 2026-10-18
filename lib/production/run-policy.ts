@@ -1,5 +1,10 @@
 import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
+import {
+  isRealVideoProviderKey,
+  normalizeVideoProviderKey,
+  videoProviderCredentialEnvVar
+} from '@/lib/ai/video-generation/catalog';
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
 import { deriveProductionPlan } from './production-planner';
 import type {
@@ -124,13 +129,7 @@ function parseImageProvider(value: string | undefined): ImageRunProvider | undef
 }
 
 function parseVideoProvider(value: string | undefined): VideoRunProvider | undefined {
-  if (!value) {
-    return undefined;
-  }
-  if (value === 'local' || value === 'openai' || value === 'fal') {
-    return value;
-  }
-  return undefined;
+  return normalizeVideoProviderKey(value);
 }
 
 function parseNarrationProvider(value: string | undefined): NarrationRunProvider | undefined {
@@ -154,7 +153,7 @@ function parseMusicProvider(value: string | undefined): MusicRunProvider | undef
 }
 
 function isRealProvider(provider: string): boolean {
-  return provider === 'openai' || provider === 'elevenlabs' || provider === 'fal';
+  return provider === 'elevenlabs' || isRealVideoProviderKey(provider);
 }
 
 // Validates and normalizes the explicit run music opt-in. A malformed opt-in is
@@ -303,12 +302,12 @@ function resolveVideoPollProviderFromScene(scene: Scene): string | null {
     return null;
   }
 
-  const value = scene.visual.generation.provider;
+  // Provider identity is opaque here. The central video resolver validates it;
+  // this function only extracts the persisted attempt's locked provider so the
+  // run cannot switch providers mid-job.
+  const value = scene.visual.generation.provider?.trim();
   if (!value || value === 'other') {
     return null;
-  }
-  if (value === 'openai' || value === 'local') {
-    return value;
   }
   return value;
 }
@@ -362,12 +361,11 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
       requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
     }
 
-    if (needsVideoGeneration && policy.providers.video === 'openai') {
-      requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
-    }
-
-    if (needsVideoGeneration && policy.providers.video === 'fal') {
-      requireEnvVar('FAL_KEY', 'Real FAL video generation requires FAL_KEY.');
+    if (needsVideoGeneration) {
+      const envVar = videoProviderCredentialEnvVar(policy.providers.video);
+      if (envVar) {
+        requireEnvVar(envVar, `Real ${policy.providers.video} video generation requires ${envVar}.`);
+      }
     }
 
     if (needsNarrationGeneration && policy.providers.narration === 'elevenlabs') {
@@ -477,14 +475,9 @@ function normalizeRequestedProvider(
       return 'fake';
     }
   } else if (kind === 'video') {
-    if (value === 'openai') {
-      return 'openai';
-    }
-    if (value === 'fal') {
-      return 'fal';
-    }
-    if (value === 'local' || value === 'fake') {
-      return 'local';
+    const videoProvider = normalizeVideoProviderKey(value);
+    if (videoProvider) {
+      return videoProvider;
     }
   } else if (kind === 'music') {
     if (value === 'elevenlabs') {
@@ -513,12 +506,15 @@ function assertRealProviderCredentials(kind: GenerationModality, provider: strin
     requireEnvVar('ELEVENLABS_API_KEY', `Real ${kind} generation requires ELEVENLABS_API_KEY.`);
   }
 
-  if ((kind === 'image' || kind === 'video') && provider === 'openai') {
+  if (kind === 'image' && provider === 'openai') {
     requireEnvVar('OPENAI_API_KEY', 'Real visual generation requires OPENAI_API_KEY.');
   }
 
-  if (kind === 'video' && provider === 'fal') {
-    requireEnvVar('FAL_KEY', 'Real FAL video generation requires FAL_KEY.');
+  if (kind === 'video') {
+    const envVar = videoProviderCredentialEnvVar(provider);
+    if (envVar) {
+      requireEnvVar(envVar, `Real video generation requires ${envVar}.`);
+    }
   }
 }
 

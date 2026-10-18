@@ -9,6 +9,8 @@ import { createFFmpegRuntime } from '@/lib/render/ffmpeg-runtime';
 import { runProcess } from '@/lib/render/ffmpeg-executor';
 import { parseDurationSeconds, probeMedia } from '@/lib/render/ffprobe';
 import { resolveTextOverlay } from '@/lib/render/overlay-resolve';
+import { resolveRenderPlan, resolveRenderPlanDurationSeconds } from '@/lib/render/scene-resolver';
+import { sceneDurationMatches } from '@/lib/render/scene-timing';
 import { runProductionBatch } from '@/lib/production/production-runner';
 import { HeadlessProductionRunService, type RunServiceConfig } from '@/lib/production/run-service';
 import { projectStore } from '@/lib/storage/project-store';
@@ -570,6 +572,187 @@ describe('production run end-to-end (integration)', () => {
       expect(duration).toBeGreaterThan(0);
 
       await decodeWithoutErrors(runtime.ffmpegPath, compositionPath);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  }, 180000);
+
+  it('runs an integrated mock production with narration-driven timing, timeline music and render reuse', async () => {
+    if (!(await ffmpegAvailable())) {
+      return;
+    }
+
+    const runtime = createFFmpegRuntime();
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'production-run-e2e-integrated-'));
+
+    try {
+      const created = await projectStore.createProject({ title: 'P32.4 integrated mock production', durationTarget: 12, fps: FPS });
+      createdProjectIds.push(created.id);
+      const templateScene = created.scenes[0];
+      const musicPolicy = { mode: 'mock' as const, music: { generate: true, prompt: 'calm ambient background' } };
+
+      // 15 words / 2.5 words per second in the deterministic fake TTS = 6.0 s of
+      // narration in a 2 s authored scene, so the timeline must extend it.
+      const longNarration = 'This narration is deliberately written to be much longer than the authored scene duration itself.';
+
+      const sceneOne = generatedImageScene(
+        templateScene,
+        {
+          id: 'scene-integrated-1',
+          order: 1,
+          duration: 2,
+          narration: { text: longNarration }
+        },
+        'Deterministic background for the narration-extended scene.'
+      );
+      const sceneTwo = generatedVideoScene(
+        templateScene,
+        {
+          id: 'scene-integrated-2',
+          order: 2,
+          duration: 3,
+          narration: { text: 'Short second beat.' }
+        },
+        'Deterministic mock motion clip for the integrated run.'
+      );
+      const sceneThree = generatedImageScene(
+        templateScene,
+        {
+          id: 'scene-integrated-3',
+          order: 3,
+          duration: 3,
+          narration: { text: 'Short third beat.' }
+        },
+        'Deterministic background for the closing scene.'
+      );
+
+      const project: Project = {
+        ...created,
+        aspectRatio: '16:9',
+        fps: FPS,
+        scenes: [sceneOne, sceneTwo, sceneThree],
+        assets: [],
+        references: [],
+        compositions: [],
+        renderSettings: {
+          ...created.renderSettings,
+          aspectRatio: '16:9',
+          fps: FPS,
+          width: WIDTH,
+          height: HEIGHT
+        }
+      };
+      await projectStore.updateProject(project);
+
+      const service = new HeadlessProductionRunService(buildRunConfig(), {
+        runBatch: async (input) => runProductionBatch(input)
+      });
+
+      const { run } = await service.startOrReuseRun({ projectId: created.id, policy: musicPolicy });
+      const final = await waitForTerminal(service, run.runId);
+
+      expect(final.status).toBe('completed');
+      expect(final.failedActionIds).toEqual([]);
+      expect(final.summary.failed).toBe(0);
+
+      const log = service.getRunLog(run.runId, { limit: 250 });
+      expect(
+        log.items
+          .map((item) => item.event)
+          .filter((event) => event.code === 'action_failed' || event.code === 'run_failed' || event.code === 'composition_failed')
+      ).toEqual([]);
+
+      const persisted = await projectStore.getProject(created.id);
+      expect(persisted).not.toBeNull();
+      const firstRunProject = persisted as Project;
+
+      // 1. The render plan is the single timeline: narration extended scene 1,
+      //    the other scenes keep their authored durations.
+      const plan = resolveRenderPlan(firstRunProject);
+      const timeline = resolveRenderPlanDurationSeconds(plan);
+      expect(timeline).toBeCloseTo(12.25, 2);
+
+      const planOne = plan.scenes.find((scene) => scene.sceneId === 'scene-integrated-1');
+      const planTwo = plan.scenes.find((scene) => scene.sceneId === 'scene-integrated-2');
+      const planThree = plan.scenes.find((scene) => scene.sceneId === 'scene-integrated-3');
+      expect(planOne?.timing?.narrationDuration).toBeCloseTo(6, 2);
+      expect(planOne?.duration).toBeCloseTo(6.25, 2);
+      expect(planOne?.timing?.adjusted).toBe(true);
+      expect(planTwo?.duration).toBeCloseTo(3, 2);
+      expect(planThree?.duration).toBeCloseTo(3, 2);
+
+      const completedRendersByScene = new Map<string, string[]>();
+      for (const scene of firstRunProject.scenes) {
+        expect(scene.narration?.status).toBe('generated');
+        expect(scene.narration?.audioAssetId).toBeTruthy();
+
+        const completed = (scene.renders ?? []).filter((render) => render.status === 'completed');
+        expect(completed).toHaveLength(1);
+        completedRendersByScene.set(scene.id, completed.map((render) => render.renderId));
+
+        const planScene = plan.scenes.find((entry) => entry.sceneId === scene.id);
+        expect(planScene).toBeDefined();
+        expect(sceneDurationMatches(completed[0].duration, planScene!.duration, FPS)).toBe(true);
+
+        const renderPath = path.join(getProjectRoot(created.id), completed[0].outputPath);
+        expect((await fs.stat(renderPath)).size).toBeGreaterThan(0);
+      }
+
+      const firstRender = firstRunProject.scenes[0].renders?.find((render) => render.status === 'completed');
+      expect(firstRender?.duration).toBeGreaterThan(6);
+
+      // 2. Background music was requested for the authoritative timeline (not
+      //    the historical 60 s default) and spans the whole video.
+      const musicAsset = firstRunProject.assets.find((asset) => asset.id === firstRunProject.music?.assetId);
+      expect(firstRunProject.music?.status).toBe('generated');
+      expect(firstRunProject.music?.musicLengthMs).toBe(Math.round(timeline * 1000));
+      expect(musicAsset?.duration).toBeCloseTo(timeline, 1);
+
+      // 3. The final composition covers every scene, records the music, and is a
+      //    decodable H.264/AAC MP4 of the same timeline.
+      const compositions = firstRunProject.compositions ?? [];
+      expect(compositions).toHaveLength(1);
+      const composition = compositions[0];
+      expect(composition.inputFingerprint?.music?.assetId).toBe(musicAsset?.id);
+      expect(composition.duration).toBeGreaterThan(timeline - 0.3);
+      expect(composition.duration).toBeLessThan(timeline + 0.3);
+
+      const compositionPath = path.join(getProjectRoot(created.id), composition.outputPath);
+      const probe = await probeMedia(compositionPath, runtime);
+      const video = probe.streams.find((stream) => stream.codec_type === 'video');
+      const audio = probe.streams.find((stream) => stream.codec_type === 'audio');
+      expect(video?.codec_name).toBe('h264');
+      expect(video?.width).toBe(WIDTH);
+      expect(video?.height).toBe(HEIGHT);
+      expect(audio?.codec_name).toBe('aac');
+      const probedDuration = parseDurationSeconds(probe.format?.duration);
+      expect(probedDuration).toBeGreaterThan(timeline - 0.3);
+      expect(probedDuration).toBeLessThan(timeline + 0.3);
+
+      await decodeWithoutErrors(runtime.ffmpegPath, compositionPath);
+
+      // 4. A second run reuses the existing renders and final composition
+      //    instead of rendering or composing again.
+      const { run: secondRun } = await service.startOrReuseRun({ projectId: created.id, policy: musicPolicy });
+      const secondFinal = await waitForTerminal(service, secondRun.runId);
+      expect(secondFinal.status).toBe('completed');
+      expect(secondFinal.failedActionIds).toEqual([]);
+
+      const secondEvents = service.getRunLog(secondRun.runId, { limit: 250 }).items.map((item) => item.event);
+      expect(
+        secondEvents.filter((event) =>
+          event.code === 'action_completed' ||
+          event.code === 'video_poll_completed' ||
+          event.code === 'composition_completed'
+        )
+      ).toEqual([]);
+
+      const secondProject = (await projectStore.getProject(created.id)) as Project;
+      for (const scene of secondProject.scenes) {
+        const completed = (scene.renders ?? []).filter((render) => render.status === 'completed');
+        expect(completed.map((render) => render.renderId)).toEqual(completedRendersByScene.get(scene.id));
+      }
+      expect(secondProject.compositions).toHaveLength(1);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }

@@ -1,5 +1,6 @@
-import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, MAX_SCENE_DURATION_SECONDS, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
+import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from '@/lib/render/scene-timing';
 import type { ExplainerSpec } from '@/lib/types/explainer';
 import type { Project } from '@/lib/types/render';
 import type { RenderIssue, RenderValidationResult } from '@/lib/types/render';
@@ -291,8 +292,20 @@ export function validateProject(project: Project): RenderValidationResult {
           pushIssue(errors, 'error', 'scene.narration.asset.invalidType', `scenes.${scene.id}.narration.audioAssetId`, `Narration asset ${audioAsset.id} is not an audio asset.`);
         }
 
-        if (typeof audioAsset.duration === 'number' && audioAsset.duration > scene.duration + 0.01) {
-          pushIssue(warnings, 'warning', 'scene.narration.duration.tooLong', `scenes.${scene.id}.narration.audioAssetId`, `Narration audio (${audioAsset.duration.toFixed(2)}s) is longer than scene duration (${scene.duration.toFixed(2)}s).`);
+        if (typeof audioAsset.duration === 'number' && audioAsset.duration > 0) {
+          const timing = resolveSceneTiming({
+            duration: scene.duration,
+            narrationDuration: resolveMeasuredNarrationDuration(scene.narration, project.assets)
+          });
+          if (timing.exceedsMax) {
+            pushIssue(
+              errors,
+              'error',
+              'scene.narration.duration.exceedsMax',
+              `scenes.${scene.id}.narration.audioAssetId`,
+              `Narration requires ${timing.effectiveDuration.toFixed(2)}s (${formatSceneTiming(timing)}), which exceeds the ${MAX_SCENE_DURATION_SECONDS}s scene limit.`
+            );
+          }
         }
       }
     }

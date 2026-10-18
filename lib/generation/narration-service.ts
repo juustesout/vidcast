@@ -4,6 +4,7 @@ import { createTextToSpeechRegistry } from '@/lib/ai/text-to-speech/registry';
 import { TextToSpeechProviderError, type TextToSpeechFormat } from '@/lib/ai/text-to-speech/provider';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
+import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
@@ -245,7 +246,11 @@ export async function generateSceneNarration(
         voiceId,
         model,
         format,
-        maxDurationSeconds: scene.duration,
+        // The scene duration is a creative minimum, not a speech budget. Using
+        // it here would silently truncate narration (the fake provider clamps,
+        // and other providers may too). The global bound still protects against
+        // runaway output; the timeline fits the scene afterwards.
+        maxDurationSeconds: MAX_SCENE_DURATION_SECONDS,
         settings: options.settings
       });
     } catch (error) {
@@ -315,36 +320,6 @@ export async function generateSceneNarration(
     }
 
     const outputFormat = integrity.format;
-
-    if (integrity.duration > scene.duration + 0.01) {
-      const message = `Narration duration (${integrity.duration.toFixed(2)}s) exceeds scene duration (${scene.duration.toFixed(2)}s).`;
-      const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
-        ...entry,
-        narration: {
-          ...(entry.narration ?? { text }),
-          text,
-          voiceId,
-          model,
-          format,
-          audioAssetId: previousAudioAssetId,
-          duration: previousDuration,
-          status: 'failed',
-          lastAttemptId: attemptId,
-          error: message,
-          attempts: (entry.narration?.attempts ?? []).map((attempt) => attempt.id === attemptId ? {
-            ...attempt,
-            status: 'failed',
-            completedAt: nowIso(),
-            error: message,
-            providerRequestId: synthesized.providerRequestId,
-            duration: integrity.duration,
-            mimeType: integrity.mimeType
-          } : attempt)
-        }
-      }));
-      await dependencies.store.mutateProject(projectId, failed);
-      throw new SceneNarrationGenerationError(message, 422, 'narration.invalid');
-    }
 
     const generatedAsset = await dependencies.media.saveGeneratedAudio({
       projectId,

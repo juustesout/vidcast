@@ -58,6 +58,21 @@ function createAsset(id: string, type: Asset['type'] = 'music'): Asset {
   };
 }
 
+function createScene(id: string, duration: number) {
+  return {
+    id,
+    order: Number(id.replace(/\D/g, '')) || 1,
+    duration,
+    type: 'blank' as const,
+    narration: { text: '' },
+    visual: { kind: 'blank' as const },
+    render: { motion: { preset: 'none' as const }, transition: { type: 'none' as const } },
+    overlay: { type: 'none' as const },
+    referenceIds: [],
+    notes: ''
+  };
+}
+
 function createDependencies(
   project: Project,
   behavior: { fail?: boolean; providerError?: MusicProviderError; failFinalUpdate?: boolean } = {}
@@ -171,6 +186,83 @@ describe('project music generation service', () => {
       registry: deps.registry as never
     });
     expect(result.musicLengthMs).toBe(3000);
+  });
+
+  it('derives the requested length from the resolved render timeline when none is given', async () => {
+    const project = createProject({ scenes: [createScene('scene-1', 4), createScene('scene-2', 6)] });
+    const deps = createDependencies(project);
+
+    const result = await generateProjectMusic('project-1', { prompt: 'timeline' }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(deps.generatedRequests[0]?.durationMs).toBe(10_000);
+    expect(result.musicLengthMs).toBe(10_000);
+  });
+
+  it('uses the timeline resolved from measured narration when it extends a scene', async () => {
+    const narrationAsset = createAsset('audio-1', 'audio');
+    narrationAsset.duration = 3.1;
+    const scene = {
+      ...createScene('scene-1', 2),
+      narration: { text: 'measured', audioAssetId: narrationAsset.id, status: 'generated' as const, duration: 3.1 }
+    };
+    const project = createProject({ assets: [narrationAsset], scenes: [scene, createScene('scene-2', 4)] });
+    const deps = createDependencies(project);
+
+    const result = await generateProjectMusic('project-1', { prompt: 'timeline' }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(result.musicLengthMs).toBe(7350);
+  });
+
+  it('lets an explicit length win over the timeline', async () => {
+    const project = createProject({ scenes: [createScene('scene-1', 10)] });
+    const deps = createDependencies(project);
+
+    const result = await generateProjectMusic('project-1', { prompt: 'explicit', musicLengthMs: 30_000 }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(result.musicLengthMs).toBe(30_000);
+  });
+
+  it('clamps a timeline above the provider maximum so the compositor can loop it', async () => {
+    const project = createProject({ scenes: [createScene('scene-1', 600), createScene('scene-2', 600)] });
+    const deps = createDependencies(project);
+
+    const result = await generateProjectMusic('project-1', { prompt: 'long' }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(result.musicLengthMs).toBe(600_000);
+  });
+
+  it('preserves a previously requested length on regeneration', async () => {
+    const existing = createAsset('asset-existing');
+    const project = createProject({
+      assets: [existing],
+      scenes: [createScene('scene-1', 10)],
+      music: { assetId: existing.id, status: 'generated', prompt: 'old', musicLengthMs: 45_000 }
+    });
+    const deps = createDependencies(project);
+
+    const result = await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(result.musicLengthMs).toBe(45_000);
   });
 
   it('refuses to overwrite existing generated music without regenerate', async () => {

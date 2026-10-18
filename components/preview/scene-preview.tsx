@@ -110,6 +110,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
   const renderStatus = deriveSceneRenderStatus(project, scene, renderPlan, { isRendering });
   const renderedScene = renderStatus.latestCompletedRender;
   const renderedUrl = renderedScene ? `/api/projects/${project.id}/renders/${renderedScene.renderId}/file` : undefined;
+  const effectiveDuration = resolvedScene?.duration ?? scene.duration;
 
   const narrationAudioAsset = scene.narration?.audioAssetId ? project.assets.find((entry) => entry.id === scene.narration?.audioAssetId) : undefined;
   const narrationAudioUrl = narrationAudioAsset ? joinProjectAssetUrl(project.id, narrationAudioAsset.id) : undefined;
@@ -132,7 +133,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
       React.createElement(Chip, null, scene.type),
       React.createElement(Chip, null, scene.render.motion.preset),
       React.createElement(Chip, null, scene.render.transition.type),
-      React.createElement(Chip, null, `${scene.duration.toFixed(1)} sec`),
+      React.createElement(Chip, null, `${effectiveDuration.toFixed(1)} sec`),
       React.createElement(Chip, null, resolvedScene?.status ?? 'unknown'),
       React.createElement(Chip, null, formatRenderStatusLabel(renderStatus.status))
     )
@@ -144,7 +145,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
   // approximate (see the preview notes rendered at the bottom of the panel).
   const resolvedOverlay = resolvedScene?.source.kind === 'text'
     ? null
-    : resolveTextOverlay(scene.overlay, { width: renderPlan.width, height: renderPlan.height, duration: scene.duration });
+    : resolveTextOverlay(scene.overlay, { width: renderPlan.width, height: renderPlan.height, duration: effectiveDuration });
 
   const overlayPositionClass =
     resolvedOverlay?.position === 'top' ? 'items-start' : resolvedOverlay?.position === 'center' ? 'items-center' : 'items-end';

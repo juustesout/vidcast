@@ -1,13 +1,15 @@
 import path from 'node:path';
 
+import { isRealVideoProviderKey, toGenerationProvider } from '@/lib/ai/video-generation/catalog';
 import { createVideoGenerationRegistry } from '@/lib/ai/video-generation/registry';
 import { VideoGenerationProviderError, type VideoReferenceInput } from '@/lib/ai/video-generation/provider';
+import { resolveVideoGeneration, resolveVideoGenerationProviderForAttempt } from '@/lib/ai/video-generation/resolver';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
-import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
-import type { GenerationAttempt, GenerationErrorCode, GenerationProvider, GenerationRecord, GenerationStatus } from '@/lib/types/generation';
+import type { GenerationAttempt, GenerationErrorCode, GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { Scene } from '@/lib/types/scene';
@@ -26,25 +28,6 @@ function attemptLockKey(projectId: string, attemptId: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function normalizeProviderNameForGeneration(providerId: string): GenerationProvider {
-  if (providerId === 'openai') {
-    return 'openai';
-  }
-  if (providerId === 'gemini') {
-    return 'gemini';
-  }
-  if (providerId === 'fal') {
-    return 'fal';
-  }
-  if (providerId === 'fake') {
-    return 'local';
-  }
-  if (providerId === 'local') {
-    return 'local';
-  }
-  return 'other';
 }
 
 export class SceneVideoGenerationError extends Error {
@@ -148,12 +131,23 @@ function mapRunPolicyError(error: RunPolicyError): SceneVideoGenerationError {
   return new SceneVideoGenerationError(error.message, error.status, codeByPolicyCode[error.code]);
 }
 
-function resolveVideoProvider(requestedProvider: string | undefined, mode: RunMode | undefined): string {
+function mapProviderError(error: VideoGenerationProviderError): SceneVideoGenerationError {
+  return new SceneVideoGenerationError(error.message, error.status, error.code);
+}
+
+function resolveAttemptProvider(
+  attemptProvider: string | undefined,
+  mode: RunMode | undefined,
+  dependencies: VideoGenerationServiceDependencies
+) {
   try {
-    return resolveManualGenerationProvider('video', requestedProvider, { mode }).provider;
+    return resolveVideoGenerationProviderForAttempt(attemptProvider, { mode }, { registry: dependencies.registry });
   } catch (error) {
     if (error instanceof RunPolicyError) {
       throw mapRunPolicyError(error);
+    }
+    if (error instanceof VideoGenerationProviderError) {
+      throw mapProviderError(error);
     }
     throw error;
   }
@@ -312,6 +306,42 @@ export function classifyStatusPollError(error: unknown): 'transient' | 'terminal
 const TRANSIENT_POLL_MESSAGE =
   'Provider status could not be confirmed; the job may still be running. The same job will be re-polled during recovery (no new submission is started).';
 
+// A submit error is only definitive when the provider clearly did not accept the
+// request. Transport timeouts, aborts, 5xx responses and unknown errors leave the
+// remote state unknowable: the request may have been accepted (and billed) before
+// the response was lost. For real providers those are treated as ambiguous and
+// must never unlock a second submission.
+const DEFINITIVE_SUBMIT_ERROR_CODES = new Set<GenerationErrorCode>([
+  'NOT_CONFIGURED',
+  'INVALID_REQUEST',
+  'UNSUPPORTED',
+  'REFERENCE_ERROR',
+  'PROVIDER_AUTH',
+  'PROVIDER_RATE_LIMIT',
+  'PROVIDER_REJECTED',
+  'DOWNLOAD_FAILED',
+  'MEDIA_INVALID'
+]);
+
+export function classifySubmitError(error: unknown, providerKey: string): 'definitive' | 'ambiguous' {
+  if (!isRealVideoProviderKey(providerKey)) {
+    // Mock/local generation is never billed; preserve the existing immediate
+    // failure behaviour so a broken mock scene can be retried.
+    return 'definitive';
+  }
+
+  if (error instanceof VideoGenerationProviderError) {
+    return DEFINITIVE_SUBMIT_ERROR_CODES.has(error.code) ? 'definitive' : 'ambiguous';
+  }
+
+  // An unwrapped/unknown failure from a paid provider cannot prove rejection.
+  return 'ambiguous';
+}
+
+function submitFailureIsAmbiguous(error: unknown, providerKey: string): boolean {
+  return classifySubmitError(error, providerKey) === 'ambiguous';
+}
+
 export async function submitSceneVideoGeneration(
   projectId: string,
   sceneId: string,
@@ -346,8 +376,14 @@ export async function submitSceneVideoGeneration(
       throw new SceneVideoGenerationError('Scene already has a generated video. Use regenerate=true to generate a new one.', 409, 'generation.scene.alreadyGenerated');
     }
 
-    if (activeStatus(current.status) && current.providerJobId) {
-      throw new SceneVideoGenerationError('Scene video generation already has an active provider job.', 409, 'generation.scene.busy');
+    if (activeStatus(current.status)) {
+      throw new SceneVideoGenerationError(
+        current.metadata?.submitUnresolved === true
+          ? 'A previous provider submit could not be confirmed. Resolve the active attempt before submitting again.'
+          : 'Scene video generation already has an active provider job.',
+        409,
+        'generation.scene.busy'
+      );
     }
 
     if (!current.prompt.trim()) {
@@ -356,21 +392,63 @@ export async function submitSceneVideoGeneration(
 
     assertGenerationTransition(current.status, 'queued', regenerate);
 
-    const providerKey = resolveVideoProvider(options.provider, options.mode);
-    const provider = dependencies.registry.getProvider(providerKey);
     const referenceIds = current.referenceIds && current.referenceIds.length > 0 ? current.referenceIds : scene.referenceIds;
     assertFrameReferences(referenceIds, current);
     const references = await resolveReferenceInputs(project, referenceIds, dependencies.media, current);
     const previousAssetId = scene.visual.assetId || current.assetId;
     const attemptId = createId('generation_attempt');
 
+    let resolved: ReturnType<typeof resolveVideoGeneration>;
+    try {
+      resolved = resolveVideoGeneration(
+        {
+          requestedProvider: options.provider,
+          mode: options.mode,
+          model,
+          prompt: current.prompt,
+          references,
+          aspectRatio: current.aspectRatio || project.aspectRatio,
+          durationSeconds: Math.max(1, Math.round(current.duration ?? scene.duration)),
+          metadata: {
+            projectId,
+            sceneId,
+            attemptId,
+            // Durable client-side idempotency identity. Adapters that support
+            // provider-side idempotency can forward this; all adapters record it
+            // on the attempt so a restart can correlate the original submit.
+            idempotencyKey: attemptId
+          }
+        },
+        { registry: dependencies.registry }
+      );
+    } catch (error) {
+      // Central policy/capability validation happens before the attempt is
+      // persisted and before any external request is built.
+      if (error instanceof RunPolicyError) {
+        throw mapRunPolicyError(error);
+      }
+      if (error instanceof VideoGenerationProviderError) {
+        throw mapProviderError(error);
+      }
+      throw error;
+    }
+
+    // Attempt-scoped diagnostics describe the attempt that is being replaced.
+    // Carrying `submitUnresolved` into the next attempt would make a clean
+    // resubmit look unresolvable (and suppress recovery), so drop these flags.
+    const previousMetadata = { ...(current.metadata ?? {}) };
+    delete previousMetadata.submitUnresolved;
+    delete previousMetadata.pollUnresolved;
+    delete previousMetadata.lastPollErrorCode;
+    delete previousMetadata.cancelFailed;
+
     const queuedAttempt: GenerationAttempt = {
       ...current,
       id: attemptId,
       kind: 'video',
       status: 'queued',
-      provider: normalizeProviderNameForGeneration(provider.providerId),
-      model,
+      provider: toGenerationProvider(resolved.providerKey),
+      model: resolved.contract.model,
       referenceIds,
       duration: current.duration ?? scene.duration,
       assetId: previousAssetId,
@@ -382,6 +460,10 @@ export async function submitSceneVideoGeneration(
       error: undefined,
       errorCode: undefined,
       errorMessage: undefined,
+      metadata: {
+        ...previousMetadata,
+        idempotencyKey: attemptId
+      },
       createdAt: nowIso()
     };
 
@@ -401,20 +483,49 @@ export async function submitSceneVideoGeneration(
 
     let submission;
     try {
-      submission = await provider.submit({
-        model,
-        prompt: current.prompt,
-        references,
-        aspectRatio: current.aspectRatio || project.aspectRatio,
-        durationSeconds: Math.max(1, Math.round(current.duration ?? scene.duration)),
-        metadata: {
-          projectId,
-          sceneId,
-          attemptId
-        }
-      });
+      submission = await resolved.provider.submit(resolved.request);
     } catch (error) {
       const providerFailure = sanitizeProviderError(error);
+
+      if (submitFailureIsAmbiguous(error, resolved.providerKey)) {
+        // The provider may have accepted (and billed) this submit before the
+        // response was lost. Keep the attempt active *without* a job id so the
+        // busy guard blocks any duplicate paid submit. Recovery treats it as
+        // non-resumable and suppresses automatic retries in real mode.
+        const unresolvedAttempt: GenerationAttempt = {
+          ...queuedAttempt,
+          status: 'queued',
+          providerStatus: 'submit_unresolved',
+          error: providerFailure.message,
+          errorCode: providerFailure.errorCode,
+          errorMessage: providerFailure.message,
+          metadata: {
+            ...(queuedAttempt.metadata ?? {}),
+            submitUnresolved: true
+          }
+        };
+
+        await dependencies.store.mutateProject(projectId, (fresh) =>
+          updateScene(fresh, sceneId, (entry) => {
+            ensureGeneratedVideoScene(entry);
+            return {
+              ...entry,
+              visual: {
+                ...entry.visual,
+                generation: unresolvedAttempt,
+                assetId: previousAssetId
+              }
+            };
+          })
+        );
+
+        throw new SceneVideoGenerationError(
+          'The provider submit outcome could not be confirmed. The attempt stays active without a job id so no duplicate paid submission is started; restart recovery reconciles it.',
+          503,
+          'generation.attempt.submitUnresolved'
+        );
+      }
+
       const failedAttempt: GenerationAttempt = {
         ...queuedAttempt,
         status: 'failed',
@@ -471,8 +582,8 @@ export async function submitSceneVideoGeneration(
       sceneId,
       generationAttemptId: attemptId,
       status: submission.status,
-      provider: provider.providerId,
-      model,
+      provider: resolved.providerKey,
+      model: resolved.contract.model,
       providerJobId: updatedAttempt.providerJobId!,
       providerStatus: updatedAttempt.providerStatus
     };
@@ -564,9 +675,11 @@ export async function cancelSceneVideoGeneration(
       throw new SceneVideoGenerationError('Active video generation is missing a provider job id.', 409, 'generation.attempt.missingJobId');
     }
 
-    const providerKey = resolveVideoProvider(current.provider && current.provider !== 'other' ? current.provider : undefined, options.mode);
-    const provider = dependencies.registry.getProvider(providerKey);
-    const capabilities = provider.getCapabilities();
+    const resolved = resolveAttemptProvider(current.provider, options.mode, dependencies);
+    const provider = resolved.provider;
+    const capabilities = provider.getCapabilitiesForModel
+      ? provider.getCapabilitiesForModel(current.model)
+      : provider.getCapabilities();
     const cancel = provider.cancel;
     if (!capabilities.supportsCancellation || typeof cancel !== 'function') {
       throw new SceneVideoGenerationError(
@@ -728,11 +841,18 @@ export async function refreshVideoGenerationAttempt(
     }
 
     if (!attempt.providerJobId) {
+      if (attempt.metadata?.submitUnresolved === true) {
+        throw new SceneVideoGenerationError(
+          'The provider submit outcome is unconfirmed and there is no job id to poll. Resolve the active attempt before retrying.',
+          503,
+          'generation.attempt.submitUnresolved'
+        );
+      }
       throw new SceneVideoGenerationError('Active generation attempt is missing provider job id.', 500, 'generation.attempt.missingJobId');
     }
 
-    const providerKey = resolveVideoProvider(attempt.provider && attempt.provider !== 'other' ? attempt.provider : undefined, options.mode);
-    const provider = dependencies.registry.getProvider(providerKey);
+    const resolved = resolveAttemptProvider(attempt.provider, options.mode, dependencies);
+    const provider = resolved.provider;
 
     let providerStatus;
     try {
@@ -854,7 +974,7 @@ export async function refreshVideoGenerationAttempt(
         nextAttempt = {
           ...nextAttempt,
           status: 'generated',
-          provider: normalizeProviderNameForGeneration(provider.providerId),
+          provider: toGenerationProvider(provider.providerId),
           completedAt: nowIso(),
           assetId: generatedAsset.id,
           error: undefined,

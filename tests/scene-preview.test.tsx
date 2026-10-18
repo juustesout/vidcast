@@ -122,6 +122,19 @@ describe('ScenePreview', () => {
     expect(html).toContain('cqw');
   });
 
+  it('previews the narration-extended duration instead of the authored duration', () => {
+    const project = createImageProject();
+    project.assets.find((entry) => entry.id === 'audio-1')!.duration = 5;
+    const renderPlan = resolveRenderPlan(project);
+    const planDuration = renderPlan.scenes[0].duration;
+    expect(planDuration).toBeCloseTo(5.25, 5);
+
+    const html = renderToStaticMarkup(React.createElement(ScenePreview, { project, scene: project.scenes[0], renderPlan }));
+
+    expect(html).toContain(`${planDuration.toFixed(1)} sec`);
+    expect(html).not.toContain('2.0 sec');
+  });
+
   it('renders video preview and rendered mp4 section when a current render exists', () => {
     const project = createVideoProject();
     const renderPlan = resolveRenderPlan(project);

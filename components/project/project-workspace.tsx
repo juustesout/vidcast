@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { ASPECT_RATIOS, FAL_VIDEO_MODEL_ENDPOINTS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
+import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { ProductionWorkflow } from '@/components/project/production-workflow';
@@ -16,6 +16,7 @@ import { createProjectCompositionRequest, createSceneNarrationRequest, createSce
 import { executeProductionActionRequest } from '@/lib/client/production-action-client';
 import { deriveGenerationTasks } from '@/lib/projects/generation-tasks';
 import { resolveVideoProviderForwarding } from '@/lib/generation/video-provider-forwarding';
+import { resolveVideoModelAuthoringHints } from '@/lib/ai/video-generation/models';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
 import { getAssetUsage } from '@/lib/projects/usage';
 import { defaultBoxForType, defaultPositionForType } from '@/lib/render/overlay-resolve';
@@ -369,6 +370,14 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       .reverse();
   }, [batchEvents]);
   const activeWorkflowStepId = useMemo(() => deriveActiveWorkflowStepId(workflow, activeTab), [workflow, activeTab]);
+  const videoModelHints = useMemo(
+    () =>
+      selectedScene?.visual &&
+      (selectedScene.visual.kind === 'generated_video' || selectedScene.visual.kind === 'generated_image')
+        ? resolveVideoModelAuthoringHints(selectedScene.visual.generation.provider)
+        : resolveVideoModelAuthoringHints(undefined),
+    [selectedScene]
+  );
   const selectedSceneRenderStatus = useMemo(() => selectedScene ? deriveSceneRenderStatus(draft, selectedScene, renderPlan, { isRendering: renderingSceneId === selectedScene.id }) : null, [draft, selectedScene, renderPlan, renderingSceneId]);
   const activeVideoAttemptIds = useMemo(() => {
     return draft.scenes
@@ -1798,7 +1807,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                         <p className="text-xs text-slate-300">Audio duration: {formatDuration(selectedScene.narration?.duration ?? audioAsset?.duration)}</p>
                         {audioAsset && typeof audioAsset.duration === 'number' && audioAsset.duration > selectedScene.duration + 0.01 ? (
                           <p className="text-xs text-amber-200">
-                            Warning: narration audio ({audioAsset.duration.toFixed(2)}s) is longer than scene duration ({selectedScene.duration.toFixed(2)}s).
+                            Warning: narration audio ({audioAsset.duration.toFixed(2)}s) is longer than the authored scene duration ({selectedScene.duration.toFixed(2)}s). The scene will be extended during rendering; speech is not trimmed.
                           </p>
                         ) : null}
                         {selectedScene.narration?.error ? <p className="text-xs text-rose-300">{selectedScene.narration.error}</p> : null}
@@ -2067,8 +2076,8 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                         <Field
                           label="Model"
                           value={selectedScene.visual.generation.model ?? ''}
-                          placeholder={selectedScene.visual.generation.provider === 'fal' ? 'minimax/h3-max-turbo/image-to-video' : 'Provider default'}
-                          suggestions={selectedScene.visual.generation.provider === 'fal' ? FAL_VIDEO_MODEL_ENDPOINTS : undefined}
+                          placeholder={videoModelHints.placeholder}
+                          suggestions={videoModelHints.suggestions}
                           onChange={(value) =>
                             updateScene(selectedScene.id, (scene) => {
                               if (!scene.visual || scene.visual.kind !== 'generated_video') {

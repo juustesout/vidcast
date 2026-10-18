@@ -279,7 +279,7 @@ describe('FAL video generation through the scene service', () => {
     expect(harness.submitCalls()).toBe(0);
   });
 
-  it('does not resubmit after a submit timeout and records a failed attempt', async () => {
+  it('keeps an ambiguous submit timeout active without a job id so it cannot be resubmitted', async () => {
     const harness = createHarness(createProject(), { failSubmit: true });
 
     await expect(
@@ -289,14 +289,28 @@ describe('FAL video generation through the scene service', () => {
         { regenerate: true, provider: 'fal', mode: 'real' },
         depsOf(harness)
       )
-    ).rejects.toMatchObject({ code: 'PROVIDER_FAILED' });
+    ).rejects.toMatchObject({ code: 'generation.attempt.submitUnresolved' });
 
     expect(harness.submitCalls()).toBe(1);
 
     const persisted = harness.state.project.scenes[0];
     if (persisted.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
-    expect(persisted.visual.generation.status).toBe('failed');
+    // The request may have reached FAL before the timeout, so the attempt stays
+    // active (no job id) and blocks a second paid submission.
+    expect(persisted.visual.generation.status).toBe('queued');
     expect(persisted.visual.generation.providerJobId).toBeUndefined();
+    expect(persisted.visual.generation.providerStatus).toBe('submit_unresolved');
+    expect(persisted.visual.generation.metadata?.submitUnresolved).toBe(true);
+
+    await expect(
+      submitSceneVideoGeneration(
+        'project-fal-service',
+        'scene-fal-1',
+        { regenerate: true, provider: 'fal', mode: 'real' },
+        depsOf(harness)
+      )
+    ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+    expect(harness.submitCalls()).toBe(1);
   });
 
   it('keeps a timed-out poll attempt active (resumable, same job id) instead of failing it', async () => {

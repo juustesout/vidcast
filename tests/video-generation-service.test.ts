@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cancelSceneVideoGeneration, classifyStatusPollError, refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
 import { VideoGenerationProviderError } from '@/lib/ai/video-generation/provider';
@@ -7,6 +7,10 @@ import type { VideoGenerationRequest } from '@/lib/ai/video-generation/provider'
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function createProject(): Project {
   const now = new Date().toISOString();
@@ -96,6 +100,8 @@ function createInMemoryDependencies(
   project: Project,
   behavior?: {
     failOnSubmit?: boolean;
+    submitError?: unknown;
+    providerId?: 'fake' | 'fal' | 'openai';
     failOnStatus?: boolean;
     failOnDownload?: boolean;
     statusError?: unknown;
@@ -107,6 +113,7 @@ function createInMemoryDependencies(
 ) {
   const state = { project: structuredClone(project) as Project };
   let createdAssetCount = 0;
+  let submitCalls = 0;
   const submitRequests: VideoGenerationRequest[] = [];
   const canceledJobIds: string[] = [];
 
@@ -167,12 +174,13 @@ function createInMemoryDependencies(
   const registry = {
     getProvider() {
       return {
-        providerId: 'fake',
+        providerId: behavior?.providerId ?? 'fake',
         getCapabilities() {
           return {
             supportsTextToVideo: true,
             supportsImageToVideo: true,
-            supportsReferences: false,
+            supportsReferences: true,
+            maxReferences: 8,
             supportsCancellation: behavior?.supportsCancellation ?? true
           };
         },
@@ -183,6 +191,10 @@ function createInMemoryDependencies(
           canceledJobIds.push(providerJobId);
         },
         async submit(request: VideoGenerationRequest) {
+          submitCalls += 1;
+          if (behavior?.submitError !== undefined) {
+            throw behavior.submitError;
+          }
           if (behavior?.failOnSubmit) {
             throw new Error('submit failed');
           }
@@ -222,7 +234,7 @@ function createInMemoryDependencies(
     }
   };
 
-  return { state, store, media, registry, submitRequests, canceledJobIds };
+  return { state, store, media, registry, submitRequests, canceledJobIds, submitCalls: () => submitCalls };
 }
 
 describe('video generation service', () => {
@@ -294,6 +306,98 @@ describe('video generation service', () => {
       expect(scene.visual.assetId).toBe('asset-old-video');
       expect(scene.visual.generation.status).toBe('failed');
     }
+  });
+
+  it('clears attempt-scoped failure flags when a recovered attempt is retried', async () => {
+    const project = createProject();
+    const scene = project.scenes[0];
+    if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    scene.visual.generation = {
+      ...scene.visual.generation,
+      status: 'failed',
+      providerStatus: 'submit_unresolved',
+      error: 'The provider submit outcome could not be confirmed.',
+      errorCode: 'PROVIDER_FAILED',
+      metadata: {
+        submitUnresolved: true,
+        pollUnresolved: true,
+        lastPollErrorCode: 'PROVIDER_FAILED',
+        cancelFailed: true,
+        idempotencyKey: 'previous-attempt'
+      }
+    };
+    const deps = createInMemoryDependencies(project);
+
+    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    const retried = deps.state.project.scenes[0];
+    if (retried.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(retried.visual.generation.metadata).toMatchObject({
+      idempotencyKey: submit.generationAttemptId
+    });
+    expect(retried.visual.generation.metadata?.submitUnresolved).toBeUndefined();
+    expect(retried.visual.generation.metadata?.pollUnresolved).toBeUndefined();
+    expect(retried.visual.generation.metadata?.lastPollErrorCode).toBeUndefined();
+    expect(retried.visual.generation.metadata?.cancelFailed).toBeUndefined();
+
+    const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+    expect(poll.status).toBe('generated');
+  });
+
+  it('keeps an ambiguous real-provider submit active and blocks a duplicate paid submit', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    const project = createProject();
+    const deps = createInMemoryDependencies(project, {
+      providerId: 'fal',
+      submitError: new VideoGenerationProviderError('FAL video generation timed out or was aborted.', 504, 'PROVIDER_FAILED')
+    });
+
+    await expect(
+      submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({ code: 'generation.attempt.submitUnresolved' });
+
+    const scene = deps.state.project.scenes[0];
+    if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+    expect(scene.visual.generation.status).toBe('queued');
+    expect(scene.visual.generation.providerJobId).toBeUndefined();
+    expect(scene.visual.generation.providerStatus).toBe('submit_unresolved');
+    expect(scene.visual.generation.metadata?.submitUnresolved).toBe(true);
+    expect(scene.visual.generation.metadata?.idempotencyKey).toBe(scene.visual.generation.id);
+
+    await expect(
+      submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+    expect(deps.submitCalls()).toBe(1);
+
+    // A restart reconciles the unconfirmed attempt as failed and suppresses the
+    // automatic video submit instead of billing a second job.
+    const recovery = reconcileInterruptedGenerations(deps.state.project, 'real');
+    const recovered = recovery.updatedProject?.scenes[0].visual;
+    expect(recovered).toMatchObject({
+      generation: {
+        status: 'failed',
+        providerStatus: 'submit_unresolved',
+        metadata: { submitUnresolved: true }
+      }
+    });
+    expect(recovery.suppressedActionIds).toEqual(['scene:scene-video-1:video_submit']);
   });
 
   it('returns persisted state when polling a non-active historical attempt', async () => {
@@ -877,7 +981,8 @@ describe('video generation service', () => {
         getCapabilities: () => ({
           supportsTextToVideo: true,
           supportsImageToVideo: true,
-          supportsReferences: false,
+          supportsReferences: true,
+          maxReferences: 8,
           supportsCancellation: true
         }),
         submit: async () => ({ providerJobId: 'job-1', status: 'queued' as const, providerStatus: 'queued' }),

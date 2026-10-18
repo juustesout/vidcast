@@ -3,6 +3,8 @@ import type { Asset } from '@/lib/types/asset';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
 import { normalizeAudioMix } from './audio-mix';
 import { describeFitWarning, resolveRenderFit } from './fit-policy';
+import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from './scene-timing';
+import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -231,7 +233,20 @@ export function resolveRenderPlan(project: Project): RenderPlan {
     .sort((left, right) => left.order - right.order)
     .map((scene) => {
       const resolved = resolveVisualSource(project, scene);
-      const sceneIssues = [...resolved.issues, ...resolveFitIssues(project, resolved.source, fit)];
+      const timing = resolveSceneTiming({
+        duration: scene.duration,
+        narrationDuration: resolveMeasuredNarrationDuration(scene.narration, project.assets)
+      });
+      const timingIssues = timing.exceedsMax
+        ? [
+            createSceneIssue(
+              'scene.narration.duration.exceedsMax',
+              `Scene timing requires ${timing.effectiveDuration.toFixed(2)}s (${formatSceneTiming(timing)}), which exceeds the ${MAX_SCENE_DURATION_SECONDS}s scene limit.`,
+              'error'
+            )
+          ]
+        : [];
+      const sceneIssues = [...resolved.issues, ...timingIssues, ...resolveFitIssues(project, resolved.source, fit)];
 
       for (const issue of sceneIssues) {
         issues.push({
@@ -245,8 +260,9 @@ export function resolveRenderPlan(project: Project): RenderPlan {
       return {
         sceneId: scene.id,
         order: scene.order,
-        duration: scene.duration,
-        status: resolved.status,
+        duration: timing.effectiveDuration,
+        timing,
+        status: timing.exceedsMax ? 'invalid' : resolved.status,
         source: resolved.source,
         motion: scene.render.motion,
         transition: scene.render.transition,
@@ -273,4 +289,16 @@ export function resolveRenderPlan(project: Project): RenderPlan {
     seed: project.renderSettings.seed,
     audio: normalizeAudioMix(project.renderSettings.audio)
   };
+}
+
+// The single authoritative video timeline. P32.1 resolves each scene's effective
+// duration; everything that needs "how long is the final video" (music length,
+// UI defaults, run diagnostics) must sum this plan instead of recalculating from
+// authored scene durations or render settings.
+export function resolveRenderPlanDurationSeconds(plan: RenderPlan): number {
+  return plan.scenes.reduce((sum, scene) => sum + scene.duration, 0);
+}
+
+export function resolveProjectTimelineDurationSeconds(project: Project): number {
+  return resolveRenderPlanDurationSeconds(resolveRenderPlan(project));
 }

@@ -82,6 +82,16 @@ function createProject(id: string, overrides: Partial<Project> = {}): Project {
   };
 }
 
+function scenesWithDurations(...durations: number[]) {
+  const template = createProject('scene-template').scenes[0];
+  return durations.map((duration, index) => ({
+    ...template,
+    id: `scene-${index + 1}`,
+    order: index + 1,
+    duration
+  }));
+}
+
 const FINAL_COMPOSE_ACTION: ProductionPlannedAction = {
   id: 'project:final_compose',
   type: 'final_compose',
@@ -233,6 +243,45 @@ describe('run music opt-in', () => {
       mode: 'mock'
     });
     expect(outcomes[0]?.message).toContain('Background music generated.');
+  });
+
+  it('derives the generation length from the resolved timeline', async () => {
+    const project = createProject('project-timeline', { scenes: scenesWithDurations(4, 6) });
+    const { service, generateMusic } = makeService(project);
+
+    const started = await service.startOrReuseRun({
+      projectId: project.id,
+      policy: { mode: 'mock', music: { generate: true, prompt: 'calm piano' } }
+    });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    expect(generateMusic.mock.calls[0][1]).toMatchObject({ musicLengthMs: 10_000 });
+  });
+
+  it('lets an explicit run-plan length win over the timeline', async () => {
+    const project = createProject('project-explicit-length', { scenes: scenesWithDurations(10) });
+    const { service, generateMusic } = makeService(project);
+
+    const started = await service.startOrReuseRun({
+      projectId: project.id,
+      policy: { mode: 'mock', music: { generate: true, prompt: 'calm', musicLengthMs: 45_000 } }
+    });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    expect(generateMusic.mock.calls[0][1]).toMatchObject({ musicLengthMs: 45_000 });
+  });
+
+  it('clamps a timeline above the provider maximum', async () => {
+    const project = createProject('project-long-timeline', { scenes: scenesWithDurations(600, 600) });
+    const { service, generateMusic } = makeService(project);
+
+    const started = await service.startOrReuseRun({
+      projectId: project.id,
+      policy: { mode: 'mock', music: { generate: true, prompt: 'calm' } }
+    });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    expect(generateMusic.mock.calls[0][1]).toMatchObject({ musicLengthMs: 600_000 });
   });
 
   it('selects an existing asset when requested instead of generating', async () => {

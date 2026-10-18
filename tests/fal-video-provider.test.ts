@@ -433,7 +433,7 @@ describe('FalVideoGenerationProvider image-to-video', () => {
     const { fetchImpl } = recordingFetch(() => jsonResponse({}));
     const capabilities = provider(fetchImpl, { endpoint: I2V_ENDPOINT }).getCapabilities();
 
-    expect(capabilities.supportsTextToVideo).toBe(true);
+    expect(capabilities.supportsTextToVideo).toBe(false);
     expect(capabilities.supportsImageToVideo).toBe(true);
     expect(capabilities.supportsReferences).toBe(false);
     expect(capabilities.supportsCancellation).toBe(true);

@@ -131,6 +131,18 @@ export interface RenderPlanSceneSource {
 
 export type RenderPlanSceneStatus = 'renderable' | 'planned' | 'invalid';
 
+// Derived, non-persistent timing for a scene. `duration` on RenderPlanScene is
+// the effective duration; this record explains how it was derived so planning,
+// rendering and composition can share the same decision.
+export interface RenderSceneTiming {
+  authoredDuration: number;
+  narrationDuration?: number;
+  endPaddingSeconds: number;
+  effectiveDuration: number;
+  adjusted: boolean;
+  exceedsMax: boolean;
+}
+
 export interface RenderPlanSceneStateIssue {
   code: string;
   message: string;
@@ -141,6 +153,7 @@ export interface RenderPlanScene {
   sceneId: string;
   order: number;
   duration: number;
+  timing?: RenderSceneTiming;
   status: RenderPlanSceneStatus;
   source: RenderPlanSceneSource;
   motion: MotionSpec;

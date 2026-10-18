@@ -1,11 +1,10 @@
 import { resolveProviderDefaults, resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
 
+import { normalizeVideoProviderKey, videoProviderCredentialEnvVar } from './catalog';
 import { FalVideoGenerationProvider } from './fal-provider';
 import { FakeVideoGenerationProvider } from './fake-provider';
 import { OpenAiVideoGenerationProvider } from './openai-provider';
 import { VideoGenerationProviderError, type VideoGenerationProvider } from './provider';
-
-export type VideoProviderId = 'openai' | 'fal' | 'fake';
 
 export interface VideoGenerationRegistry {
   getProvider(id: string): VideoGenerationProvider;
@@ -13,19 +12,20 @@ export interface VideoGenerationRegistry {
 
 class DefaultVideoGenerationRegistry implements VideoGenerationRegistry {
   getProvider(id: string): VideoGenerationProvider {
-    if (id === 'openai') {
+    const key = normalizeVideoProviderKey(id);
+    if (!key) {
+      throw new VideoGenerationProviderError(`Unknown video generation provider: ${id}`, 400, 'INVALID_REQUEST');
+    }
+
+    if (key === 'openai') {
       return new OpenAiVideoGenerationProvider();
     }
 
-    if (id === 'fal') {
+    if (key === 'fal') {
       return new FalVideoGenerationProvider();
     }
 
-    if (id === 'fake' || id === 'local') {
-      return new FakeVideoGenerationProvider();
-    }
-
-    throw new VideoGenerationProviderError(`Unknown video generation provider: ${id}`, 400, 'INVALID_REQUEST');
+    return new FakeVideoGenerationProvider();
   }
 }
 
@@ -40,8 +40,8 @@ export function getVideoGenerationConfigurationStatus(): {
 } {
   const { defaultMode } = resolveRunPolicyServerConfig();
   return {
-    openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
-    falConfigured: Boolean(process.env.FAL_KEY),
+    openaiConfigured: Boolean(process.env[videoProviderCredentialEnvVar('openai')!]),
+    falConfigured: Boolean(process.env[videoProviderCredentialEnvVar('fal')!]),
     defaultProvider: resolveProviderDefaults(defaultMode).video
   };
 }
