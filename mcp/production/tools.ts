@@ -18,7 +18,8 @@ export const runProductionInputSchema = z.object({
       image: z.enum(['fake', 'openai']).optional(),
       video: z.enum(['local', 'openai', 'fal']).optional(),
       narration: z.enum(['fake', 'elevenlabs']).optional(),
-      music: z.enum(['fake', 'elevenlabs']).optional()
+      music: z.enum(['fake', 'elevenlabs']).optional(),
+      presenter: z.enum(['mock', 'heygen']).optional()
     })
     .optional(),
   music: z
@@ -42,6 +43,8 @@ export const runProductionInputSchema = z.object({
       video_submit: z.number().int().positive().max(128).optional(),
       video_poll: z.number().int().positive().max(128).optional(),
       narration_generate: z.number().int().positive().max(128).optional(),
+      presenter_submit: z.number().int().positive().max(4).optional(),
+      presenter_poll: z.number().int().positive().max(8).optional(),
       scene_render: z.number().int().positive().max(MAX_FFMPEG_CONCURRENCY).optional(),
       final_compose: z.number().int().positive().max(MAX_FFMPEG_CONCURRENCY).optional()
     })

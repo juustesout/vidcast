@@ -5,6 +5,7 @@ import type { ExplainerSpec } from '@/lib/types/explainer';
 import type { Project } from '@/lib/types/render';
 import type { RenderIssue, RenderValidationResult } from '@/lib/types/render';
 import type { OverlaySpec, VisualSpec } from '@/lib/types/scene';
+import { PRESENTER_DEFAULT_LIMITS, PRESENTER_LIMIT_CEILINGS, PRESENTER_PIP_LIMITS } from '@/lib/presenter/config';
 
 function pushIssue(
   target: RenderIssue[],
@@ -84,6 +85,67 @@ function validateOverlayStyleTiming(sceneId: string, overlay: OverlaySpec, error
         if (!isFiniteNumber(value) || value < 0 || value > OVERLAY_MAX_FADE_SECONDS) {
           pushIssue(errors, 'error', `scene.overlay.timing.${field}.invalid`, `${base}.timing.${field}`, `Overlay ${field} must be a number between 0 and ${OVERLAY_MAX_FADE_SECONDS}.`);
         }
+      }
+    }
+  }
+}
+
+function validatePresenter(project: Project, errors: RenderIssue[], warnings: RenderIssue[]): void {
+  const presenter = project.presenter;
+  if (!presenter) {
+    return;
+  }
+
+  const sceneIds = new Set(project.scenes.map((scene) => scene.id));
+  const seenSettings = new Set<string>();
+
+  if (presenter.enabled && presenter.sceneSettings.length === 0) {
+    pushIssue(warnings, 'warning', 'project.presenter.scenes.empty', 'presenter.sceneSettings', 'Presenter is enabled but no scene uses it.');
+  }
+
+  if (presenter.provider === 'heygen' && !presenter.avatarId) {
+    pushIssue(warnings, 'warning', 'project.presenter.avatarId.missing', 'presenter.avatarId', 'A HeyGen avatar id is required before a real presenter clip can be generated.');
+  }
+
+  if ((presenter.maxGeneratedSeconds ?? PRESENTER_DEFAULT_LIMITS.MAX_GENERATED_SECONDS) > PRESENTER_LIMIT_CEILINGS.MAX_GENERATED_SECONDS) {
+    pushIssue(errors, 'error', 'project.presenter.maxGeneratedSeconds.invalid', 'presenter.maxGeneratedSeconds', 'Presenter second budget exceeds the server ceiling.');
+  }
+  if ((presenter.maxPaidRequests ?? PRESENTER_DEFAULT_LIMITS.MAX_PAID_REQUESTS) > PRESENTER_LIMIT_CEILINGS.MAX_PAID_REQUESTS) {
+    pushIssue(errors, 'error', 'project.presenter.maxPaidRequests.invalid', 'presenter.maxPaidRequests', 'Presenter paid-request budget exceeds the server ceiling.');
+  }
+
+  for (const setting of presenter.sceneSettings) {
+    const base = `presenter.sceneSettings.${setting.sceneId}`;
+    if (!sceneIds.has(setting.sceneId)) {
+      pushIssue(errors, 'error', 'project.presenter.scene.missing', base, `Presenter references missing scene ${setting.sceneId}.`);
+      continue;
+    }
+    if (seenSettings.has(setting.sceneId)) {
+      pushIssue(errors, 'error', 'project.presenter.scene.duplicate', base, `Duplicate presenter setting for scene ${setting.sceneId}.`);
+    }
+    seenSettings.add(setting.sceneId);
+
+    if (setting.layout === 'pip') {
+      const widthRatio = setting.pip?.widthRatio;
+      if (widthRatio !== undefined && (widthRatio < PRESENTER_PIP_LIMITS.MIN_WIDTH_RATIO || widthRatio > PRESENTER_PIP_LIMITS.MAX_WIDTH_RATIO)) {
+        pushIssue(errors, 'error', 'project.presenter.pip.width.invalid', `${base}.pip.widthRatio`, `Presenter PiP width ratio must be between ${PRESENTER_PIP_LIMITS.MIN_WIDTH_RATIO} and ${PRESENTER_PIP_LIMITS.MAX_WIDTH_RATIO}.`);
+      }
+      const marginRatio = setting.pip?.marginRatio;
+      if (marginRatio !== undefined && (marginRatio < PRESENTER_PIP_LIMITS.MIN_MARGIN_RATIO || marginRatio > PRESENTER_PIP_LIMITS.MAX_MARGIN_RATIO)) {
+        pushIssue(errors, 'error', 'project.presenter.pip.margin.invalid', `${base}.pip.marginRatio`, `Presenter PiP margin ratio must be between ${PRESENTER_PIP_LIMITS.MIN_MARGIN_RATIO} and ${PRESENTER_PIP_LIMITS.MAX_MARGIN_RATIO}.`);
+      }
+    }
+  }
+
+  for (const clip of project.presenterClips ?? []) {
+    if (!sceneIds.has(clip.sceneId)) {
+      pushIssue(errors, 'error', 'project.presenterClip.scene.missing', `presenterClips.${clip.sceneId}`, `Presenter clip references missing scene ${clip.sceneId}.`);
+      continue;
+    }
+    if (clip.status === 'generated') {
+      const asset = project.assets.find((entry) => entry.id === clip.assetId);
+      if (!asset || asset.status !== 'available' || !asset.localPath) {
+        pushIssue(errors, 'error', 'project.presenterClip.asset.missing', `presenterClips.${clip.sceneId}.assetId`, `Presenter clip for scene ${clip.sceneId} is generated but its video asset is missing.`);
       }
     }
   }
@@ -400,6 +462,8 @@ export function validateProject(project: Project): RenderValidationResult {
       pushIssue(errors, 'error', 'project.music.asset.invalidType', 'music.assetId', `Background music asset ${musicAsset.id} is not a music or audio asset.`);
     }
   }
+
+  validatePresenter(project, errors, warnings);
 
   return {
     valid: errors.length === 0,

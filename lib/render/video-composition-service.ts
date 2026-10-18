@@ -5,6 +5,8 @@ import { projectStore } from '@/lib/storage/project-store';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
 import type { CompositionArtifact, CompositionPlan, CompositionResult, CompositionTransition, Project } from '@/lib/types/render';
+import type { CompositionPresenterPlan, PresenterOverlayPlacement } from '@/lib/types/presenter';
+import { derivePresenterSignature, resolvePresenterPip } from '@/lib/presenter/config';
 import { createId } from '@/lib/utils/ids';
 import { createCompositionPaths, ensureCompositionDirectories } from './composition-artifacts';
 import { normalizeAudioMix } from './audio-mix';
@@ -135,6 +137,76 @@ async function resolveNarrationAudioPath(project: Project, scene: Project['scene
   };
 }
 
+async function resolvePresenterPlan(project: Project, items: CompositionPlan['items']): Promise<CompositionPresenterPlan | undefined> {
+  const presenter = project.presenter;
+  if (!presenter?.enabled) {
+    return undefined;
+  }
+
+  const warnings: string[] = [];
+  const placements: PresenterOverlayPlacement[] = [];
+  let startTime = 0;
+
+  for (const item of items) {
+    const setting = presenter.sceneSettings.find((entry) => entry.sceneId === item.sceneId);
+    if (!setting) {
+      startTime += item.duration;
+      continue;
+    }
+
+    const scene = project.scenes.find((entry) => entry.id === item.sceneId);
+    const clip = project.presenterClips?.find((entry) => entry.sceneId === item.sceneId);
+
+    if (!scene || !clip || clip.status !== 'generated' || !clip.assetId) {
+      warnings.push(`Scene ${item.sceneOrder} has a presenter setting but no generated presenter clip; rendering without it.`);
+      startTime += item.duration;
+      continue;
+    }
+
+    if (clip.audioAssetId !== (scene.narration?.audioAssetId ?? '')) {
+      warnings.push(`Scene ${item.sceneOrder} presenter clip was generated from different narration audio; rendering without it.`);
+      startTime += item.duration;
+      continue;
+    }
+
+    const asset = project.assets.find((entry) => entry.id === clip.assetId);
+    if (!asset?.localPath) {
+      warnings.push(`Scene ${item.sceneOrder} presenter clip asset is missing; rendering without it.`);
+      startTime += item.duration;
+      continue;
+    }
+
+    try {
+      const clipPath = await assertAssetFile(project, asRelativeProjectPath(asset.localPath));
+      const startOffsetSeconds = Math.max(0, setting.startOffsetSeconds ?? 0);
+      const available = clip.duration - startOffsetSeconds;
+      if (available < 0.1) {
+        warnings.push(`Scene ${item.sceneOrder} presenter clip is shorter than its start offset; rendering without it.`);
+      } else {
+        placements.push({
+          sceneId: item.sceneId,
+          clipPath,
+          clipDuration: clip.duration,
+          startTime,
+          duration: Math.min(item.duration, available),
+          layout: setting.layout,
+          startOffsetSeconds,
+          pip: setting.layout === 'pip' ? resolvePresenterPip(setting) : undefined
+        });
+      }
+    } catch {
+      warnings.push(`Scene ${item.sceneOrder} presenter clip file is missing on disk; rendering without it.`);
+    }
+
+    startTime += item.duration;
+  }
+
+  return {
+    placements,
+    warnings: warnings.length > 0 ? warnings : undefined
+  };
+}
+
 // A missing or invalid selected track must never fail an otherwise valid
 // render: the composition degrades to no background music. The project
 // validation report surfaces the broken reference separately.
@@ -227,6 +299,7 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
   }
 
   const music = await resolveProjectMusic(project);
+  const presenter = await resolvePresenterPlan(project, items);
 
   return {
     projectId: project.id,
@@ -238,7 +311,8 @@ export async function resolveCompositionPlan(project: Project, transition: Compo
     totalDuration: items.reduce((sum, item) => sum + item.duration, 0),
     transition,
     audio: normalizeAudioMix(project.renderSettings.audio),
-    music
+    music,
+    presenter
   };
 }
 
@@ -272,7 +346,8 @@ function buildCompositionArtifact(projectId: string, compositionId: string, rela
           renderId: item.renderId,
           narrationSignature: freshness?.narrationSignature ?? ''
         };
-      })
+      }),
+      presenterSignature: derivePresenterSignature(project)
     },
     duration,
     width: plan.width,

@@ -2,7 +2,9 @@ import type { Project } from '@/lib/types/render';
 import { deriveReadyProductionActions, type DeriveProductionPlanOptions, type ProductionActionType, type ProductionPlan, type ProductionPlannedAction } from './production-planner';
 
 export interface ProductionRunnerConfig {
-  limits: Record<ProductionActionType, number>;
+  // Partial for backward compatibility: callers that predate a newly added
+  // action type keep working and fall back to one execution at a time.
+  limits: Partial<Record<ProductionActionType, number>>;
   maxIterations: number;
 }
 
@@ -130,6 +132,8 @@ const DEFAULT_CONFIG: ProductionRunnerConfig = {
     video_submit: 2,
     video_poll: 4,
     narration_generate: 2,
+    presenter_submit: 1,
+    presenter_poll: 2,
     scene_render: 1,
     final_compose: 1
   },
@@ -148,6 +152,13 @@ function mergeConfig(config?: Partial<ProductionRunnerConfig>): ProductionRunner
 
 function statusSignature(plan: ProductionPlan): string {
   return plan.actions.map((action) => `${action.id}:${action.status}:${action.reason ?? ''}`).join('|');
+}
+
+// Polls are repeatable: the planner keeps deriving them as ready while the
+// external job is still running, so they must not be suppressed by the
+// within-batch dedup set.
+function isRepeatablePoll(type: ProductionActionType): boolean {
+  return type === 'video_poll' || type === 'presenter_poll';
 }
 
 function sanitizeDiagnostics(outcome?: Partial<ProductionActionExecutionOutcome>): ProductionRunnerEventError | undefined {
@@ -203,6 +214,10 @@ function createActionLabel(action: ProductionPlannedAction): string {
       return `${sceneLabel}Video poll`;
     case 'narration_generate':
       return `${sceneLabel}TTS`;
+    case 'presenter_submit':
+      return `${sceneLabel}Presenter`;
+    case 'presenter_poll':
+      return `${sceneLabel}Presenter poll`;
     case 'scene_render':
       return `${sceneLabel}Render`;
     case 'final_compose':
@@ -422,7 +437,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
 
     previousSignature = statusSignature(plan);
 
-    const executionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
+    const executionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'video_submit', 'video_poll', 'narration_generate', 'presenter_submit', 'presenter_poll', 'scene_render', 'final_compose'];
     let executed = 0;
 
     for (const type of executionOrder) {
@@ -443,7 +458,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
         });
       }
 
-      const result = await executeBounded(matching, config.limits[type], async (action) => {
+      const result = await executeBounded(matching, config.limits[type] ?? 1, async (action) => {
         runningActionIds.add(action.id);
         emit({
           iteration,
@@ -475,11 +490,11 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
         executed += 1;
         if (item.ok) {
           completedActionIds.add(item.action.id);
-          // `video_poll` is a repeatable action: the planner keeps deriving it as
-          // ready while the external job is still running, so it must not be
-          // suppressed by the within-batch dedup set. It stays bounded by the
-          // run's poll/action limits. Other actions run at most once per batch.
-          if (item.action.type !== 'video_poll') {
+          // `video_poll` and `presenter_poll` are repeatable actions: the
+          // planner keeps deriving them as ready while the external job is
+          // still running, so they must not be suppressed by the within-batch
+          // dedup set. They stay bounded by the run's poll/action limits.
+          if (!isRepeatablePoll(item.action.type)) {
             executedActionIds.add(item.action.id);
           }
           if (type === 'final_compose') {

@@ -1,6 +1,7 @@
 import { generateSceneImage, SceneImageGenerationError } from '@/lib/generation/image-generation-service';
 import { generateProjectMusic, ProjectMusicGenerationError, selectProjectMusic } from '@/lib/generation/music-service';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
+import { pollPresenterClip, PresenterGenerationError, submitPresenterClip } from '@/lib/generation/presenter-service';
 import { refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
 import { selectSceneStockImage, StockImageSelectionError } from '@/lib/generation/stock-image-service';
 import { getFfmpegConcurrencyLimit } from '@/lib/render/ffmpeg-limiter';
@@ -40,7 +41,7 @@ export interface RunServiceConfig {
     maxIterations: number;
     maxActionExecutions: number;
     maxVideoPolls: number;
-    limits: Record<ProductionActionType, number>;
+    limits: Partial<Record<ProductionActionType, number>>;
   };
   registry: {
     maxEventsPerRun: number;
@@ -105,6 +106,8 @@ interface ServiceDependencies {
   submitVideo: typeof submitSceneVideoGeneration;
   pollVideo: typeof refreshVideoGenerationAttempt;
   generateNarration: typeof generateSceneNarration;
+  submitPresenter: typeof submitPresenterClip;
+  pollPresenter: typeof pollPresenterClip;
   renderScene: typeof sceneRenderService.renderScene;
   composeProject: typeof videoCompositionService.composeProject;
   generateMusic: typeof generateProjectMusic;
@@ -122,6 +125,8 @@ const defaultDependencies: ServiceDependencies = {
   submitVideo: submitSceneVideoGeneration,
   pollVideo: refreshVideoGenerationAttempt,
   generateNarration: generateSceneNarration,
+  submitPresenter: submitPresenterClip,
+  pollPresenter: pollPresenterClip,
   renderScene: sceneRenderService.renderScene.bind(sceneRenderService),
   composeProject: videoCompositionService.composeProject.bind(videoCompositionService),
   generateMusic: generateProjectMusic,
@@ -152,6 +157,8 @@ function defaultActionLimits(): Record<ProductionActionType, number> {
     video_submit: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_SUBMIT, 2, 1, 16),
     video_poll: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_POLL, 4, 1, 32),
     narration_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_NARRATION, 2, 1, 16),
+    presenter_submit: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_PRESENTER_SUBMIT, 1, 1, 4),
+    presenter_poll: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_PRESENTER_POLL, 2, 1, 8),
     scene_render: clampLocalFfmpegConcurrency(envInt(process.env.PRODUCTION_RUN_CONCURRENCY_RENDER, 1, 1, 8)),
     final_compose: clampLocalFfmpegConcurrency(envInt(process.env.PRODUCTION_RUN_CONCURRENCY_COMPOSE, 1, 1, 4))
   };
@@ -176,28 +183,30 @@ function buildDefaultConfig(): RunServiceConfig {
 }
 
 function mergePerActionLimits(
-  defaults: Record<ProductionActionType, number>,
+  defaults: Partial<Record<ProductionActionType, number>>,
   override: Partial<Record<ProductionActionType, number>> | undefined
 ): Record<ProductionActionType, number> {
   if (!override) {
     return {
       ...defaults,
-      scene_render: clampLocalFfmpegConcurrency(defaults.scene_render),
-      final_compose: clampLocalFfmpegConcurrency(defaults.final_compose)
-    };
+      scene_render: clampLocalFfmpegConcurrency(defaults.scene_render ?? 1),
+      final_compose: clampLocalFfmpegConcurrency(defaults.final_compose ?? 1)
+    } as Record<ProductionActionType, number>;
   }
 
   return {
-    image_generate: envInt(String(override.image_generate ?? defaults.image_generate), defaults.image_generate, 1, 64),
-    stock_select: envInt(String(override.stock_select ?? defaults.stock_select), defaults.stock_select, 1, 64),
-    video_submit: envInt(String(override.video_submit ?? defaults.video_submit), defaults.video_submit, 1, 64),
-    video_poll: envInt(String(override.video_poll ?? defaults.video_poll), defaults.video_poll, 1, 64),
-    narration_generate: envInt(String(override.narration_generate ?? defaults.narration_generate), defaults.narration_generate, 1, 64),
+    image_generate: envInt(String(override.image_generate ?? defaults.image_generate), defaults.image_generate ?? 1, 1, 64),
+    stock_select: envInt(String(override.stock_select ?? defaults.stock_select), defaults.stock_select ?? 1, 1, 64),
+    video_submit: envInt(String(override.video_submit ?? defaults.video_submit), defaults.video_submit ?? 1, 1, 64),
+    video_poll: envInt(String(override.video_poll ?? defaults.video_poll), defaults.video_poll ?? 1, 1, 64),
+    narration_generate: envInt(String(override.narration_generate ?? defaults.narration_generate), defaults.narration_generate ?? 1, 1, 64),
+    presenter_submit: envInt(String(override.presenter_submit ?? defaults.presenter_submit), defaults.presenter_submit ?? 1, 1, 4),
+    presenter_poll: envInt(String(override.presenter_poll ?? defaults.presenter_poll), defaults.presenter_poll ?? 2, 1, 8),
     scene_render: clampLocalFfmpegConcurrency(
-      envInt(String(override.scene_render ?? defaults.scene_render), defaults.scene_render, 1, 64)
+      envInt(String(override.scene_render ?? defaults.scene_render), defaults.scene_render ?? 1, 1, 64)
     ),
     final_compose: clampLocalFfmpegConcurrency(
-      envInt(String(override.final_compose ?? defaults.final_compose), defaults.final_compose, 1, 64)
+      envInt(String(override.final_compose ?? defaults.final_compose), defaults.final_compose ?? 1, 1, 64)
     )
   };
 }
@@ -1236,6 +1245,76 @@ export class HeadlessProductionRunService {
         };
       } catch (error) {
         if (error instanceof SceneNarrationGenerationError) {
+          throw createProductionRunnerError(error.message, {
+            message: error.message,
+            code: error.code,
+            httpStatus: error.status,
+            endpoint,
+            sceneId: action.sceneId
+          });
+        }
+        throw error;
+      }
+    }
+
+    if (action.type === 'presenter_submit') {
+      if (!action.sceneId) {
+        throw createProductionRunnerError('Presenter submit action is missing sceneId.', {
+          code: 'INVALID_ACTION',
+          endpoint: `/api/projects/${projectId}/scenes/:sceneId/generate-presenter`
+        });
+      }
+
+      const endpoint = `/api/projects/${projectId}/scenes/${action.sceneId}/generate-presenter`;
+      try {
+        const result = await this.dependencies.submitPresenter(projectId, action.sceneId, {
+          regenerate: Boolean(action.payload?.regenerate),
+          provider: providers.presenter ?? (mode === 'real' ? 'heygen' : 'mock'),
+          mode
+        });
+
+        return {
+          message: `Presenter submit accepted (${result.status}).`,
+          endpoint,
+          sceneId: action.sceneId,
+          attemptId: result.generationAttemptId,
+          providerStatus: result.providerStatus
+        };
+      } catch (error) {
+        if (error instanceof PresenterGenerationError) {
+          throw createProductionRunnerError(error.message, {
+            message: error.message,
+            code: error.code,
+            httpStatus: error.status,
+            endpoint,
+            sceneId: action.sceneId,
+            details: error.details ? JSON.stringify(error.details) : undefined
+          });
+        }
+        throw error;
+      }
+    }
+
+    if (action.type === 'presenter_poll') {
+      if (!action.sceneId) {
+        throw createProductionRunnerError('Presenter poll action is missing sceneId.', {
+          code: 'INVALID_ACTION',
+          endpoint: `/api/projects/${projectId}/scenes/:sceneId/presenter`
+        });
+      }
+
+      const endpoint = `/api/projects/${projectId}/scenes/${action.sceneId}/presenter`;
+      try {
+        const result = await this.dependencies.pollPresenter(projectId, action.sceneId, { mode });
+        return {
+          message: `Presenter poll returned ${result.status}.`,
+          endpoint,
+          sceneId: action.sceneId,
+          attemptId: result.generationAttemptId,
+          providerStatus: result.providerStatus
+        };
+      } catch (error) {
+        if (error instanceof PresenterGenerationError) {
           throw createProductionRunnerError(error.message, {
             message: error.message,
             code: error.code,

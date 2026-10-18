@@ -7,12 +7,16 @@ export type ImageRunProvider = 'fake' | 'openai';
 export type VideoRunProvider = 'local' | 'openai' | 'fal';
 export type NarrationRunProvider = 'fake' | 'elevenlabs';
 export type MusicRunProvider = 'fake' | 'elevenlabs';
+export type PresenterRunProvider = 'mock' | 'heygen';
 
 export interface RunProviderSelection {
   image: ImageRunProvider;
   video: VideoRunProvider;
   narration: NarrationRunProvider;
   music: MusicRunProvider;
+  // Optional for backward compatibility with policies persisted before the
+  // presenter layer existed.
+  presenter?: PresenterRunProvider;
 }
 
 // Explicit opt-in for background music handling before `final_compose`.
@@ -64,7 +68,7 @@ export interface RunExecutionLimits {
   maxIterations: number;
   maxActionExecutions: number;
   maxVideoPolls: number;
-  perActionConcurrency: Record<ProductionActionType, number>;
+  perActionConcurrency: Partial<Record<ProductionActionType, number>>;
 }
 
 export interface HeadlessRunAcceptedConfig {

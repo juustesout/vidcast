@@ -167,6 +167,24 @@ export interface GeneratedAudioInput {
   };
 }
 
+export interface GeneratedPresenterInput {
+  projectId: string;
+  sceneOrder: number;
+  attemptId: string;
+  mimeType: string;
+  data: Buffer;
+  generation: {
+    generationId: string;
+    provider: string;
+    model?: string;
+    prompt: string;
+    referenceIds: string[];
+    providerRequestId?: string;
+    providerJobId?: string;
+  };
+  layout?: string;
+}
+
 export interface GeneratedMusicInput {
   projectId: string;
   attemptId: string;
@@ -387,6 +405,53 @@ export class MediaStore {
         providerRequestId: input.generation.providerRequestId,
         providerJobId: input.generation.providerJobId
       },
+      generation: {
+        generationId: input.generation.generationId,
+        provider: input.generation.provider,
+        model: input.generation.model,
+        prompt: input.generation.prompt,
+        referenceIds: input.generation.referenceIds
+      },
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  async saveGeneratedPresenter(input: GeneratedPresenterInput): Promise<Asset> {
+    const now = nowIso();
+    const assetId = createId('asset');
+    const extension = input.mimeType.includes('webm') ? 'webm' : input.mimeType.includes('quicktime') ? 'mov' : 'mp4';
+    const suggestedFilename = `scene-${String(input.sceneOrder).padStart(2, '0')}-presenter-${input.attemptId}.${extension}`;
+    const writeResult = await writeUniqueFile(getProjectAssetsRoot(input.projectId), 'assets', suggestedFilename, input.data);
+    const metadata = await mediaMetadataReader.read(input.data, writeResult.storedFilename, input.mimeType, 'video');
+
+    const assetMetadata: Asset['metadata'] = {
+      mimeType: metadata.mimeType || input.mimeType,
+      filesize: metadata.filesize,
+      generationAttemptId: input.attemptId,
+      generationId: input.generation.generationId,
+      providerRequestId: input.generation.providerRequestId,
+      providerJobId: input.generation.providerJobId,
+      presenter: true
+    };
+    if (input.layout) {
+      assetMetadata.presenterLayout = input.layout;
+    }
+
+    return {
+      id: assetId,
+      type: 'video',
+      status: 'available',
+      provenance: 'generated',
+      filename: writeResult.storedFilename,
+      originalFilename: writeResult.storedFilename,
+      localPath: writeResult.localPath,
+      mimeType: metadata.mimeType || input.mimeType,
+      width: metadata.width,
+      height: metadata.height,
+      duration: metadata.duration,
+      filesize: metadata.filesize,
+      metadata: assetMetadata,
       generation: {
         generationId: input.generation.generationId,
         provider: input.generation.provider,

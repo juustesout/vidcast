@@ -5,12 +5,18 @@ import {
   normalizeVideoProviderKey,
   videoProviderCredentialEnvVar
 } from '@/lib/ai/video-generation/catalog';
+import {
+  isRealPresenterProviderKey,
+  presenterProviderCredentialEnvVar
+} from '@/lib/ai/presenter/catalog';
+import { evaluatePresenterBudget, normalizePresenterProviderKey, type PresenterBudgetReport } from '@/lib/presenter/config';
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
 import { deriveProductionPlan } from './production-planner';
 import type {
   ImageRunProvider,
   MusicRunProvider,
   NarrationRunProvider,
+  PresenterRunProvider,
   RunMode,
   RunMusicPlan,
   RunMusicRequest,
@@ -37,6 +43,8 @@ export interface RunPolicyServerConfig {
 
 export interface RunPolicyPreflightResult {
   requiredActionTypes: ProductionActionType[];
+  // Presenter spend projection for real runs. Never contains credentials.
+  presenterBudget?: PresenterBudgetReport;
 }
 
 export class RunPolicyError extends Error {
@@ -106,7 +114,8 @@ export function resolveProviderDefaults(mode: RunMode): RunProviderSelection {
       image: 'openai',
       video: 'openai',
       narration: 'elevenlabs',
-      music: 'elevenlabs'
+      music: 'elevenlabs',
+      presenter: 'heygen'
     };
   }
 
@@ -114,7 +123,8 @@ export function resolveProviderDefaults(mode: RunMode): RunProviderSelection {
     image: 'fake',
     video: 'local',
     narration: 'fake',
-    music: 'fake'
+    music: 'fake',
+    presenter: 'mock'
   };
 }
 
@@ -152,8 +162,12 @@ function parseMusicProvider(value: string | undefined): MusicRunProvider | undef
   return undefined;
 }
 
+function parsePresenterProvider(value: string | undefined): PresenterRunProvider | undefined {
+  return normalizePresenterProviderKey(value);
+}
+
 function isRealProvider(provider: string): boolean {
-  return provider === 'elevenlabs' || isRealVideoProviderKey(provider);
+  return provider === 'elevenlabs' || isRealVideoProviderKey(provider) || isRealPresenterProviderKey(provider);
 }
 
 // Validates and normalizes the explicit run music opt-in. A malformed opt-in is
@@ -240,6 +254,7 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
   const videoProvider = parseVideoProvider(request?.providers?.video);
   const narrationProvider = parseNarrationProvider(request?.providers?.narration);
   const musicProvider = parseMusicProvider(request?.providers?.music);
+  const presenterProvider = parsePresenterProvider(request?.providers?.presenter);
 
   if (request?.providers?.image && !imageProvider) {
     throw new RunPolicyError('Unsupported image provider in policy request.', 'INVALID_POLICY', 400, {
@@ -269,11 +284,19 @@ export function resolveRunPolicy(request: RunPolicyRequest | undefined, serverCo
     });
   }
 
+  if (request?.providers?.presenter && !presenterProvider) {
+    throw new RunPolicyError('Unsupported presenter provider in policy request.', 'INVALID_POLICY', 400, {
+      provider: request.providers.presenter,
+      field: 'providers.presenter'
+    });
+  }
+
   const providers: RunProviderSelection = {
     image: imageProvider ?? defaults.image,
     video: videoProvider ?? defaults.video,
     narration: narrationProvider ?? defaults.narration,
-    music: musicProvider ?? defaults.music
+    music: musicProvider ?? defaults.music,
+    presenter: presenterProvider ?? defaults.presenter
   };
 
   const music = normalizeRunMusicRequest(request?.music);
@@ -328,6 +351,7 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
   const needsImageGeneration = requiredActionTypes.includes('image_generate');
   const needsVideoGeneration = requiredActionTypes.includes('video_submit') || requiredActionTypes.includes('video_poll');
   const needsNarrationGeneration = requiredActionTypes.includes('narration_generate');
+  const needsPresenterGeneration = requiredActionTypes.includes('presenter_submit') || requiredActionTypes.includes('presenter_poll');
 
   // Real/mock enforcement applies only to modalities the run actually executes.
   // Music is never a hard-required run modality: it is an optional, fail-soft
@@ -347,6 +371,13 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
       throw new RunPolicyError('Real mode requires a real video provider for video generation.', 'PROVIDER_NOT_ALLOWED', 403, {
         modality: 'video',
         provider: policy.providers.video
+      });
+    }
+
+    if (needsPresenterGeneration && !isRealProvider(policy.providers.presenter ?? '')) {
+      throw new RunPolicyError('Real mode requires the HeyGen presenter provider.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'presenter',
+        provider: policy.providers.presenter
       });
     }
 
@@ -371,6 +402,13 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
     if (needsNarrationGeneration && policy.providers.narration === 'elevenlabs') {
       requireEnvVar('ELEVENLABS_API_KEY', 'Real narration generation requires ELEVENLABS_API_KEY.');
     }
+
+    if (needsPresenterGeneration) {
+      const envVar = presenterProviderCredentialEnvVar(policy.providers.presenter);
+      if (envVar) {
+        requireEnvVar(envVar, `Real presenter generation requires ${envVar}.`);
+      }
+    }
   }
 
   if (policy.mode === 'mock') {
@@ -392,6 +430,13 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
       throw new RunPolicyError('Mock mode only allows the fake narration provider for narration generation.', 'PROVIDER_NOT_ALLOWED', 403, {
         modality: 'narration',
         provider: policy.providers.narration
+      });
+    }
+
+    if (needsPresenterGeneration && policy.providers.presenter !== 'mock') {
+      throw new RunPolicyError('Mock mode only allows the mock presenter provider.', 'PROVIDER_NOT_ALLOWED', 403, {
+        modality: 'presenter',
+        provider: policy.providers.presenter
       });
     }
   }
@@ -443,11 +488,14 @@ export function assertRunPolicyPreflight(project: Project, policy: RunPolicySnap
   }
 
   return {
-    requiredActionTypes
+    requiredActionTypes,
+    presenterBudget: needsPresenterGeneration && policy.mode === 'real'
+      ? evaluatePresenterBudget(project)
+      : undefined
   };
 }
 
-export type GenerationModality = 'image' | 'video' | 'narration' | 'music';
+export type GenerationModality = 'image' | 'video' | 'narration' | 'music' | 'presenter';
 
 export interface GenerationProviderResolution {
   mode: RunMode;
@@ -457,7 +505,7 @@ export interface GenerationProviderResolution {
 function normalizeRequestedProvider(
   kind: GenerationModality,
   requested: string | undefined
-): ImageRunProvider | VideoRunProvider | NarrationRunProvider | MusicRunProvider | undefined {
+): ImageRunProvider | VideoRunProvider | NarrationRunProvider | MusicRunProvider | PresenterRunProvider | undefined {
   if (!requested) {
     return undefined;
   }
@@ -467,7 +515,12 @@ function normalizeRequestedProvider(
     return undefined;
   }
 
-  if (kind === 'image') {
+  if (kind === 'presenter') {
+    const presenterProvider = normalizePresenterProviderKey(value);
+    if (presenterProvider) {
+      return presenterProvider;
+    }
+  } else if (kind === 'image') {
     if (value === 'openai') {
       return 'openai';
     }
@@ -514,6 +567,13 @@ function assertRealProviderCredentials(kind: GenerationModality, provider: strin
     const envVar = videoProviderCredentialEnvVar(provider);
     if (envVar) {
       requireEnvVar(envVar, `Real video generation requires ${envVar}.`);
+    }
+  }
+
+  if (kind === 'presenter') {
+    const envVar = presenterProviderCredentialEnvVar(provider);
+    if (envVar) {
+      requireEnvVar(envVar, `Real presenter generation requires ${envVar}.`);
     }
   }
 }
@@ -564,6 +624,8 @@ export function resolveManualGenerationProvider(
   if (normalized) {
     if (kind === 'image') {
       providers = { image: normalized as ImageRunProvider };
+    } else if (kind === 'presenter') {
+      providers = { presenter: normalized as PresenterRunProvider };
     } else if (kind === 'video') {
       providers = { video: normalized as VideoRunProvider };
     } else if (kind === 'music') {
@@ -577,6 +639,11 @@ export function resolveManualGenerationProvider(
 
   const policy = resolveRunPolicy({ mode, providers }, effectiveServerConfig);
   const provider = policy.providers[kind];
+  if (!provider) {
+    throw new RunPolicyError(`No ${kind} provider is configured.`, 'PROVIDER_NOT_ALLOWED', 403, {
+      kind
+    });
+  }
 
   // Single-modality enforcement. Run-level enforcement lives in
   // `assertRunPolicyPreflight`, which has the project/plan context needed to know

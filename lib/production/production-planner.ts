@@ -1,4 +1,10 @@
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
+import {
+  evaluatePresenterBudget,
+  getPresenterClip,
+  getPresenterSetting,
+  isPresenterClipCurrent
+} from '@/lib/presenter/config';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus } from '@/lib/render/render-status';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import type { Project } from '@/lib/types/render';
@@ -14,6 +20,8 @@ export type ProductionActionType =
   | 'video_submit'
   | 'video_poll'
   | 'narration_generate'
+  | 'presenter_submit'
+  | 'presenter_poll'
   | 'scene_render'
   | 'final_compose';
 
@@ -429,6 +437,98 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       payload: { mode: narrationMode }
     });
 
+    const presenterSetting = getPresenterSetting(project, scene.id);
+    if (presenterSetting) {
+      const submitId = actionId('presenter_submit', scene.id);
+      const pollId = actionId('presenter_poll', scene.id);
+      const clip = getPresenterClip(project, scene.id);
+      const current = isPresenterClipCurrent(project, scene, clip);
+      const budget = options.mode === 'real' ? evaluatePresenterBudget(project) : undefined;
+
+      let submitStatus: ProductionActionStatus = 'ready';
+      let submitReason = 'Presenter generation is ready.';
+      let submitExecute = true;
+      const submitDependencies: string[] = [narrationId];
+
+      if (skippedActionIds.has(submitId)) {
+        submitStatus = 'skipped';
+        submitExecute = false;
+        submitReason = 'Skipped by user.';
+      } else if (failedActionIds.has(submitId)) {
+        submitStatus = 'failed';
+        submitExecute = false;
+        submitReason = 'Presenter generation failed earlier in this run.';
+      } else if (current) {
+        submitStatus = 'current';
+        submitExecute = false;
+        submitReason = 'Presenter clip is current.';
+      } else if (narrationState.state === 'generating' || narrationState.state === 'no_audio' || narrationState.state === 'stale' || narrationState.state === 'failed') {
+        submitStatus = 'waiting_dependency';
+        submitExecute = false;
+        submitReason = 'Waiting for current narration audio before generating the presenter clip.';
+      } else if (narrationState.state === 'no_narration') {
+        submitStatus = 'blocked';
+        submitExecute = false;
+        submitReason = 'Presenter requires narration text and audio.';
+      } else if (clip?.status === 'submitting') {
+        submitStatus = 'blocked';
+        submitExecute = false;
+        submitReason = 'Presenter submission was interrupted before a provider job id was stored. Verify the provider dashboard before retrying.';
+      } else if (clip?.status === 'generating') {
+        const hasJob = Boolean(clip.attempts?.find((attempt) => attempt.id === clip.lastAttemptId)?.providerJobId);
+        if (hasJob) {
+          submitStatus = 'current';
+          submitExecute = false;
+          submitReason = 'Presenter job is already running.';
+        } else {
+          submitStatus = 'blocked';
+          submitExecute = false;
+          submitReason = 'Presenter job has no provider job id; verify the provider dashboard before retrying.';
+        }
+      } else if (clip?.status === 'failed' && options.mode === 'real') {
+        submitStatus = 'blocked';
+        submitExecute = false;
+        submitReason = clip.error
+          ? `Presenter generation failed (${clip.error}). Paid retries require explicit approval.`
+          : 'Presenter generation failed. Paid retries require explicit approval.';
+      } else if (budget?.exceeded) {
+        submitStatus = 'blocked';
+        submitExecute = false;
+        submitReason = `Presenter budget exceeded. ${budget.reasons.join(' ')}`;
+      }
+
+      register({
+        id: submitId,
+        type: 'presenter_submit',
+        sceneId: scene.id,
+        sceneOrder: scene.order,
+        status: submitStatus,
+        reason: submitReason,
+        dependencyActionIds: submitDependencies,
+        execute: submitExecute,
+        payload: {
+          regenerate: Boolean(clip?.assetId)
+        }
+      });
+
+      const jobAttempt = clip?.attempts?.find((attempt) => attempt.id === clip.lastAttemptId);
+      if (clip?.status === 'generating' && jobAttempt?.providerJobId) {
+        register({
+          id: pollId,
+          type: 'presenter_poll',
+          sceneId: scene.id,
+          sceneOrder: scene.order,
+          status: failedActionIds.has(pollId) ? 'failed' : 'ready',
+          reason: failedActionIds.has(pollId) ? 'Presenter polling failed earlier in this run.' : 'Poll the presenter generation job.',
+          dependencyActionIds: [],
+          execute: !failedActionIds.has(pollId),
+          payload: {
+            attemptId: clip.lastAttemptId
+          }
+        });
+      }
+    }
+
     const renderId = actionId('scene_render', scene.id);
     const renderStatus = deriveSceneRenderStatus(project, scene, renderPlan, {
       isRendering: Boolean(runtime.runningRenderSceneIds?.includes(scene.id))
@@ -538,6 +638,11 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
     composeReason = 'Waiting for required scene outputs to become current.';
     for (const sceneId of [...compositionReadiness.needsSceneRenderIds, ...compositionReadiness.staleSceneIds]) {
       composeDependencies.push(actionId('scene_render', sceneId));
+    }
+    for (const action of actions) {
+      if (action.type === 'presenter_submit' || action.type === 'presenter_poll') {
+        composeDependencies.push(action.id);
+      }
     }
   }
 

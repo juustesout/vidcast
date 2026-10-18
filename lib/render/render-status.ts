@@ -5,6 +5,7 @@ import { createSceneRenderFingerprint } from './render-fingerprint';
 import { audioMixesEqual, normalizeAudioMix } from './audio-mix';
 import { MUSIC_FADE_IN_SECONDS, MUSIC_FADE_OUT_SECONDS, deriveMusicSignature, resolveSelectedMusicAsset } from './music-mix';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
+import { derivePresenterSignature } from '@/lib/presenter/config';
 import { sceneDurationMatches } from './scene-timing';
 
 export type SceneRenderLifecycleStatus = 'not_rendered' | 'rendering' | 'rendered' | 'render_failed' | 'stale';
@@ -272,6 +273,12 @@ export function deriveCompositionArtifactStatus(project: Project, renderPlan: Re
   const recordedMusic = artifact.inputFingerprint?.music;
   if (!musicFingerprintsEqual(recordedMusic, currentMusicFingerprint(project))) {
     reasons.push('Background music changed since the final composition was created.');
+  }
+
+  const currentPresenterSignature = derivePresenterSignature(project);
+  const recordedPresenterSignature = artifact.inputFingerprint?.presenterSignature ?? 'presenter:off';
+  if (currentPresenterSignature !== recordedPresenterSignature) {
+    reasons.push('Presenter settings or clips changed since the final composition was created.');
   }
 
   if (reasons.length > 0) {

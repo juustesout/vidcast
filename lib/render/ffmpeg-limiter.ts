@@ -21,7 +21,7 @@ export const MAX_FFMPEG_CONCURRENCY = 4;
 export const MAX_FFMPEG_QUEUE = 64;
 export const FFMPEG_WAIT_LOG_THRESHOLD_MS = 1_000;
 
-export type FfmpegOperation = 'scene_render' | 'final_compose';
+export type FfmpegOperation = 'scene_render' | 'final_compose' | 'presenter_generate';
 
 export function resolveFfmpegConcurrencyLimit(
   raw: string | undefined,

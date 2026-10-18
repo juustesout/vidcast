@@ -14,7 +14,7 @@ import type { RenderIssue } from '@/lib/types/render';
  * missing-but-optional nested fields are defaulted by normalization.
  */
 
-const ARRAY_FIELDS = ['scenes', 'assets', 'references', 'compositions'] as const;
+const ARRAY_FIELDS = ['scenes', 'assets', 'references', 'compositions', 'presenterClips'] as const;
 const STRING_FIELDS = ['title', 'description'] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -127,6 +127,23 @@ export function collectProjectPatchShapeIssues(patch: unknown): RenderIssue[] {
 
   if ('explainer' in patch && patch.explainer !== undefined) {
     validateExplainerShape(patch.explainer, issues);
+  }
+
+  if ('presenter' in patch && patch.presenter !== undefined) {
+    const presenter = patch.presenter;
+    if (!isPlainObject(presenter)) {
+      push(issues, 'project.presenter.invalid', 'presenter', 'presenter must be an object.');
+    } else if ('sceneSettings' in presenter && presenter.sceneSettings !== undefined && !Array.isArray(presenter.sceneSettings)) {
+      push(issues, 'project.presenter.sceneSettings.invalid', 'presenter.sceneSettings', 'presenter.sceneSettings must be an array.');
+    } else if (Array.isArray(presenter.sceneSettings)) {
+      presenter.sceneSettings.forEach((setting, index) => {
+        if (!isPlainObject(setting)) {
+          push(issues, 'project.presenter.sceneSettings.item.invalid', `presenter.sceneSettings.${index}`, 'Each presenter scene setting must be an object.');
+        } else if ('pip' in setting && setting.pip !== undefined && !isPlainObject(setting.pip)) {
+          push(issues, 'project.presenter.sceneSettings.pip.invalid', `presenter.sceneSettings.${index}.pip`, 'presenter.sceneSettings.pip must be an object.');
+        }
+      });
+    }
   }
 
   if (Array.isArray(patch.scenes)) {

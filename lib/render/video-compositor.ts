@@ -9,6 +9,7 @@ import { formatVolumeFilter } from './audio-mix';
 import { resolveMusicFade } from './music-mix';
 import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
 import { sceneDurationMatches } from './scene-timing';
+import { buildPresenterOverlayArgs } from './presenter-overlay';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p8';
@@ -238,6 +239,11 @@ async function mixMusic(concatVideoPath: string, musicPath: string, outputPath: 
   await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() }, 'final_compose');
 }
 
+async function applyPresenterOverlay(baseVideoPath: string, outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<void> {
+  const args = buildPresenterOverlayArgs(baseVideoPath, outputPath, plan);
+  await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() }, 'final_compose');
+}
+
 async function composeConcat(normalizedPaths: string[], outputPath: string, plan: CompositionPlan, tempDir: string, runtime: FFmpegRuntime): Promise<void> {
   const listPath = path.join(tempDir, 'concat-list.txt');
   const listContent = normalizedPaths.map((entry) => `file '${entry.replace(/'/g, "'\\''")}'`).join('\n');
@@ -302,11 +308,19 @@ export class LocalFFmpegVideoCompositor {
         normalizedPaths.push(normalizedPath);
       }
 
-      const concatOutputPath = plan.music ? path.join(options.tempDir, 'concatenated.mp4') : options.outputPath;
+      const hasPresenter = Boolean(plan.presenter && plan.presenter.placements.length > 0);
+      const concatOutputPath = plan.music || hasPresenter ? path.join(options.tempDir, 'concatenated.mp4') : options.outputPath;
       await composeConcat(normalizedPaths, concatOutputPath, plan, options.tempDir, this.runtime);
 
+      let videoWithPresenterPath = concatOutputPath;
+      if (hasPresenter) {
+        const presenterOutputPath = plan.music ? path.join(options.tempDir, 'with-presenter.mp4') : options.outputPath;
+        await applyPresenterOverlay(concatOutputPath, presenterOutputPath, plan, this.runtime);
+        videoWithPresenterPath = presenterOutputPath;
+      }
+
       if (plan.music) {
-        await mixMusic(concatOutputPath, plan.music.path, options.outputPath, plan, this.runtime);
+        await mixMusic(videoWithPresenterPath, plan.music.path, options.outputPath, plan, this.runtime);
       }
 
       return await validateOutput(options.outputPath, plan, this.runtime);

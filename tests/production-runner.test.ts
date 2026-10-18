@@ -343,6 +343,38 @@ describe('runProductionBatch', () => {
     expect(result.events.filter((event) => event.code === 'video_poll_completed')).toHaveLength(3);
   });
 
+  it('re-polls an in-flight presenter job across iterations instead of stopping unresolved after one poll', async () => {
+    const polls: string[] = [];
+    let deriveCalls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => {
+        deriveCalls += 1;
+        if (deriveCalls <= 2) {
+          return makePlan([
+            makeAction('s1:presenter_submit', 'presenter_submit', 'current', 's1'),
+            makeAction('s1:presenter_poll', 'presenter_poll', 'ready', 's1')
+          ]);
+        }
+        return makePlan([makeAction('s1:presenter_submit', 'presenter_submit', 'current', 's1')]);
+      },
+      refreshProject: async () => emptyProject,
+      config: {
+        maxIterations: 10,
+        limits: { image_generate: 1, stock_select: 1, video_submit: 1, video_poll: 1, narration_generate: 1, presenter_submit: 1, presenter_poll: 1, scene_render: 1, final_compose: 1 }
+      },
+      executeAction: async (action) => {
+        if (action.type === 'presenter_poll') {
+          polls.push(action.id);
+        }
+      }
+    });
+
+    expect(polls).toEqual(['s1:presenter_poll', 's1:presenter_poll']);
+    expect(result.status).toBe('completed');
+  });
+
   it('emits blocked and skipped diagnostics from plan state', async () => {
     const plan = makePlan([
       {

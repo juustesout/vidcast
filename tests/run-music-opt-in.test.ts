@@ -133,7 +133,7 @@ function makeService(
   const selectMusic = vi.fn(options.selectMusic ?? (async () => ({ status: 'generated', assetId: 'asset-selected' })));
   const composeProject = vi.fn(async () => ({ artifact: { compositionId: 'composition-1' } }));
 
-  const limits: Record<ProductionActionType, number> = {
+  const limits: Partial<Record<ProductionActionType, number>> = {
     image_generate: 1,
     stock_select: 1,
     video_submit: 1,

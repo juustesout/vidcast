@@ -46,6 +46,8 @@ const ACTION_LABELS: Record<NonNullable<ProductionRunnerEvent['actionType']>, st
   stock_select: 'STOCK',
   video_submit: 'VIDEO',
   video_poll: 'POLL',
+  presenter_submit: 'PRESENTER',
+  presenter_poll: 'PRESENTER POLL',
   narration_generate: 'TTS',
   scene_render: 'RENDER',
   final_compose: 'COMPOSE'

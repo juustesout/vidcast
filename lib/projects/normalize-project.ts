@@ -1,5 +1,6 @@
 import { DEFAULT_RENDER_SETTINGS } from '@/lib/constants';
 import { normalizeExplainer } from '@/lib/projects/explainer-normalization';
+import { normalizePresenterClips, normalizeProjectPresenter } from '@/lib/presenter/config';
 import { normalizeAudioMix } from '@/lib/render/audio-mix';
 import { isRenderFit } from '@/lib/render/fit-policy';
 import type { Asset, AssetProvenance } from '@/lib/types/asset';
@@ -402,6 +403,8 @@ export function normalizeProject(project: Project): Project {
     assets: (Array.isArray(project.assets) ? project.assets : []).map(normalizeAsset),
     references: (Array.isArray(project.references) ? project.references : []).map(normalizeReference),
     music: normalizeProjectMusic(project.music),
+    presenter: normalizeProjectPresenter(project.presenter),
+    presenterClips: normalizePresenterClips(project.presenterClips),
     compositions: Array.isArray(project.compositions) ? project.compositions : [],
     renderSettings: {
       aspectRatio: project.renderSettings?.aspectRatio ?? project.aspectRatio ?? DEFAULT_RENDER_SETTINGS.aspectRatio,

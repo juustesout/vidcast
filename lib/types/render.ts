@@ -2,6 +2,7 @@ import type { Asset, AssetType } from './asset';
 import type { ExplainerSpec } from './explainer';
 import type { GraphicTemplateType, MotionSpec, NarrationSpec, OverlaySpec, SceneType, TransitionSpec } from './scene';
 import type { ReferenceImage } from './reference';
+import type { PresenterClipSpec, ProjectPresenterSettings, CompositionPresenterPlan } from './presenter';
 
 export type AspectRatio = '16:9' | '1:1' | '9:16';
 
@@ -108,6 +109,10 @@ export interface Project {
   references: ReferenceImage[];
   renderSettings: RenderSettings;
   music?: ProjectMusicSpec;
+  // Optional AI presenter layer. Absent means the project has no presenter and
+  // is rendered exactly as before.
+  presenter?: ProjectPresenterSettings;
+  presenterClips?: PresenterClipSpec[];
   compositions?: CompositionArtifact[];
 }
 
@@ -218,6 +223,10 @@ export interface CompositionPlan {
   transition: CompositionTransition;
   audio?: AudioMixSettings;
   music?: CompositionMusic;
+  // Resolved presenter placements. Missing/unusable presenter clips are
+  // reported in `warnings` and simply omitted; the underlying video remains
+  // composable.
+  presenter?: CompositionPresenterPlan;
   // Scale policy applied when a normalized scene segment is not already the
   // canvas aspect ratio. Defaults to `cover` (historical center-crop).
   fit?: RenderFit;
@@ -244,6 +253,9 @@ export interface CompositionArtifact {
       renderId: string;
       narrationSignature: string;
     }>;
+    // Stable hash of presenter settings plus generated clip references. Absent
+    // on compositions created before the presenter layer existed.
+    presenterSignature?: string;
   };
   duration: number;
   width: number;
