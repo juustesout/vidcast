@@ -7,7 +7,7 @@ import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
-import type { GraphicStyleSpec, LogoOverlaySpec, MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, TransitionPreset, VisualSpec } from '@/lib/types/scene';
+import type { GraphicStyleSpec, LogoOverlaySpec, MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, StudioOverlaySpec, TransitionPreset, VisualSpec } from '@/lib/types/scene';
 import type { StockOrientation, StockProviderId, StockSelection } from '@/lib/types/stock';
 
 type LegacyScene = {
@@ -92,6 +92,13 @@ function normalizeGraphicStyle(value: unknown): GraphicStyleSpec | undefined {
     return undefined;
   }
   return { ...(value as GraphicStyleSpec) };
+}
+
+function normalizeStudioOverlay(value: unknown): StudioOverlaySpec | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return { ...(value as StudioOverlaySpec) };
 }
 
 function normalizeGenerationStatus(status: unknown): GenerationStatus {
@@ -446,7 +453,8 @@ export function normalizeProject(project: Project): Project {
       subtitlesEnabled: project.renderSettings?.subtitlesEnabled ?? DEFAULT_RENDER_SETTINGS.subtitlesEnabled,
       seed: project.renderSettings?.seed,
       logo: normalizeLogoOverlay(project.renderSettings?.logo) ?? undefined,
-      graphicStyle: normalizeGraphicStyle(project.renderSettings?.graphicStyle)
+      graphicStyle: normalizeGraphicStyle(project.renderSettings?.graphicStyle),
+      studio: normalizeStudioOverlay(project.renderSettings?.studio)
     }
   };
 

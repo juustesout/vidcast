@@ -7,6 +7,7 @@ export function createSceneRenderFingerprint(plan: RenderPlan, scene: RenderPlan
     height: plan.height,
     fps: plan.fps,
     background: plan.background,
+    studio: plan.studio,
     scene: {
       sceneId: scene.sceneId,
       order: scene.order,

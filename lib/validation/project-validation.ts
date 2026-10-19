@@ -2,6 +2,7 @@ import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPE
 import { isValidGraphicColor } from '@/lib/render/graphic-style';
 import { isLogoOverlayPosition } from '@/lib/render/logo-overlay';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
+import { STUDIO_SCREEN_LIMITS } from '@/lib/render/studio-overlay';
 import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from '@/lib/render/scene-timing';
 import type { ExplainerSpec } from '@/lib/types/explainer';
 import type { Project } from '@/lib/types/render';
@@ -89,6 +90,59 @@ function validateOverlayStyleTiming(sceneId: string, overlay: OverlaySpec, error
         }
       }
     }
+  }
+}
+
+function validateStudioOverlay(studio: unknown, path: string, errors: RenderIssue[]): void {
+  if (studio === undefined || studio === null) {
+    return;
+  }
+  if (!isPlainObject(studio)) {
+    pushIssue(errors, 'error', 'project.studio.invalid', path, 'Studio overlay must be an object or null.');
+    return;
+  }
+
+  if (studio.brand !== undefined && (typeof studio.brand !== 'string' || studio.brand.length > 40)) {
+    pushIssue(errors, 'error', 'project.studio.brand.invalid', `${path}.brand`, 'Studio brand must be a string of at most 40 characters.');
+  }
+  if (studio.program !== undefined && (typeof studio.program !== 'string' || studio.program.length > 24)) {
+    pushIssue(errors, 'error', 'project.studio.program.invalid', `${path}.program`, 'Studio program must be a string of at most 24 characters.');
+  }
+  if (studio.accentColor !== undefined && !isValidGraphicColor(studio.accentColor)) {
+    pushIssue(errors, 'error', 'project.studio.accentColor.invalid', `${path}.accentColor`, 'Studio accent color must be a hex color such as #ff5a5f.');
+  }
+
+  if (studio.screen === undefined || studio.screen === null) {
+    return;
+  }
+  if (!isPlainObject(studio.screen)) {
+    pushIssue(errors, 'error', 'project.studio.screen.invalid', `${path}.screen`, 'Studio screen must be an object.');
+    return;
+  }
+
+  const { x, y, width, height, radius } = studio.screen;
+  for (const [field, value] of Object.entries({ x, y, width, height })) {
+    if (value === undefined) {
+      continue;
+    }
+    if (!isFiniteNumber(value) || value < 0 || value > 1) {
+      pushIssue(errors, 'error', `project.studio.screen.${field}.invalid`, `${path}.screen.${field}`, `Studio screen ${field} must be between 0 and 1.`);
+    }
+  }
+  if (isFiniteNumber(width) && width < 0.1) {
+    pushIssue(errors, 'error', 'project.studio.screen.width.invalid', `${path}.screen.width`, 'Studio screen width must be at least 0.1.');
+  }
+  if (isFiniteNumber(height) && height < 0.1) {
+    pushIssue(errors, 'error', 'project.studio.screen.height.invalid', `${path}.screen.height`, 'Studio screen height must be at least 0.1.');
+  }
+  if (isFiniteNumber(x) && isFiniteNumber(width) && x + width > 1.0001) {
+    pushIssue(errors, 'error', 'project.studio.screen.bounds.invalid', `${path}.screen`, 'Studio screen must fit inside the canvas horizontally.');
+  }
+  if (isFiniteNumber(y) && isFiniteNumber(height) && y + height > 1.0001) {
+    pushIssue(errors, 'error', 'project.studio.screen.bounds.invalid', `${path}.screen`, 'Studio screen must fit inside the canvas vertically.');
+  }
+  if (radius !== undefined && (!isFiniteNumber(radius) || radius < 0 || radius > STUDIO_SCREEN_LIMITS.MAX_RADIUS)) {
+    pushIssue(errors, 'error', 'project.studio.screen.radius.invalid', `${path}.screen.radius`, `Studio screen radius must be between 0 and ${STUDIO_SCREEN_LIMITS.MAX_RADIUS} pixels.`);
   }
 }
 
@@ -562,6 +616,7 @@ export function validateProject(project: Project): RenderValidationResult {
     validateLogoOverlay(project.renderSettings.logo, 'renderSettings.logo', project, errors, warnings);
   }
   validateGraphicStyle(project.renderSettings.graphicStyle, 'renderSettings.graphicStyle', errors, 'project.graphicStyle');
+  validateStudioOverlay(project.renderSettings.studio, 'renderSettings.studio', errors);
 
   validatePresenter(project, errors, warnings);
 

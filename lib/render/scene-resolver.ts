@@ -6,6 +6,7 @@ import { describeFitWarning, resolveRenderFit } from './fit-policy';
 import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from './scene-timing';
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mergeGraphicStyles } from './graphic-style';
+import { resolveStudioOverlay } from './studio-overlay';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -277,6 +278,11 @@ function resolveSceneLogo(project: Project, scene: Scene): {
 export function resolveRenderPlan(project: Project): RenderPlan {
   const issues: RenderIssue[] = [];
   const fit = resolveRenderFit(project.renderSettings.fit);
+  const studio = resolveStudioOverlay(
+    project.renderSettings.studio,
+    project.renderSettings.width,
+    project.renderSettings.height
+  );
   const scenes: RenderPlanScene[] = project.scenes
     .slice()
     .sort((left, right) => left.order - right.order)
@@ -333,6 +339,7 @@ export function resolveRenderPlan(project: Project): RenderPlan {
     height: project.renderSettings.height,
     fit,
     background: project.renderSettings.background,
+    studio,
     ready: scenes.every((scene) => scene.status === 'renderable'),
     scenes,
     narration: project.narration,

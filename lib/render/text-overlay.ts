@@ -53,13 +53,13 @@ export function escapeDrawtextValue(value: string): string {
     .replace(/ /g, '\\ ');
 }
 
-export function buildDrawtextFilter(overlay: ResolvedTextOverlay, textFileName: string): string {
+export function buildDrawtextFilter(overlay: ResolvedTextOverlay, textFileName: string, centerX?: number): string {
   const parts = [
     `font=${escapeDrawtextValue(DEFAULT_OVERLAY_FONT)}`,
     `textfile=${escapeDrawtextValue(textFileName)}`,
     `fontcolor=${overlay.fontColor}`,
     `fontsize=${overlay.fontSize}`,
-    'x=(w-text_w)/2',
+    `x=${typeof centerX === 'number' ? `${Math.round(centerX)}-text_w/2` : '(w-text_w)/2'}`,
     `y=${positionExpression(overlay)}`,
     `borderw=${overlay.borderWidth}`,
     `bordercolor=${overlay.borderColor}`,
@@ -97,6 +97,10 @@ export interface SceneOverlayFilterOptions {
   height: number;
   duration: number;
   tempDir: string;
+  // Optional pixel center used when the scene is framed by a studio overlay,
+  // so lower-third copy is centered in the visible screen instead of the
+  // full canvas. Omitted keeps the historical canvas-centered behavior.
+  centerX?: number;
 }
 
 /**
@@ -125,5 +129,5 @@ export async function buildSceneOverlayFilter(
   }
 
   const textFileName = await writeOverlayTextFile(options.tempDir, resolved.text);
-  return buildDrawtextFilter(resolved, textFileName);
+  return buildDrawtextFilter(resolved, textFileName, options.centerX);
 }

@@ -14,7 +14,8 @@
     "test:mcp:readonly": "vitest run tests/mcp-read-only.test.ts",
     "mcp:readonly": "tsx mcp/read-only/server.ts",
     "mcp:local": "tsx mcp/read-only/server.ts",
-    "smoke:logo": "tsx scripts/logo-overlay-smoke.ts"
+    "smoke:logo": "tsx scripts/logo-overlay-smoke.ts",
+    "smoke:studio": "tsx scripts/studio-smoke.ts"
   },
   "dependencies": {
     "image-size": "^2.0.4",

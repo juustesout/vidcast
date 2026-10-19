@@ -1,6 +1,6 @@
 import type { Asset, AssetType } from './asset';
 import type { ExplainerSpec } from './explainer';
-import type { GraphicStyleSpec, GraphicTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, TransitionSpec } from './scene';
+import type { GraphicStyleSpec, GraphicTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, StudioOverlaySpec, TransitionSpec } from './scene';
 import type { ReferenceImage } from './reference';
 import type { PresenterClipSpec, ProjectPresenterSettings, CompositionPresenterPlan } from './presenter';
 
@@ -36,6 +36,9 @@ export interface RenderSettings {
   // Optional project-level palette for graphic templates. A scene's visual
   // style overrides individual fields.
   graphicStyle?: GraphicStyleSpec;
+  // Optional reusable studio set. Absent means scenes render full-frame exactly
+  // as they did before this layer existed.
+  studio?: StudioOverlaySpec;
 }
 
 export interface RenderIssue {
@@ -143,6 +146,21 @@ export interface RenderPlanSceneSource {
 // A logo resolved against the project asset list. `assetPath` is project-relative
 // (or absolute for callers that build plans directly).
 export type RenderPlanLogoOverlay = LogoOverlaySpec & { assetPath: string };
+
+// Studio geometry resolved to concrete canvas pixels. The renderer rasterizes
+// this into a transparent-cutout PNG and composites it above the scene source.
+export interface RenderPlanStudioOverlay {
+  brand: string;
+  program: string;
+  accentColor: string;
+  screen: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    radius: number;
+  };
+}
 
 export type RenderPlanSceneStatus = 'renderable' | 'planned' | 'invalid';
 
@@ -297,6 +315,9 @@ export interface RenderPlan {
     type: 'color';
     value: string;
   };
+  // Optional studio set resolved to canvas pixels. Absent keeps the historical
+  // full-frame scene rendering.
+  studio?: RenderPlanStudioOverlay;
   ready: boolean;
   scenes: RenderPlanScene[];
   narration: ProjectNarration;

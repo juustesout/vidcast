@@ -134,7 +134,7 @@ export function collectProjectPatchShapeIssues(patch: unknown): RenderIssue[] {
   if ('renderSettings' in patch && patch.renderSettings !== undefined && !isPlainObject(patch.renderSettings)) {
     push(issues, 'project.renderSettings.invalid', 'renderSettings', 'renderSettings must be an object.');
   } else if (isPlainObject(patch.renderSettings)) {
-    for (const field of ['logo', 'graphicStyle'] as const) {
+    for (const field of ['logo', 'graphicStyle', 'studio'] as const) {
       const value = patch.renderSettings[field];
       if (value !== undefined && value !== null && !isPlainObject(value)) {
         push(issues, `project.renderSettings.${field}.invalid`, `renderSettings.${field}`, `renderSettings.${field} must be an object.`);

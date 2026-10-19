@@ -48,6 +48,27 @@ export interface GraphicStyleSpec {
   statisticLabelColor?: string;
 }
 
+// Normalized (0..1) screen rectangle inside the studio set. The scene source is
+// visible only through this cutout; the studio frame covers the rest.
+export interface StudioScreenSpec {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  // Corner radius in pixels at the rendered canvas size.
+  radius?: number;
+}
+
+// Optional reusable studio set. Presence enables the layer for every scene in
+// the project; absent keeps the historical full-frame scene rendering.
+export interface StudioOverlaySpec {
+  brand?: string;
+  program?: string;
+  screen?: StudioScreenSpec;
+  // Hex accent color for the lower-third stripe and on-air dot.
+  accentColor?: string;
+}
+
 export type GraphicTemplateType =
   | 'title_card'
   | 'bullet_list'

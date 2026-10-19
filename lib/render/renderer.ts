@@ -14,6 +14,7 @@ import { sceneDurationMatches } from './scene-timing';
 import { getSceneRenderTimeoutMs } from './render-timeouts';
 import { buildSceneOverlayFilter } from './text-overlay';
 import { buildLogoOverlayFilter, resolveLogoGeometry } from './logo-overlay';
+import { buildStudioOverlayFilter, createStudioOverlaySvg } from './studio-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 
 export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
@@ -227,13 +228,176 @@ function logoInputArgs(logoPath: string, fps: number): string[] {
   return ['-loop', '1', '-framerate', String(fps), '-i', logoPath];
 }
 
+async function resolveStudioOverlayPath(plan: RenderPlan, options: SceneRenderOptions): Promise<string | undefined> {
+  if (!plan.studio) {
+    return undefined;
+  }
+
+  const svg = createStudioOverlaySvg(plan.studio, options.sceneWidth, options.sceneHeight);
+  const pngPath = safePathForSvg(options.tempDir, `${options.sceneId}-${options.renderId}-studio.png`);
+  await sharp(Buffer.from(svg), { density: 300 })
+    .resize(options.sceneWidth, options.sceneHeight, { fit: 'fill' })
+    .png()
+    .toFile(pngPath);
+  return pngPath;
+}
+
+function buildStudioStillArgs(
+  scene: RenderPlanScene,
+  options: SceneRenderOptions,
+  sourcePath: string,
+  overlayFilter: string | undefined,
+  logoPath: string | undefined,
+  studioPath: string
+): string[] {
+  const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
+  const logo = logoPath && scene.logo
+    ? {
+        path: logoPath,
+        geometry: resolveLogoGeometry(scene.logo, options.sceneWidth, options.sceneHeight)
+      }
+    : undefined;
+  const inputArgs = [...logoInputArgs(studioPath, options.sceneFps)];
+  const parts: string[] = [];
+  let currentLabel: string;
+
+  if (sourcePath === 'color=black') {
+    parts.push('[0:v]null[base]');
+    currentLabel = 'base';
+  } else {
+    const zoomPan = sceneMotionToZoomPan(scene, frameCount);
+    const fadeFilters = buildSceneFadeFilters(scene.duration);
+    const fitFilter = buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT);
+    parts.push(`[0:v]${[fitFilter, `zoompan=${zoomPan}:d=${frameCount}:s=${options.sceneWidth}x${options.sceneHeight}:fps=${options.sceneFps}`, ...fadeFilters].join(',')}[pre]`);
+    currentLabel = 'pre';
+  }
+
+  parts.push(buildStudioOverlayFilter('1:v', currentLabel, 'studioout'));
+  currentLabel = 'studioout';
+
+  if (overlayFilter) {
+    parts.push(`[${currentLabel}]${overlayFilter}[textout]`);
+    currentLabel = 'textout';
+  }
+
+  if (logo) {
+    inputArgs.push(...logoInputArgs(logo.path, options.sceneFps));
+    parts.push(buildLogoOverlayFilter(logo.geometry, '2:v', currentLabel, 'logoout'));
+    currentLabel = 'logoout';
+  }
+
+  parts.push(`[${currentLabel}]format=yuv420p[v]`);
+
+  const outputArgs = ['-map', '[v]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', options.outputPath];
+
+  if (sourcePath === 'color=black') {
+    const background = '#020617'.replace('#', '0x');
+    return [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      `color=c=${background}:s=${options.sceneWidth}x${options.sceneHeight}:r=${options.sceneFps}`,
+      ...inputArgs,
+      '-filter_complex',
+      parts.join(';'),
+      '-t',
+      String(scene.duration),
+      ...outputArgs
+    ];
+  }
+
+  return [
+    '-y',
+    '-loop',
+    '1',
+    '-i',
+    sourcePath,
+    ...inputArgs,
+    '-frames:v',
+    String(frameCount),
+    '-filter_complex',
+    parts.join(';'),
+    ...outputArgs
+  ];
+}
+
+function buildStudioVideoArgs(
+  scene: RenderPlanScene,
+  options: SceneRenderOptions,
+  sourcePath: string,
+  hasAudio: boolean,
+  overlayFilter: string | undefined,
+  logoPath: string | undefined,
+  studioPath: string
+): string[] {
+  const inputDuration = sourceDuration(scene);
+  const extraDuration = Math.max(0, scene.duration - inputDuration);
+  const fadeFilters = buildSceneFadeFilters(scene.duration);
+  const videoFilters = [
+    `trim=duration=${scene.duration}`,
+    'setpts=PTS-STARTPTS',
+    `tpad=stop_mode=clone:stop_duration=${extraDuration}`,
+    buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT),
+    ...fadeFilters,
+    `fps=${options.sceneFps}`
+  ];
+  const logo = logoPath && scene.logo
+    ? {
+        path: logoPath,
+        geometry: resolveLogoGeometry(scene.logo, options.sceneWidth, options.sceneHeight)
+      }
+    : undefined;
+  const inputArgs = [...logoInputArgs(studioPath, options.sceneFps)];
+  const parts = [`[0:v]${videoFilters.join(',')}[pre]`];
+  let currentLabel = 'pre';
+
+  parts.push(buildStudioOverlayFilter('1:v', currentLabel, 'studioout'));
+  currentLabel = 'studioout';
+
+  if (overlayFilter) {
+    parts.push(`[${currentLabel}]${overlayFilter}[textout]`);
+    currentLabel = 'textout';
+  }
+
+  if (logo) {
+    inputArgs.push(...logoInputArgs(logo.path, options.sceneFps));
+    parts.push(buildLogoOverlayFilter(logo.geometry, '2:v', currentLabel, 'logoout'));
+    currentLabel = 'logoout';
+  }
+
+  parts.push(`[${currentLabel}]format=yuv420p[v]`);
+
+  const args = ['-y', '-i', sourcePath, ...inputArgs, '-filter_complex'];
+
+  if (hasAudio) {
+    const audioFilters = [
+      `atrim=duration=${scene.duration}`,
+      'asetpts=PTS-STARTPTS',
+      `apad=pad_dur=${extraDuration}`
+    ].join(',');
+    args.push(`${parts.join(';')};[0:a]${audioFilters}[a]`);
+    args.push('-map', '[v]', '-map', '[a]', '-t', String(scene.duration), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', options.outputPath);
+    return args;
+  }
+
+  args.push(parts.join(';'));
+  args.push('-map', '[v]', '-an', '-t', String(scene.duration), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', options.outputPath);
+  return args;
+}
+
 function buildStillArgs(
   scene: RenderPlanScene,
   options: SceneRenderOptions,
   sourcePath: string,
   overlayFilter?: string,
-  logoPath?: string
+  logoPath?: string,
+  studioPath?: string
 ): string[] {
+  if (studioPath) {
+    return buildStudioStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath);
+  }
+
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
   const zoomPan = sceneMotionToZoomPan(scene, frameCount);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
@@ -350,8 +514,13 @@ function buildVideoArgs(
   sourcePath: string,
   hasAudio: boolean,
   overlayFilter?: string,
-  logoPath?: string
+  logoPath?: string,
+  studioPath?: string
 ): string[] {
+  if (studioPath) {
+    return buildStudioVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath, studioPath);
+  }
+
   const inputDuration = sourceDuration(scene);
   const extraDuration = Math.max(0, scene.duration - inputDuration);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
@@ -519,16 +688,18 @@ export class LocalFFmpegRenderer implements Renderer {
     try {
       const sourcePath = await resolveSceneSourcePath(plan, scene, options);
       const logoPath = await resolveSceneLogoPath(scene, options);
+      const studioPath = await resolveStudioOverlayPath(plan, options);
       const overlayFilter = await buildSceneOverlayFilter(scene, {
         width: options.sceneWidth,
         height: options.sceneHeight,
         duration: scene.duration,
-        tempDir: options.tempDir
+        tempDir: options.tempDir,
+        centerX: plan.studio ? plan.studio.screen.x + plan.studio.screen.width / 2 : undefined
       });
 
       const args = sourceIsVideo(scene)
-        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath)
-        : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath);
+        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath, studioPath)
+        : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath);
 
       const command = this.runtime.ffmpegPath;
       await runFfmpeg(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() }, 'scene_render');
@@ -570,9 +741,10 @@ async function buildVideoPipeline(
   sourcePath: string,
   runtime: FFmpegRuntime,
   overlayFilter?: string,
-  logoPath?: string
+  logoPath?: string,
+  studioPath?: string
 ): Promise<string[]> {
   const probe = await probeMedia(sourcePath, runtime);
   const hasAudio = probe.streams.some((stream) => stream.codec_type === 'audio');
-  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath);
+  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath, studioPath);
 }
