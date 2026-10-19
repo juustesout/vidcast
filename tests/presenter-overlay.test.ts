@@ -199,6 +199,11 @@ describe('presenter overlay composition', () => {
     expect(centerR).toBeLessThan(90);
     expect(centerG).toBeLessThan(90);
 
+    const [heldR, heldG, heldB] = await samplePixel(output, 2.2, 220, 120);
+    expect(heldR).toBeGreaterThan(140);
+    expect(heldG).toBeLessThan(90);
+    expect(heldB).toBeLessThan(90);
+
     const [afterR, afterG, afterB] = await samplePixel(output, 2.7, 220, 120);
     expect(afterB).toBeGreaterThan(140);
     expect(afterR).toBeLessThan(90);
@@ -238,6 +243,40 @@ describe('presenter overlay composition', () => {
     expect(afterG).toBeLessThan(90);
 
     expect(await maxVolumeDb(output)).toBeLessThan(-60);
+  }, 120_000);
+
+  it('holds the final presenter frame when the clip is shorter than the scene', async () => {
+    const output = path.join(tempDir, 'fullscreen-padded-output.mp4');
+    const composition = plan({
+      presenter: {
+        placements: [
+          {
+            sceneId: 'scene-1',
+            clipPath: fullscreenClip,
+            clipDuration: 2,
+            startTime: 0,
+            duration: 2.5,
+            layout: 'fullscreen',
+            startOffsetSeconds: 0
+          }
+        ]
+      }
+    });
+
+    await ffmpeg(buildPresenterOverlayArgs(baseVideo, output, composition));
+
+    const [heldR, heldG, heldB] = await samplePixel(output, 2.4, 160, 90);
+    expect(heldG).toBeGreaterThan(120);
+    expect(heldR).toBeLessThan(90);
+    expect(heldB).toBeLessThan(90);
+
+    const [afterR, afterG, afterB] = await samplePixel(output, 2.8, 160, 90);
+    expect(afterB).toBeGreaterThan(140);
+    expect(afterR).toBeLessThan(90);
+    expect(afterG).toBeLessThan(90);
+
+    const info = await probe(output);
+    expect(Number(info.format.duration)).toBeCloseTo(3, 1);
   }, 120_000);
 
   it('passes the base video through unchanged when no presenter is configured', async () => {

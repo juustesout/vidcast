@@ -122,4 +122,22 @@ describe('HeyGen presenter provider', () => {
       error: 'rendering_failed: Avatar rendering timed out'
     });
   });
+
+  it('reads the remaining USD wallet balance for cost observation', async () => {
+    vi.stubEnv('HEYGEN_API_KEY', 'test-key');
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({
+          data: { wallet: { remaining_balance: 14.93, currency: 'USD' } }
+        }), { status: 200 });
+      })
+    );
+
+    const provider = new HeyGenPresenterProvider();
+    await expect(provider.getBillingBalanceUsd()).resolves.toBe(14.93);
+    expect(calls).toEqual(['https://api.heygen.com/v3/users/me']);
+  });
 });

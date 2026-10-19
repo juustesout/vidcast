@@ -1,10 +1,11 @@
-import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanScene, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
+import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanLogoOverlay, RenderPlanScene, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
 import type { Asset } from '@/lib/types/asset';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
 import { normalizeAudioMix } from './audio-mix';
 import { describeFitWarning, resolveRenderFit } from './fit-policy';
 import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from './scene-timing';
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
+import { mergeGraphicStyles } from './graphic-style';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -197,7 +198,8 @@ function resolveVisualSource(project: Project, scene: Scene): {
         source: {
           kind: 'graphic',
           template: visual.template,
-          templateData: visual.templateData
+          templateData: visual.templateData,
+          style: mergeGraphicStyles(project.renderSettings.graphicStyle, visual.style)
         },
         issues: []
       };
@@ -225,6 +227,53 @@ function resolveVisualSource(project: Project, scene: Scene): {
   }
 }
 
+function resolveSceneLogo(project: Project, scene: Scene): {
+  logo?: RenderPlanLogoOverlay;
+  issues: RenderPlanSceneStateIssue[];
+} {
+  // `null` is an explicit per-scene opt-out; only an absent field inherits the
+  // project-level default.
+  if (scene.logo === null) {
+    return { issues: [] };
+  }
+
+  const candidate = scene.logo ?? project.renderSettings.logo;
+  if (candidate === undefined) {
+    return { issues: [] };
+  }
+
+  if (!candidate || typeof candidate !== 'object') {
+    return { issues: [createSceneIssue('scene.logo.invalid', 'Logo overlay configuration must be an object.', 'warning')] };
+  }
+
+  const assetId = typeof candidate.assetId === 'string' ? candidate.assetId.trim() : '';
+  if (!assetId) {
+    return { issues: [createSceneIssue('scene.logo.asset.required', 'Logo overlay requires an asset id.', 'warning')] };
+  }
+
+  const asset = findAsset(project, assetId);
+  if (!asset) {
+    return { issues: [createSceneIssue('scene.logo.asset.notFound', `Logo asset ${assetId} does not exist.`, 'warning')] };
+  }
+
+  if (asset.type !== 'image' && asset.type !== 'graphic') {
+    return { issues: [createSceneIssue('scene.logo.asset.invalidType', `Logo asset ${asset.id} is not an image asset.`, 'warning')] };
+  }
+
+  if (!asset.localPath) {
+    return { issues: [createSceneIssue('scene.logo.asset.notReady', `Logo asset ${asset.id} has no local file path.`, 'warning')] };
+  }
+
+  return {
+    logo: {
+      ...candidate,
+      assetId,
+      assetPath: asset.localPath
+    },
+    issues: []
+  };
+}
+
 export function resolveRenderPlan(project: Project): RenderPlan {
   const issues: RenderIssue[] = [];
   const fit = resolveRenderFit(project.renderSettings.fit);
@@ -246,7 +295,8 @@ export function resolveRenderPlan(project: Project): RenderPlan {
             )
           ]
         : [];
-      const sceneIssues = [...resolved.issues, ...timingIssues, ...resolveFitIssues(project, resolved.source, fit)];
+      const logo = resolveSceneLogo(project, scene);
+      const sceneIssues = [...resolved.issues, ...timingIssues, ...resolveFitIssues(project, resolved.source, fit), ...logo.issues];
 
       for (const issue of sceneIssues) {
         issues.push({
@@ -267,6 +317,7 @@ export function resolveRenderPlan(project: Project): RenderPlan {
         motion: scene.render.motion,
         transition: scene.render.transition,
         overlay: scene.overlay,
+        logo: logo.logo,
         narration: scene.narration,
         referenceIds: scene.referenceIds,
         issues: sceneIssues

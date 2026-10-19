@@ -16,6 +16,15 @@ export interface StockRouterRequest {
   // Deterministic seed for candidate selection; defaults to the query. Keeps
   // repeated resolutions of the same query stable even before caching.
   selectionSeed?: string;
+  // Provider-scoped photo keys (`provider:photoId`) that must not be selected.
+  // Used when a selected candidate's download fails: the next resolution skips
+  // both the cached selection and that photo, so a transient CDN failure cannot
+  // pin a scene to a permanently unusable image.
+  excludePhotoKeys?: string[];
+}
+
+export function stockPhotoKey(photo: { provider: StockProviderId; photoId: string }): string {
+  return `${photo.provider}:${photo.photoId}`;
 }
 
 export interface StockSearchRequest {
@@ -148,11 +157,12 @@ export class StockRouter {
     }
 
     const key = stockSelectionKey(query, request.orientation);
+    const excluded = new Set(request.excludePhotoKeys ?? []);
     const cached = await this.store.getCachedSelection(key);
     // A cache hit is only valid if the cached selection's provider is allowed in
     // this router's mode. Without this check a mock-mode fake selection would be
     // reused verbatim by a real-mode router before `allowedProviders` is applied.
-    if (cached && this.isProviderAllowed(cached.provider)) {
+    if (cached && this.isProviderAllowed(cached.provider) && !excluded.has(stockPhotoKey(cached))) {
       return { selection: cached, cached: true, diagnostics: [{ provider: cached.provider, outcome: 'cache_hit' }] };
     }
 
@@ -220,12 +230,13 @@ export class StockRouter {
 
       await this.store.recordRequest(providerId, result.rateLimit);
 
-      if (result.photos.length === 0) {
+      const candidates = result.photos.filter((photo) => !excluded.has(stockPhotoKey(photo)));
+      if (candidates.length === 0) {
         diagnostics.push({ provider: providerId, outcome: 'empty', detail: 'no candidate photos' });
         continue;
       }
 
-      const selection = this.buildSelection(provider, result.photos, request, query, key);
+      const selection = this.buildSelection(provider, candidates, request, query, key);
       await this.store.setCachedSelection(key, selection);
       diagnostics.push({ provider: providerId, outcome: 'selected' });
       return { selection, cached: false, diagnostics };

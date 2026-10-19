@@ -22,11 +22,13 @@ export function createSceneRenderFingerprint(plan: RenderPlan, scene: RenderPlan
         mimeType: scene.source.mimeType,
         template: scene.source.template,
         templateData: scene.source.templateData,
+        style: scene.source.style,
         text: scene.source.text
       },
       motion: scene.motion,
       transition: scene.transition,
-      overlay: scene.overlay
+      overlay: scene.overlay,
+      logo: scene.logo
     },
     renderer: 'ffmpeg'
   });

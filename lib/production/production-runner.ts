@@ -250,28 +250,46 @@ interface ExecutionItemResult {
 async function executeBounded(
   actions: ProductionPlannedAction[],
   limit: number,
-  execute: (action: ProductionPlannedAction) => Promise<ProductionActionExecutionOutcome | void>
+  execute: (action: ProductionPlannedAction) => Promise<ProductionActionExecutionOutcome | void>,
+  onSettled?: (item: ExecutionItemResult) => void
 ): Promise<ExecutionItemResult[]> {
-  const results: ExecutionItemResult[] = [];
   if (actions.length === 0) {
-    return results;
+    return [];
   }
 
-  const safeLimit = Math.max(1, limit);
-  for (let index = 0; index < actions.length; index += safeLimit) {
-    const slice = actions.slice(index, index + safeLimit);
-    const settled = await Promise.allSettled(slice.map((action) => execute(action)));
-    for (let offset = 0; offset < slice.length; offset += 1) {
-      const action = slice[offset];
-      const item = settled[offset];
-      if (item.status === 'fulfilled') {
-        results.push({ action, ok: true, outcome: item.value ?? undefined });
-      } else {
-        results.push({ action, ok: false, error: normalizeExecutionError(item.reason) });
+  // A worker pool (rather than fixed sequential slices) reports every settled
+  // action immediately. This matters for long `scene_render` groups: with the
+  // old slice loop, ten completed renders produced no run progress at all until
+  // the final render in the group finished, so a slow or stuck render looked
+  // exactly like a run that had stopped.
+  const results: ExecutionItemResult[] = new Array(actions.length);
+  const safeLimit = Math.max(1, Math.floor(limit) || 1);
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= actions.length) {
+        return;
       }
-    }
-  }
 
+      const action = actions[index];
+      let item: ExecutionItemResult;
+      try {
+        const outcome = await execute(action);
+        item = { action, ok: true, outcome: outcome ?? undefined };
+      } catch (error) {
+        item = { action, ok: false, error: normalizeExecutionError(error) };
+      }
+
+      results[index] = item;
+      onSettled?.(item);
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(safeLimit, actions.length) }, () => worker());
+  await Promise.all(workers);
   return results;
 }
 
@@ -458,35 +476,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
         });
       }
 
-      const result = await executeBounded(matching, config.limits[type] ?? 1, async (action) => {
-        runningActionIds.add(action.id);
-        emit({
-          iteration,
-          code: action.type === 'final_compose' ? 'composition_started' : 'action_started',
-          status: 'started',
-          actionType: action.type,
-          actionId: action.id,
-          sceneId: action.sceneId,
-          message: `${createActionLabel(action)} started.`
-        });
-        input.onProgress?.({
-          iteration,
-          project,
-          plan,
-          completedActionIds: Array.from(completedActionIds),
-          failedActionIds: Array.from(failedActionIds),
-          runningActionIds: Array.from(runningActionIds),
-          events: [...events]
-        });
-
-        try {
-          return await input.executeAction(action);
-        } finally {
-          runningActionIds.delete(action.id);
-        }
-      });
-
-      for (const item of result) {
+      const handleSettled = (item: ExecutionItemResult): void => {
         executed += 1;
         if (item.ok) {
           completedActionIds.add(item.action.id);
@@ -545,7 +535,40 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
           runningActionIds: Array.from(runningActionIds),
           events: [...events]
         });
-      }
+      };
+
+      await executeBounded(
+        matching,
+        config.limits[type] ?? 1,
+        async (action) => {
+          runningActionIds.add(action.id);
+          emit({
+            iteration,
+            code: action.type === 'final_compose' ? 'composition_started' : 'action_started',
+            status: 'started',
+            actionType: action.type,
+            actionId: action.id,
+            sceneId: action.sceneId,
+            message: `${createActionLabel(action)} started.`
+          });
+          input.onProgress?.({
+            iteration,
+            project,
+            plan,
+            completedActionIds: Array.from(completedActionIds),
+            failedActionIds: Array.from(failedActionIds),
+            runningActionIds: Array.from(runningActionIds),
+            events: [...events]
+          });
+
+          try {
+            return await input.executeAction(action);
+          } finally {
+            runningActionIds.delete(action.id);
+          }
+        },
+        handleSettled
+      );
     }
 
     if (executed === 0) {

@@ -75,4 +75,7 @@ export interface PresenterProvider {
   submit(request: PresenterSubmitRequest): Promise<PresenterSubmitResult>;
   getStatus(providerJobId: string): Promise<PresenterJobStatus>;
   download(status: PresenterJobStatus): Promise<PresenterDownloadResult>;
+  // Optional because not every provider exposes a billing balance. Used only
+  // to record the measured delta around a paid request.
+  getBillingBalanceUsd?(): Promise<number | undefined>;
 }

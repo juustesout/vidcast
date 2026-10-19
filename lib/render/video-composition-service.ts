@@ -6,7 +6,7 @@ import { getProjectRoot } from '@/lib/storage/storage-paths';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
 import type { CompositionArtifact, CompositionPlan, CompositionResult, CompositionTransition, Project } from '@/lib/types/render';
 import type { CompositionPresenterPlan, PresenterOverlayPlacement } from '@/lib/types/presenter';
-import { derivePresenterSignature, resolvePresenterPip } from '@/lib/presenter/config';
+import { derivePresenterSignature, PRESENTER_MAX_EXPECTED_PADDING_SECONDS, resolvePresenterPip } from '@/lib/presenter/config';
 import { createId } from '@/lib/utils/ids';
 import { createCompositionPaths, ensureCompositionDirectories } from './composition-artifacts';
 import { normalizeAudioMix } from './audio-mix';
@@ -183,12 +183,18 @@ async function resolvePresenterPlan(project: Project, items: CompositionPlan['it
       if (available < 0.1) {
         warnings.push(`Scene ${item.sceneOrder} presenter clip is shorter than its start offset; rendering without it.`);
       } else {
+        const padding = Math.max(0, item.duration - available);
+        if (padding > PRESENTER_MAX_EXPECTED_PADDING_SECONDS) {
+          warnings.push(`Scene ${item.sceneOrder} presenter clip is ${padding.toFixed(3)}s shorter than the scene; holding its final frame.`);
+        }
         placements.push({
           sceneId: item.sceneId,
           clipPath,
           clipDuration: clip.duration,
           startTime,
-          duration: Math.min(item.duration, available),
+          // Keep the presenter layer enabled for the full scene. The overlay
+          // builder clones the final frame when the clip is shorter than this.
+          duration: item.duration,
           layout: setting.layout,
           startOffsetSeconds,
           pip: setting.layout === 'pip' ? resolvePresenterPip(setting) : undefined

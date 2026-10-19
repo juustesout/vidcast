@@ -13,6 +13,7 @@ import { createSceneRenderFingerprint } from './render-fingerprint';
 import { sceneDurationMatches } from './scene-timing';
 import { getSceneRenderTimeoutMs } from './render-timeouts';
 import { buildSceneOverlayFilter } from './text-overlay';
+import { buildLogoOverlayFilter, resolveLogoGeometry } from './logo-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 
 export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
@@ -55,6 +56,9 @@ function sceneSourceAssetIds(scene: RenderPlanScene): string[] {
   const ids: string[] = [];
   if (scene.source.assetId) {
     ids.push(scene.source.assetId);
+  }
+  if (scene.logo?.assetId) {
+    ids.push(scene.logo.assetId);
   }
   return ids;
 }
@@ -181,7 +185,55 @@ async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, 
   return rasterizedPath;
 }
 
-function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, overlayFilter?: string): string[] {
+const DIRECT_LOGO_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
+// Logo assets are optional: a missing or unreadable file must never fail the
+// underlying scene render. Project validation reports the broken reference;
+// the renderer degrades to a logo-free scene. PNG/WebP alpha is preserved, and
+// SVG or less common formats are rasterized to a transparent PNG first.
+async function resolveSceneLogoPath(scene: RenderPlanScene, options: SceneRenderOptions): Promise<string | undefined> {
+  if (!scene.logo?.assetPath) {
+    return undefined;
+  }
+
+  const absolutePath = path.isAbsolute(scene.logo.assetPath)
+    ? scene.logo.assetPath
+    : path.join(getProjectRoot(options.projectId), scene.logo.assetPath);
+
+  try {
+    await fs.access(absolutePath);
+    const metadata = await sharp(absolutePath, { density: 300 }).metadata();
+    if (!metadata.width || !metadata.height) {
+      return undefined;
+    }
+
+    const extension = path.extname(absolutePath).toLowerCase();
+    if (DIRECT_LOGO_EXTENSIONS.has(extension)) {
+      return absolutePath;
+    }
+
+    const rasterizedPath = safePathForSvg(options.tempDir, `${options.sceneId}-${options.renderId}-logo.png`);
+    await sharp(absolutePath, { density: 300 })
+      .resize({ width: 2048, withoutEnlargement: true })
+      .png()
+      .toFile(rasterizedPath);
+    return rasterizedPath;
+  } catch {
+    return undefined;
+  }
+}
+
+function logoInputArgs(logoPath: string, fps: number): string[] {
+  return ['-loop', '1', '-framerate', String(fps), '-i', logoPath];
+}
+
+function buildStillArgs(
+  scene: RenderPlanScene,
+  options: SceneRenderOptions,
+  sourcePath: string,
+  overlayFilter?: string,
+  logoPath?: string
+): string[] {
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
   const zoomPan = sceneMotionToZoomPan(scene, frameCount);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
@@ -190,16 +242,46 @@ function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
   // rasterized to the canvas size this is a no-op; for a mismatched still image
   // it prevents the silent stretch that zoompan would otherwise apply.
   const fitFilter = buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT);
-  const filterChain = [
+  const baseFilters = [
     fitFilter,
     `zoompan=${zoomPan}:d=${frameCount}:s=${options.sceneWidth}x${options.sceneHeight}:fps=${options.sceneFps}`,
     ...fadeFilters,
-    ...(overlayFilter ? [overlayFilter] : []),
-    'format=yuv420p'
-  ].join(',');
+    ...(overlayFilter ? [overlayFilter] : [])
+  ];
+  const logo = logoPath && scene.logo
+    ? {
+        path: logoPath,
+        geometry: resolveLogoGeometry(scene.logo, options.sceneWidth, options.sceneHeight)
+      }
+    : undefined;
 
   if (sourcePath === 'color=black') {
-    const background = (scene.source.kind === 'blank' ? '#020617' : '#020617').replace('#', '0x');
+    const background = '#020617'.replace('#', '0x');
+    if (logo) {
+      const complex = `[0:v]${overlayFilter ?? 'null'}[base];${buildLogoOverlayFilter(logo.geometry, '1:v', 'base', 'logoout')};[logoout]format=yuv420p[v]`;
+      return [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=${background}:s=${options.sceneWidth}x${options.sceneHeight}:r=${options.sceneFps}`,
+        ...logoInputArgs(logo.path, options.sceneFps),
+        '-filter_complex',
+        complex,
+        '-map',
+        '[v]',
+        '-t',
+        String(scene.duration),
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        options.outputPath
+      ];
+    }
+
     const args = [
       '-y',
       '-f',
@@ -216,6 +298,32 @@ function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
     return args;
   }
 
+  if (logo) {
+    const complex = `[0:v]${baseFilters.join(',')}[base];${buildLogoOverlayFilter(logo.geometry, '1:v', 'base', 'logoout')};[logoout]format=yuv420p[v]`;
+    return [
+      '-y',
+      '-loop',
+      '1',
+      '-i',
+      sourcePath,
+      ...logoInputArgs(logo.path, options.sceneFps),
+      '-frames:v',
+      String(frameCount),
+      '-filter_complex',
+      complex,
+      '-map',
+      '[v]',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      '-movflags',
+      '+faststart',
+      options.outputPath
+    ];
+  }
+
+  const filterChain = [...baseFilters, 'format=yuv420p'].join(',');
   return [
     '-y',
     '-loop',
@@ -236,7 +344,14 @@ function buildStillArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
   ];
 }
 
-function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, hasAudio: boolean, overlayFilter?: string): string[] {
+function buildVideoArgs(
+  scene: RenderPlanScene,
+  options: SceneRenderOptions,
+  sourcePath: string,
+  hasAudio: boolean,
+  overlayFilter?: string,
+  logoPath?: string
+): string[] {
   const inputDuration = sourceDuration(scene);
   const extraDuration = Math.max(0, scene.duration - inputDuration);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
@@ -247,10 +362,36 @@ function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
     buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT),
     ...fadeFilters,
     `fps=${options.sceneFps}`,
-    ...(overlayFilter ? [overlayFilter] : []),
-    'format=yuv420p'
-  ].join(',');
+    ...(overlayFilter ? [overlayFilter] : [])
+  ];
+  const logo = logoPath && scene.logo
+    ? {
+        path: logoPath,
+        geometry: resolveLogoGeometry(scene.logo, options.sceneWidth, options.sceneHeight)
+      }
+    : undefined;
 
+  if (logo) {
+    const videoChain = `[0:v]${videoFilters.join(',')}[base];${buildLogoOverlayFilter(logo.geometry, '1:v', 'base', 'logoout')};[logoout]format=yuv420p[v]`;
+    const args = ['-y', '-i', sourcePath, ...logoInputArgs(logo.path, options.sceneFps), '-filter_complex'];
+
+    if (hasAudio) {
+      const audioFilters = [
+        `atrim=duration=${scene.duration}`,
+        'asetpts=PTS-STARTPTS',
+        `apad=pad_dur=${extraDuration}`
+      ].join(',');
+      args.push(`${videoChain};[0:a]${audioFilters}[a]`);
+      args.push('-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', options.outputPath);
+      return args;
+    }
+
+    args.push(videoChain);
+    args.push('-map', '[v]', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', options.outputPath);
+    return args;
+  }
+
+  const filterChain = [...videoFilters, 'format=yuv420p'].join(',');
   const args = [
     '-y',
     '-i',
@@ -264,12 +405,12 @@ function buildVideoArgs(scene: RenderPlanScene, options: SceneRenderOptions, sou
       'asetpts=PTS-STARTPTS',
       `apad=pad_dur=${extraDuration}`
     ].join(',');
-    args.push(`[0:v]${videoFilters}[v];[0:a]${audioFilters}[a]`);
+    args.push(`[0:v]${filterChain}[v];[0:a]${audioFilters}[a]`);
     args.push('-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', options.outputPath);
     return args;
   }
 
-  args.push(`[0:v]${videoFilters}[v]`);
+  args.push(`[0:v]${filterChain}[v]`);
   args.push('-map', '[v]', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', options.outputPath);
   return args;
 }
@@ -377,6 +518,7 @@ export class LocalFFmpegRenderer implements Renderer {
 
     try {
       const sourcePath = await resolveSceneSourcePath(plan, scene, options);
+      const logoPath = await resolveSceneLogoPath(scene, options);
       const overlayFilter = await buildSceneOverlayFilter(scene, {
         width: options.sceneWidth,
         height: options.sceneHeight,
@@ -385,8 +527,8 @@ export class LocalFFmpegRenderer implements Renderer {
       });
 
       const args = sourceIsVideo(scene)
-        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter)
-        : buildStillArgs(scene, options, sourcePath, overlayFilter);
+        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath)
+        : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath);
 
       const command = this.runtime.ffmpegPath;
       await runFfmpeg(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() }, 'scene_render');
@@ -422,8 +564,15 @@ export class LocalFFmpegRenderer implements Renderer {
   }
 }
 
-async function buildVideoPipeline(scene: RenderPlanScene, options: SceneRenderOptions, sourcePath: string, runtime: FFmpegRuntime, overlayFilter?: string): Promise<string[]> {
+async function buildVideoPipeline(
+  scene: RenderPlanScene,
+  options: SceneRenderOptions,
+  sourcePath: string,
+  runtime: FFmpegRuntime,
+  overlayFilter?: string,
+  logoPath?: string
+): Promise<string[]> {
   const probe = await probeMedia(sourcePath, runtime);
   const hasAudio = probe.streams.some((stream) => stream.codec_type === 'audio');
-  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter);
+  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath);
 }

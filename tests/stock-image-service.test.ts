@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { FakeStockProvider } from '@/lib/ai/stock/fake-provider';
 import type { StockProviderRegistry } from '@/lib/ai/stock/registry';
 import { InMemoryStockStateStore } from '@/lib/ai/stock/stock-state-store';
+import { StockProviderError, type StockProvider } from '@/lib/ai/stock/stock-provider';
 import { buildStockSelectionDependencies, selectSceneStockImage, selectSceneStockPhoto } from '@/lib/generation/stock-image-service';
 import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
@@ -121,6 +122,83 @@ describe('selectSceneStockImage', () => {
     expect(second.cached).toBe(true);
     expect(harness.saveStockImage).toHaveBeenCalledTimes(1);
     expect(harness.getProject().assets).toHaveLength(1);
+  });
+
+  it('falls back to another candidate when the selected image download fails', async () => {
+    const visual: StockImageVisual = { kind: 'stock_image', query: 'transient download failure', orientation: 'landscape' };
+    let project = makeProject(visual);
+    const store = {
+      getProject: vi.fn(async (id: string) => (id === project.id ? project : null)),
+      mutateProject: vi.fn(async (id: string, mutator: (current: Project) => Project) => {
+        if (id !== project.id) return null;
+        project = mutator(project);
+        return project;
+      })
+    };
+    const saveStockImage = vi.fn(async () => makeAsset('asset-fallback'));
+    const fetchedPhotoIds: string[] = [];
+    const searchPhotos = vi.fn(async (query: { query: string }) => ({
+      provider: 'fake' as const,
+      query: query.query,
+      photos: [0, 1, 2, 3].map((index) => ({
+        provider: 'fake' as const,
+        photoId: `fake-fallback-${index}`,
+        width: 1280,
+        height: 720,
+        imageUrl: `https://cdn.local/fake-fallback-${index}.jpg`,
+        downloadUrl: `https://cdn.local/fake-fallback-${index}.jpg`,
+        sourceUrl: `https://fake.local/fake-fallback-${index}`,
+        photographerName: 'Fake Photographer',
+        usagePolicy: 'download' as const,
+        attribution: {
+          provider: 'fake' as const,
+          providerName: 'Fake',
+          photoId: `fake-fallback-${index}`,
+          photographerName: 'Fake Photographer',
+          sourceUrl: `https://fake.local/fake-fallback-${index}`,
+          license: 'Synthetic fixture'
+        }
+      }))
+    }));
+
+    const provider: StockProvider = {
+      providerId: 'fake',
+      displayName: 'Fake',
+      usagePolicy: 'download',
+      license: 'Synthetic fixture',
+      isConfigured: () => true,
+      searchPhotos,
+      fetchPhoto: async (photo) => {
+        fetchedPhotoIds.push(photo.photoId);
+        if (fetchedPhotoIds.length === 1) {
+          throw new StockProviderError('Fake image download failed (400).', 'PROVIDER_ERROR', 400, { provider: 'fake' });
+        }
+        return { mimeType: 'image/png', data: Buffer.from('fake-bytes') };
+      }
+    };
+
+    const dependencies = buildStockSelectionDependencies({
+      store,
+      media: { saveStockImage },
+      registry: {
+        getProvider: () => provider,
+        listProviders: () => [],
+        configurationStatus: () => []
+      },
+      stateStore: new InMemoryStockStateStore({ now: () => 1000 }),
+      now: () => 1000
+    });
+
+    const result = await selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, dependencies);
+
+    expect(result.status).toBe('selected');
+    expect(fetchedPhotoIds).toHaveLength(2);
+    expect(fetchedPhotoIds[1]).not.toBe(fetchedPhotoIds[0]);
+    expect(result.photoId).toBe(fetchedPhotoIds[1]);
+    expect(saveStockImage).toHaveBeenCalledTimes(1);
+    expect(searchPhotos).toHaveBeenCalledTimes(2);
+    const selection = (project.scenes[0].visual as StockImageVisual).selection;
+    expect(selection?.photoId).toBe(fetchedPhotoIds[1]);
   });
 
   it('treats an existing hotlink selection as current without storing an asset', async () => {

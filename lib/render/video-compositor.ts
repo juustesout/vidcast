@@ -12,7 +12,7 @@ import { sceneDurationMatches } from './scene-timing';
 import { buildPresenterOverlayArgs } from './presenter-overlay';
 import type { CompositionPlan } from '@/lib/types/render';
 
-export const COMPOSER_VERSION = 'p8';
+export const COMPOSER_VERSION = 'p9';
 
 // Every scene segment is forced to a stereo layout before concatenation. The
 // concat demuxer otherwise adopts the first segment's layout and coerces the

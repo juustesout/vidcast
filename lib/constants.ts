@@ -1,5 +1,5 @@
 import type { AspectRatio } from './types/render';
-import type { MotionPreset, OverlayPosition, OverlayType, SceneType, TransitionPreset } from './types/scene';
+import type { LogoOverlayPosition, MotionPreset, OverlayPosition, OverlayType, SceneType, TransitionPreset } from './types/scene';
 import type { AssetProvenance, AssetStatus, AssetType } from './types/asset';
 import type { GenerationProvider, GenerationStatus } from './types/generation';
 
@@ -22,6 +22,21 @@ export const TRANSITION_PRESETS: TransitionPreset[] = ['none', 'fade', 'crossfad
 export const OVERLAY_TYPES: OverlayType[] = ['none', 'text', 'title', 'subtitle', 'callout', 'statistic', 'quote'];
 
 export const OVERLAY_POSITIONS: OverlayPosition[] = ['top', 'center', 'bottom'];
+
+export const LOGO_OVERLAY_POSITIONS: LogoOverlayPosition[] = ['top_left', 'top_right', 'bottom_left', 'bottom_right'];
+
+// Bounds shared by authoring validation and the render-time clamping in
+// lib/render/logo-overlay.ts, so the two never drift apart.
+export const LOGO_OVERLAY_LIMITS = {
+  MIN_SCALE: 0.02,
+  MAX_SCALE: 0.5,
+  MIN_MARGIN: 0,
+  MAX_MARGIN: 400,
+  MIN_MAX_WIDTH: 8,
+  MAX_MAX_WIDTH: 4096,
+  MIN_OPACITY: 0,
+  MAX_OPACITY: 1
+} as const;
 
 // Shared overlay style/timing bounds. Both the renderer (lazy defaults/clamps in
 // lib/render/overlay-resolve.ts) and the authoring validation read from here so

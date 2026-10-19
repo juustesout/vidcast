@@ -3,13 +3,17 @@ import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 import type {
+  PresenterAvatarType,
   PresenterClipSpec,
   PresenterClipStatus,
+  PresenterCostRecord,
+  PresenterEngine,
   PresenterLayout,
   PresenterOutputFormat,
   PresenterPipPosition,
   PresenterPipSettings,
   PresenterProviderKey,
+  PresenterResolution,
   PresenterSceneSetting,
   ProjectPresenterSettings
 } from '@/lib/types/presenter';
@@ -35,8 +39,11 @@ export const PRESENTER_DEFAULT_LIMITS = {
 // them beyond these values.
 export const PRESENTER_LIMIT_CEILINGS = {
   MAX_GENERATED_SECONDS: 300,
-  MAX_PAID_REQUESTS: 5
+  MAX_PAID_REQUESTS: 5,
+  MAX_COST_USD: 25
 } as const;
+
+export const PRESENTER_MAX_EXPECTED_PADDING_SECONDS = 0.5;
 
 export const PRESENTER_DEFAULT_PIP: Required<PresenterPipSettings> = {
   position: 'bottom_right',
@@ -95,6 +102,13 @@ function clampLimit(value: unknown, fallback: number, ceiling: number): number {
     return fallback;
   }
   return Math.min(ceiling, value);
+}
+
+function clampMoney(value: unknown, ceiling: number): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return Math.min(ceiling, Math.round(value * 10000) / 10000);
 }
 
 function normalizeSetting(setting: unknown): PresenterSceneSetting | undefined {
@@ -175,7 +189,8 @@ export function normalizeProjectPresenter(value: unknown): ProjectPresenterSetti
       candidate.maxPaidRequests,
       PRESENTER_DEFAULT_LIMITS.MAX_PAID_REQUESTS,
       PRESENTER_LIMIT_CEILINGS.MAX_PAID_REQUESTS
-    )
+    ),
+    maxCostUsd: clampMoney(candidate.maxCostUsd, PRESENTER_LIMIT_CEILINGS.MAX_COST_USD)
   };
 }
 
@@ -227,6 +242,44 @@ export function normalizePresenterClips(value: unknown): PresenterClipSpec[] | u
   return clips.length > 0 ? clips : undefined;
 }
 
+function normalizeCostRecord(value: unknown): PresenterCostRecord | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const cost = value as Record<string, unknown>;
+  const engine = cost.engine;
+  const avatarType = cost.avatarType;
+  const resolution = cost.resolution;
+  if (
+    (engine !== 'avatar_iii' && engine !== 'avatar_iv' && engine !== 'avatar_v') ||
+    (avatarType !== 'photo_avatar' && avatarType !== 'studio_avatar' && avatarType !== 'digital_twin' && avatarType !== 'custom_video') ||
+    (resolution !== '720p' && resolution !== '1080p')
+  ) {
+    return undefined;
+  }
+  const numbers = ['seconds', 'billableSeconds', 'usdPerSecond', 'linearUsd', 'estimatedUsd', 'maxCostUsd'] as const;
+  for (const key of numbers) {
+    if (typeof cost[key] !== 'number' || !Number.isFinite(cost[key])) {
+      return undefined;
+    }
+  }
+  return {
+    currency: 'USD',
+    engine: engine as PresenterEngine,
+    avatarType: avatarType as PresenterAvatarType,
+    resolution: resolution as PresenterResolution,
+    seconds: cost.seconds as number,
+    billableSeconds: cost.billableSeconds as number,
+    usdPerSecond: cost.usdPerSecond as number,
+    linearUsd: cost.linearUsd as number,
+    estimatedUsd: cost.estimatedUsd as number,
+    maxCostUsd: cost.maxCostUsd as number,
+    observedUsd: typeof cost.observedUsd === 'number' && Number.isFinite(cost.observedUsd) ? cost.observedUsd : undefined,
+    observedAt: typeof cost.observedAt === 'string' ? cost.observedAt : undefined,
+    observedSource: cost.observedSource === 'wallet_delta' ? 'wallet_delta' : undefined
+  };
+}
+
 function normalizeClipAttempt(value: unknown, index: number) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
@@ -248,6 +301,10 @@ function normalizeClipAttempt(value: unknown, index: number) {
     mimeType: typeof attempt.mimeType === 'string' ? attempt.mimeType : undefined,
     width: typeof attempt.width === 'number' ? attempt.width : undefined,
     height: typeof attempt.height === 'number' ? attempt.height : undefined,
+    cost: normalizeCostRecord(attempt.cost),
+    walletBalanceBeforeUsd: typeof attempt.walletBalanceBeforeUsd === 'number' && Number.isFinite(attempt.walletBalanceBeforeUsd)
+      ? attempt.walletBalanceBeforeUsd
+      : undefined,
     error: typeof attempt.error === 'string' ? attempt.error : undefined,
     createdAt: typeof attempt.createdAt === 'string' ? attempt.createdAt : new Date(0).toISOString(),
     completedAt: typeof attempt.completedAt === 'string' ? attempt.completedAt : undefined

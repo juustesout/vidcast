@@ -1,4 +1,6 @@
-import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, MAX_SCENE_DURATION_SECONDS, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, LOGO_OVERLAY_LIMITS, LOGO_OVERLAY_POSITIONS, MAX_SCENE_DURATION_SECONDS, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { isValidGraphicColor } from '@/lib/render/graphic-style';
+import { isLogoOverlayPosition } from '@/lib/render/logo-overlay';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
 import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from '@/lib/render/scene-timing';
 import type { ExplainerSpec } from '@/lib/types/explainer';
@@ -90,6 +92,85 @@ function validateOverlayStyleTiming(sceneId: string, overlay: OverlaySpec, error
   }
 }
 
+function validateGraphicStyle(style: unknown, path: string, errors: RenderIssue[], codePrefix = 'scene.visual.style'): void {
+  if (style === undefined || style === null) {
+    return;
+  }
+  if (!isPlainObject(style)) {
+    pushIssue(errors, 'error', `${codePrefix}.invalid`, path, 'Graphic style must be an object.');
+    return;
+  }
+
+  for (const field of ['background', 'textColor', 'accentColor', 'statisticLabelColor'] as const) {
+    const value = style[field];
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (!isValidGraphicColor(value)) {
+      pushIssue(errors, 'error', `${codePrefix}.${field}.invalid`, `${path}.${field}`, `${field} must be a hex color such as #0056a7.`);
+    }
+  }
+}
+
+function validateLogoOverlay(
+  logo: unknown,
+  path: string,
+  project: Project,
+  errors: RenderIssue[],
+  warnings: RenderIssue[]
+): void {
+  if (logo === undefined || logo === null) {
+    return;
+  }
+  if (!isPlainObject(logo)) {
+    pushIssue(errors, 'error', 'scene.logo.invalid', path, 'Logo overlay must be an object or null.');
+    return;
+  }
+
+  const { assetId, position, scale, maxWidth, margin, opacity } = logo;
+
+  if (typeof assetId !== 'string' || !assetId.trim()) {
+    pushIssue(errors, 'error', 'scene.logo.asset.required', `${path}.assetId`, 'Logo overlay requires an asset id.');
+  } else {
+    const asset = project.assets.find((entry) => entry.id === assetId.trim());
+    if (!asset) {
+      pushIssue(warnings, 'warning', 'scene.logo.asset.notFound', `${path}.assetId`, `Logo asset ${assetId} does not exist; the scene renders without a logo.`);
+    } else if (asset.type !== 'image' && asset.type !== 'graphic') {
+      pushIssue(warnings, 'warning', 'scene.logo.asset.invalidType', `${path}.assetId`, `Logo asset ${asset.id} is not an image asset; the scene renders without a logo.`);
+    } else if (!asset.localPath) {
+      pushIssue(warnings, 'warning', 'scene.logo.asset.notReady', `${path}.assetId`, `Logo asset ${asset.id} has no local file path yet; the scene renders without a logo.`);
+    }
+  }
+
+  if (position !== undefined && position !== null && !isLogoOverlayPosition(position)) {
+    pushIssue(errors, 'error', 'scene.logo.position.invalid', `${path}.position`, `Logo position must be one of ${LOGO_OVERLAY_POSITIONS.join(', ')}.`);
+  }
+
+  if (scale !== undefined && scale !== null) {
+    if (!isFiniteNumber(scale) || scale < LOGO_OVERLAY_LIMITS.MIN_SCALE || scale > LOGO_OVERLAY_LIMITS.MAX_SCALE) {
+      pushIssue(errors, 'error', 'scene.logo.scale.invalid', `${path}.scale`, `Logo scale must be between ${LOGO_OVERLAY_LIMITS.MIN_SCALE} and ${LOGO_OVERLAY_LIMITS.MAX_SCALE}.`);
+    }
+  }
+
+  if (maxWidth !== undefined && maxWidth !== null) {
+    if (!isFiniteNumber(maxWidth) || maxWidth < LOGO_OVERLAY_LIMITS.MIN_MAX_WIDTH || maxWidth > LOGO_OVERLAY_LIMITS.MAX_MAX_WIDTH) {
+      pushIssue(errors, 'error', 'scene.logo.maxWidth.invalid', `${path}.maxWidth`, `Logo maxWidth must be between ${LOGO_OVERLAY_LIMITS.MIN_MAX_WIDTH} and ${LOGO_OVERLAY_LIMITS.MAX_MAX_WIDTH} pixels.`);
+    }
+  }
+
+  if (margin !== undefined && margin !== null) {
+    if (!isFiniteNumber(margin) || margin < LOGO_OVERLAY_LIMITS.MIN_MARGIN || margin > LOGO_OVERLAY_LIMITS.MAX_MARGIN) {
+      pushIssue(errors, 'error', 'scene.logo.margin.invalid', `${path}.margin`, `Logo margin must be between ${LOGO_OVERLAY_LIMITS.MIN_MARGIN} and ${LOGO_OVERLAY_LIMITS.MAX_MARGIN} pixels.`);
+    }
+  }
+
+  if (opacity !== undefined && opacity !== null) {
+    if (!isFiniteNumber(opacity) || opacity < LOGO_OVERLAY_LIMITS.MIN_OPACITY || opacity > LOGO_OVERLAY_LIMITS.MAX_OPACITY) {
+      pushIssue(errors, 'error', 'scene.logo.opacity.invalid', `${path}.opacity`, `Logo opacity must be between ${LOGO_OVERLAY_LIMITS.MIN_OPACITY} and ${LOGO_OVERLAY_LIMITS.MAX_OPACITY}.`);
+    }
+  }
+}
+
 function validatePresenter(project: Project, errors: RenderIssue[], warnings: RenderIssue[]): void {
   const presenter = project.presenter;
   if (!presenter) {
@@ -112,6 +193,12 @@ function validatePresenter(project: Project, errors: RenderIssue[], warnings: Re
   }
   if ((presenter.maxPaidRequests ?? PRESENTER_DEFAULT_LIMITS.MAX_PAID_REQUESTS) > PRESENTER_LIMIT_CEILINGS.MAX_PAID_REQUESTS) {
     pushIssue(errors, 'error', 'project.presenter.maxPaidRequests.invalid', 'presenter.maxPaidRequests', 'Presenter paid-request budget exceeds the server ceiling.');
+  }
+  if (presenter.maxCostUsd !== undefined && presenter.maxCostUsd > PRESENTER_LIMIT_CEILINGS.MAX_COST_USD) {
+    pushIssue(errors, 'error', 'project.presenter.maxCostUsd.invalid', 'presenter.maxCostUsd', 'Presenter USD budget exceeds the server ceiling.');
+  }
+  if (presenter.enabled && presenter.provider === 'heygen' && presenter.maxCostUsd === undefined) {
+    pushIssue(warnings, 'warning', 'project.presenter.maxCostUsd.missing', 'presenter.maxCostUsd', 'A USD budget is required before a real presenter clip can be generated.');
   }
 
   for (const setting of presenter.sceneSettings) {
@@ -338,6 +425,14 @@ export function validateProject(project: Project): RenderValidationResult {
       validateOverlayStyleTiming(scene.id, scene.overlay, errors);
     }
 
+    if (scene.logo !== undefined) {
+      validateLogoOverlay(scene.logo, `scenes.${scene.id}.logo`, project, errors, warnings);
+    }
+
+    if (scene.visual?.kind === 'graphic') {
+      validateGraphicStyle(scene.visual.style, `scenes.${scene.id}.visual.style`, errors);
+    }
+
     for (const referenceId of scene.referenceIds) {
       if (!referenceIds.has(referenceId)) {
         pushIssue(errors, 'error', 'scene.reference.missing', `scenes.${scene.id}.referenceIds`, `Referenced reference ${referenceId} does not exist.`);
@@ -462,6 +557,11 @@ export function validateProject(project: Project): RenderValidationResult {
       pushIssue(errors, 'error', 'project.music.asset.invalidType', 'music.assetId', `Background music asset ${musicAsset.id} is not a music or audio asset.`);
     }
   }
+
+  if (project.renderSettings.logo !== undefined) {
+    validateLogoOverlay(project.renderSettings.logo, 'renderSettings.logo', project, errors, warnings);
+  }
+  validateGraphicStyle(project.renderSettings.graphicStyle, 'renderSettings.graphicStyle', errors, 'project.graphicStyle');
 
   validatePresenter(project, errors, warnings);
 

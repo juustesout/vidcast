@@ -6,6 +6,33 @@ export type PresenterOutputFormat = 'mp4' | 'webm';
 
 export type PresenterProviderKey = 'mock' | 'heygen';
 
+export type PresenterEngine = 'avatar_iii' | 'avatar_iv' | 'avatar_v';
+
+export type PresenterAvatarType = 'photo_avatar' | 'studio_avatar' | 'digital_twin' | 'custom_video';
+
+export type PresenterResolution = '720p' | '1080p';
+
+// Conservative, provider-facing estimate. The observed wallet delta is stored
+// separately because it can include rounding or other account activity.
+export interface PresenterCostEstimate {
+  currency: 'USD';
+  engine: PresenterEngine;
+  avatarType: PresenterAvatarType;
+  resolution: PresenterResolution;
+  seconds: number;
+  billableSeconds: number;
+  usdPerSecond: number;
+  linearUsd: number;
+  estimatedUsd: number;
+  maxCostUsd: number;
+}
+
+export interface PresenterCostRecord extends PresenterCostEstimate {
+  observedUsd?: number;
+  observedAt?: string;
+  observedSource?: 'wallet_delta';
+}
+
 export interface PresenterPipSettings {
   position?: PresenterPipPosition;
   // Fraction of the canvas width occupied by the PiP presenter.
@@ -32,6 +59,9 @@ export interface ProjectPresenterSettings {
   // Hard spend guards. They apply only to real (paid) providers.
   maxGeneratedSeconds?: number;
   maxPaidRequests?: number;
+  // Required for paid generation. A missing value blocks the request rather
+  // than falling back to an implicit budget.
+  maxCostUsd?: number;
 }
 
 export type PresenterClipStatus = 'planned' | 'submitting' | 'generating' | 'generated' | 'failed';
@@ -51,6 +81,8 @@ export interface PresenterClipAttempt {
   mimeType?: string;
   width?: number;
   height?: number;
+  cost?: PresenterCostRecord;
+  walletBalanceBeforeUsd?: number;
   error?: string;
   createdAt: string;
   completedAt?: string;

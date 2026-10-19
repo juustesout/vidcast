@@ -50,6 +50,12 @@ function validateSceneShape(scene: unknown, index: number, issues: RenderIssue[]
 
   if ('visual' in scene && scene.visual !== undefined && !isPlainObject(scene.visual)) {
     push(issues, 'scene.visual.invalid', `${base}.visual`, 'scene.visual must be an object.');
+  } else if (isPlainObject(scene.visual) && 'style' in scene.visual && scene.visual.style !== undefined && scene.visual.style !== null && !isPlainObject(scene.visual.style)) {
+    push(issues, 'scene.visual.style.invalid', `${base}.visual.style`, 'scene.visual.style must be an object.');
+  }
+
+  if ('logo' in scene && scene.logo !== undefined && scene.logo !== null && !isPlainObject(scene.logo)) {
+    push(issues, 'scene.logo.invalid', `${base}.logo`, 'scene.logo must be an object or null.');
   }
 
   if ('overlay' in scene && scene.overlay !== undefined && !isPlainObject(scene.overlay)) {
@@ -122,6 +128,17 @@ export function collectProjectPatchShapeIssues(patch: unknown): RenderIssue[] {
       push(issues, 'project.narration.invalid', 'narration', 'narration must be an object.');
     } else if ('segments' in narration && narration.segments !== undefined && !Array.isArray(narration.segments)) {
       push(issues, 'project.narration.segments.invalid', 'narration.segments', 'narration.segments must be an array.');
+    }
+  }
+
+  if ('renderSettings' in patch && patch.renderSettings !== undefined && !isPlainObject(patch.renderSettings)) {
+    push(issues, 'project.renderSettings.invalid', 'renderSettings', 'renderSettings must be an object.');
+  } else if (isPlainObject(patch.renderSettings)) {
+    for (const field of ['logo', 'graphicStyle'] as const) {
+      const value = patch.renderSettings[field];
+      if (value !== undefined && value !== null && !isPlainObject(value)) {
+        push(issues, `project.renderSettings.${field}.invalid`, `renderSettings.${field}`, `renderSettings.${field} must be an object.`);
+      }
     }
   }
 

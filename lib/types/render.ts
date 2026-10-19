@@ -1,6 +1,6 @@
 import type { Asset, AssetType } from './asset';
 import type { ExplainerSpec } from './explainer';
-import type { GraphicTemplateType, MotionSpec, NarrationSpec, OverlaySpec, SceneType, TransitionSpec } from './scene';
+import type { GraphicStyleSpec, GraphicTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, TransitionSpec } from './scene';
 import type { ReferenceImage } from './reference';
 import type { PresenterClipSpec, ProjectPresenterSettings, CompositionPresenterPlan } from './presenter';
 
@@ -31,6 +31,11 @@ export interface RenderSettings {
   audio: AudioMixSettings;
   seed?: number;
   subtitlesEnabled: boolean;
+  // Optional project-level logo used when a scene does not specify one.
+  logo?: LogoOverlaySpec;
+  // Optional project-level palette for graphic templates. A scene's visual
+  // style overrides individual fields.
+  graphicStyle?: GraphicStyleSpec;
 }
 
 export interface RenderIssue {
@@ -131,8 +136,13 @@ export interface RenderPlanSceneSource {
   mimeType?: string;
   template?: GraphicTemplateType;
   templateData?: Record<string, unknown>;
+  style?: GraphicStyleSpec;
   text?: string;
 }
+
+// A logo resolved against the project asset list. `assetPath` is project-relative
+// (or absolute for callers that build plans directly).
+export type RenderPlanLogoOverlay = LogoOverlaySpec & { assetPath: string };
 
 export type RenderPlanSceneStatus = 'renderable' | 'planned' | 'invalid';
 
@@ -164,6 +174,7 @@ export interface RenderPlanScene {
   motion: MotionSpec;
   transition: TransitionSpec;
   overlay?: OverlaySpec;
+  logo?: RenderPlanLogoOverlay;
   narration?: NarrationSpec;
   referenceIds: string[];
   issues: RenderPlanSceneStateIssue[];

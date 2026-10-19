@@ -262,6 +262,47 @@ describe('runProductionBatch', () => {
     expect(completed?.runningActionIds).not.toContain('img-1');
   });
 
+  it('publishes each scene render completion before the whole render group finishes', async () => {
+    const plan = makePlan([
+      makeAction('render-1', 'scene_render', 'ready', 's1'),
+      makeAction('render-2', 'scene_render', 'ready', 's2'),
+      makeAction('render-3', 'scene_render', 'ready', 's3')
+    ]);
+
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const completedSnapshots: string[][] = [];
+
+    const running = runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plan,
+      refreshProject: async () => emptyProject,
+      config: { maxIterations: 1, limits: { scene_render: 1 } },
+      executeAction: async (action) => {
+        if (action.id === 'render-2') {
+          await gate;
+        }
+        return { message: 'rendered' };
+      },
+      onProgress: (entry) => {
+        completedSnapshots.push([...entry.completedActionIds]);
+      }
+    });
+
+    const deadline = Date.now() + 500;
+    while (!completedSnapshots.some((ids) => ids.includes('render-1')) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(completedSnapshots.some((ids) => ids.includes('render-1'))).toBe(true);
+
+    release!();
+    const result = await running;
+    expect(result.completedActionIds).toEqual(expect.arrayContaining(['render-1', 'render-2', 'render-3']));
+  });
+
   it('logs failed action diagnostics and excludes sensitive fields', async () => {
     const plan = makePlan([makeAction('img-1', 'image_generate', 'ready', 's1')]);
     const result = await runProductionBatch({

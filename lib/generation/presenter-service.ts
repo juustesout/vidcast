@@ -16,6 +16,11 @@ import {
   getPresenterSetting,
   resolvePresenterPip
 } from '@/lib/presenter/config';
+import {
+  evaluatePresenterCostLimit,
+  PresenterPricingError,
+  resolvePresenterCostEstimate
+} from '@/lib/presenter/pricing';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
@@ -23,7 +28,7 @@ import { getProjectRoot } from '@/lib/storage/storage-paths';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
 import type { Asset } from '@/lib/types/asset';
-import type { PresenterClipAttempt, PresenterClipSpec, PresenterOutputFormat } from '@/lib/types/presenter';
+import type { PresenterClipAttempt, PresenterClipSpec, PresenterCostRecord, PresenterOutputFormat } from '@/lib/types/presenter';
 import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 import { createId } from '@/lib/utils/ids';
@@ -53,6 +58,7 @@ export class PresenterGenerationError extends Error {
     | 'presenter.scene.alreadyRunning'
     | 'presenter.scene.alreadyGenerated'
     | 'presenter.scene.submissionUnknown'
+    | 'presenter.cost.notConfigured'
     | 'presenter.budget.exceeded';
   readonly details?: Record<string, unknown>;
 
@@ -72,6 +78,7 @@ export class PresenterGenerationError extends Error {
       | 'presenter.scene.alreadyRunning'
       | 'presenter.scene.alreadyGenerated'
       | 'presenter.scene.submissionUnknown'
+      | 'presenter.cost.notConfigured'
       | 'presenter.budget.exceeded',
     details?: Record<string, unknown>
   ) {
@@ -203,6 +210,60 @@ function resolveSceneDuration(project: Project, scene: Scene): number {
   return plan.scenes.find((entry) => entry.sceneId === scene.id)?.duration ?? scene.duration;
 }
 
+function estimateRealPresenterCost(project: Project, duration: number): PresenterCostRecord {
+  try {
+    return resolvePresenterCostEstimate({
+      height: project.renderSettings.height,
+      seconds: duration,
+      maxCostUsd: project.presenter?.maxCostUsd
+    });
+  } catch (error) {
+    if (error instanceof PresenterPricingError) {
+      throw new PresenterGenerationError(
+        `Paid presenter generation is blocked: ${error.message}`,
+        409,
+        'presenter.cost.notConfigured',
+        { reason: error.code }
+      );
+    }
+    throw error;
+  }
+}
+
+async function readProviderBalance(provider: PresenterProvider): Promise<number | undefined> {
+  if (!provider.getBillingBalanceUsd) {
+    return undefined;
+  }
+  try {
+    const balance = await provider.getBillingBalanceUsd();
+    return typeof balance === 'number' && Number.isFinite(balance) && balance >= 0 ? balance : undefined;
+  } catch {
+    // Balance is supplementary accounting data; failing to read it must not
+    // turn a successful generation into a failure.
+    return undefined;
+  }
+}
+
+async function observeProviderCost(
+  provider: PresenterProvider,
+  cost: PresenterCostRecord,
+  walletBefore: number | undefined
+): Promise<PresenterCostRecord> {
+  if (cost.observedUsd !== undefined || walletBefore === undefined) {
+    return cost;
+  }
+  const walletAfter = await readProviderBalance(provider);
+  if (walletAfter === undefined || walletAfter >= walletBefore) {
+    return cost;
+  }
+  return {
+    ...cost,
+    observedUsd: Math.round((walletBefore - walletAfter) * 10000) / 10000,
+    observedAt: nowIso(),
+    observedSource: 'wallet_delta'
+  };
+}
+
 function resolveOutputFormat(project: Project): PresenterOutputFormat {
   return project.presenter?.outputFormat === 'webm' ? 'webm' : 'mp4';
 }
@@ -294,7 +355,23 @@ export async function submitPresenterClip(
       }
     }
 
+    const cost = isRealPresenterProviderKey(provider.providerId)
+      ? estimateRealPresenterCost(project, duration)
+      : undefined;
+    if (cost) {
+      const limit = evaluatePresenterCostLimit(cost);
+      if (!limit.allowed) {
+        throw new PresenterGenerationError(
+          `Presenter budget exceeded. ${limit.reason}`,
+          403,
+          'presenter.budget.exceeded',
+          { ...cost }
+        );
+      }
+    }
+
     const avatarId = resolveAvatarId(project, provider, options.avatarId);
+    const walletBalanceBeforeUsd = cost ? await readProviderBalance(provider) : undefined;
     const attemptId = createId('presenter_attempt');
     const attempt: PresenterClipAttempt = {
       id: attemptId,
@@ -305,6 +382,8 @@ export async function submitPresenterClip(
       audioAssetId: audioAsset.id,
       narrationSignature: freshness.narrationSignature,
       duration,
+      cost,
+      walletBalanceBeforeUsd,
       createdAt: nowIso()
     };
 
@@ -342,9 +421,13 @@ export async function submitPresenterClip(
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Presenter provider call failed.';
+      const failedCost = cost
+        ? await observeProviderCost(provider, cost, walletBalanceBeforeUsd)
+        : undefined;
       const failedAttempt: PresenterClipAttempt = {
         ...attempt,
         status: 'failed',
+        cost: failedCost,
         completedAt: nowIso(),
         error: message
       };
@@ -361,11 +444,15 @@ export async function submitPresenterClip(
       throw new PresenterGenerationError('Presenter provider call failed.', 502, 'presenter.provider.failed');
     }
 
+    const generatingCost = cost
+      ? await observeProviderCost(provider, cost, walletBalanceBeforeUsd)
+      : undefined;
     const generatingAttempt: PresenterClipAttempt = {
       ...attempt,
       status: 'generating',
       providerJobId: submitted.providerJobId,
-      providerStatus: submitted.providerStatus
+      providerStatus: submitted.providerStatus,
+      cost: generatingCost
     };
 
     await dependencies.store.mutateProject(projectId, (fresh) => updateClip(fresh, sceneId, (clip) => ({
@@ -461,6 +548,9 @@ export async function pollPresenterClip(
         ...attempt,
         status: 'failed',
         providerStatus: providerStatus.providerStatus,
+        cost: attempt.cost
+          ? await observeProviderCost(provider, attempt.cost, attempt.walletBalanceBeforeUsd)
+          : undefined,
         completedAt: nowIso(),
         error: message
       };
@@ -527,6 +617,9 @@ export async function pollPresenterClip(
       width: asset.width,
       height: asset.height,
       duration: downloaded.durationSeconds ?? asset.duration ?? attempt.duration,
+      cost: attempt.cost
+        ? await observeProviderCost(provider, attempt.cost, attempt.walletBalanceBeforeUsd)
+        : undefined,
       completedAt: nowIso()
     };
 

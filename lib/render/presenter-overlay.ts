@@ -55,15 +55,21 @@ export function buildPresenterOverlayArgs(
   presenter.placements.forEach((placement, index) => {
     const inputLabel = `${index + 1}:v`;
     const offset = Math.max(0, placement.startOffsetSeconds);
-    const available = Math.max(0.1, placement.clipDuration - offset);
-    const duration = Math.max(0.1, Math.min(placement.duration, available));
-    const pad = Math.max(0, duration - available);
-    const end = placement.startTime + duration;
+    const available = placement.clipDuration - offset;
+    if (available <= 0) {
+      return;
+    }
+    // Hold the last usable clip frame when the clip is shorter than the scene
+    // segment. This keeps the presenter on screen through the scene end
+    // instead of briefly revealing the underlying base video.
+    const sourceDuration = Math.max(0.001, Math.min(placement.duration, available));
+    const pad = Math.max(0, placement.duration - sourceDuration);
+    const end = placement.startTime + placement.duration;
 
     const clipFilters: string[] = [
-      `trim=start=${formatSeconds(offset)}:duration=${formatSeconds(duration)}`
+      `trim=start=${formatSeconds(offset)}:duration=${formatSeconds(sourceDuration)}`
     ];
-    if (pad > 0.01) {
+    if (pad > 0.001) {
       clipFilters.push(`tpad=stop_mode=clone:stop_duration=${formatSeconds(pad)}`);
     }
 

@@ -230,6 +230,14 @@ export class HeyGenPresenterProvider implements PresenterProvider {
     };
   }
 
+  async getBillingBalanceUsd(): Promise<number | undefined> {
+    const body = await this.fetchJson(`${resolveBaseUrl()}/v3/users/me`);
+    const data = unwrapData(body);
+    const wallet = asRecord(data?.wallet);
+    const remaining = wallet?.remaining_balance ?? wallet?.remainingBalance;
+    return typeof remaining === 'number' && Number.isFinite(remaining) ? remaining : undefined;
+  }
+
   async download(status: PresenterJobStatus): Promise<PresenterDownloadResult> {
     if (!status.videoUrl) {
       throw new PresenterProviderError('HeyGen status does not contain a downloadable video.', 'PROVIDER_ERROR');

@@ -1,4 +1,5 @@
 import type { RenderPlanScene } from '@/lib/types/render';
+import { resolveGraphicStyle } from './graphic-style';
 
 function escapeXml(value: string): string {
   return value
@@ -50,7 +51,14 @@ function svgFooter(): string {
   return '</svg>';
 }
 
-function renderBodyText(width: number, height: number, title: string, subtitle?: string, accent = '#f2d17b'): string {
+function renderBodyText(
+  width: number,
+  height: number,
+  title: string,
+  subtitle?: string,
+  accent = '#f2d17b',
+  textColor = '#f8fafc'
+): string {
   const titleLines = wrapText(title, Math.max(18, Math.floor(width / 40)));
   const titleFontSize = Math.max(34, Math.floor(width / 14));
   const subtitleFontSize = Math.max(18, Math.floor(width / 36));
@@ -60,31 +68,45 @@ function renderBodyText(width: number, height: number, title: string, subtitle?:
 
   return `
   <g filter="url(#shadow)">
-    ${titleLines.map((line, index) => `<text x="50%" y="${titleY + index * lineGap}" text-anchor="middle" fill="#f8fafc" font-family="DejaVu Sans, Arial, sans-serif" font-size="${titleFontSize}" font-weight="700">${escapeXml(line)}</text>`).join('\n    ')}
+    ${titleLines.map((line, index) => `<text x="50%" y="${titleY + index * lineGap}" text-anchor="middle" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${titleFontSize}" font-weight="700">${escapeXml(line)}</text>`).join('\n    ')}
     ${subtitle ? `<text x="50%" y="${subtitleY}" text-anchor="middle" fill="${accent}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${subtitleFontSize}" font-weight="500">${escapeXml(subtitle)}</text>` : ''}
   </g>`;
 }
 
-function renderList(width: number, height: number, items: string[]): string {
+function renderList(width: number, height: number, items: string[], textColor = '#e2e8f0'): string {
   const lineFontSize = Math.max(22, Math.floor(width / 34));
   const startY = Math.max(160, Math.floor(height * 0.34));
   return `
   <g filter="url(#shadow)">
-    ${items.slice(0, 6).map((item, index) => `<text x="${Math.floor(width * 0.16)}" y="${startY + index * Math.floor(lineFontSize * 1.45)}" fill="#e2e8f0" font-family="DejaVu Sans, Arial, sans-serif" font-size="${lineFontSize}">• ${escapeXml(item)}</text>`).join('\n    ')}
+    ${items.slice(0, 6).map((item, index) => `<text x="${Math.floor(width * 0.16)}" y="${startY + index * Math.floor(lineFontSize * 1.45)}" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${lineFontSize}">• ${escapeXml(item)}</text>`).join('\n    ')}
   </g>`;
 }
 
-function renderStatistic(width: number, height: number, value: string, label?: string): string {
+function renderStatistic(
+  width: number,
+  height: number,
+  value: string,
+  label?: string,
+  textColor = '#f8fafc',
+  labelColor = '#93c5fd'
+): string {
   const valueSize = Math.max(56, Math.floor(width / 10));
   const labelSize = Math.max(20, Math.floor(width / 36));
   return `
   <g filter="url(#shadow)">
-    <text x="50%" y="${Math.floor(height * 0.46)}" text-anchor="middle" fill="#f8fafc" font-family="DejaVu Sans, Arial, sans-serif" font-size="${valueSize}" font-weight="800">${escapeXml(value)}</text>
-    ${label ? `<text x="50%" y="${Math.floor(height * 0.58)}" text-anchor="middle" fill="#93c5fd" font-family="DejaVu Sans, Arial, sans-serif" font-size="${labelSize}" font-weight="600">${escapeXml(label)}</text>` : ''}
+    <text x="50%" y="${Math.floor(height * 0.46)}" text-anchor="middle" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${valueSize}" font-weight="800">${escapeXml(value)}</text>
+    ${label ? `<text x="50%" y="${Math.floor(height * 0.58)}" text-anchor="middle" fill="${labelColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${labelSize}" font-weight="600">${escapeXml(label)}</text>` : ''}
   </g>`;
 }
 
-function renderQuote(width: number, height: number, quote: string, author?: string): string {
+function renderQuote(
+  width: number,
+  height: number,
+  quote: string,
+  author?: string,
+  textColor = '#f8fafc',
+  accent = '#f2d17b'
+): string {
   const quoteLines = wrapText(quote, Math.max(20, Math.floor(width / 38)));
   const quoteSize = Math.max(28, Math.floor(width / 24));
   const authorSize = Math.max(18, Math.floor(width / 40));
@@ -92,12 +114,12 @@ function renderQuote(width: number, height: number, quote: string, author?: stri
   const lineGap = Math.floor(quoteSize * 1.45);
   return `
   <g filter="url(#shadow)">
-    ${quoteLines.map((line, index) => `<text x="50%" y="${startY + index * lineGap}" text-anchor="middle" fill="#f8fafc" font-family="DejaVu Sans, Arial, sans-serif" font-size="${quoteSize}" font-style="italic">${escapeXml(index === 0 ? `“${line}` : line)}${index === quoteLines.length - 1 ? '”' : ''}</text>`).join('\n    ')}
-    ${author ? `<text x="50%" y="${startY + quoteLines.length * lineGap + 36}" text-anchor="middle" fill="#f2d17b" font-family="DejaVu Sans, Arial, sans-serif" font-size="${authorSize}" font-weight="600">— ${escapeXml(author)}</text>` : ''}
+    ${quoteLines.map((line, index) => `<text x="50%" y="${startY + index * lineGap}" text-anchor="middle" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${quoteSize}" font-style="italic">${escapeXml(index === 0 ? `“${line}` : line)}${index === quoteLines.length - 1 ? '”' : ''}</text>`).join('\n    ')}
+    ${author ? `<text x="50%" y="${startY + quoteLines.length * lineGap + 36}" text-anchor="middle" fill="${accent}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${authorSize}" font-weight="600">— ${escapeXml(author)}</text>` : ''}
   </g>`;
 }
 
-function renderComparison(width: number, height: number, left: string, right: string): string {
+function renderComparison(width: number, height: number, left: string, right: string, textColor = '#e2e8f0'): string {
   const cardY = Math.floor(height * 0.36);
   const cardH = Math.max(160, Math.floor(height * 0.28));
   const cardW = Math.floor(width * 0.34);
@@ -107,12 +129,18 @@ function renderComparison(width: number, height: number, left: string, right: st
   <g filter="url(#shadow)">
     <rect x="${leftX}" y="${cardY}" width="${cardW}" height="${cardH}" rx="28" fill="#0f172a" stroke="#334155" />
     <rect x="${rightX}" y="${cardY}" width="${cardW}" height="${cardH}" rx="28" fill="#0f172a" stroke="#334155" />
-    <text x="${leftX + cardW / 2}" y="${cardY + cardH / 2}" text-anchor="middle" fill="#e2e8f0" font-family="DejaVu Sans, Arial, sans-serif" font-size="${Math.max(22, Math.floor(width / 32))}" font-weight="700">${escapeXml(left)}</text>
-    <text x="${rightX + cardW / 2}" y="${cardY + cardH / 2}" text-anchor="middle" fill="#e2e8f0" font-family="DejaVu Sans, Arial, sans-serif" font-size="${Math.max(22, Math.floor(width / 32))}" font-weight="700">${escapeXml(right)}</text>
+    <text x="${leftX + cardW / 2}" y="${cardY + cardH / 2}" text-anchor="middle" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${Math.max(22, Math.floor(width / 32))}" font-weight="700">${escapeXml(left)}</text>
+    <text x="${rightX + cardW / 2}" y="${cardY + cardH / 2}" text-anchor="middle" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${Math.max(22, Math.floor(width / 32))}" font-weight="700">${escapeXml(right)}</text>
   </g>`;
 }
 
-function renderCallout(width: number, height: number, text: string): string {
+function renderCallout(
+  width: number,
+  height: number,
+  text: string,
+  textColor = '#f8fafc',
+  accent = '#f2d17b'
+): string {
   const lines = wrapText(text, Math.max(20, Math.floor(width / 30)));
   const boxW = Math.floor(width * 0.72);
   const boxH = Math.max(150, Math.floor(lines.length * 52 + 70));
@@ -120,23 +148,24 @@ function renderCallout(width: number, height: number, text: string): string {
   const y = Math.floor((height - boxH) / 2);
   return `
   <g filter="url(#shadow)">
-    <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="32" fill="#111827" stroke="#f2d17b" stroke-width="4" />
-    ${lines.map((line, index) => `<text x="50%" y="${y + 56 + index * 48}" text-anchor="middle" fill="#f8fafc" font-family="DejaVu Sans, Arial, sans-serif" font-size="${Math.max(24, Math.floor(width / 28))}" font-weight="600">${escapeXml(line)}</text>`).join('\n    ')}
+    <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="32" fill="#111827" stroke="${accent}" stroke-width="4" />
+    ${lines.map((line, index) => `<text x="50%" y="${y + 56 + index * 48}" text-anchor="middle" fill="${textColor}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${Math.max(24, Math.floor(width / 28))}" font-weight="600">${escapeXml(line)}</text>`).join('\n    ')}
   </g>`;
 }
 
-function renderEndCard(width: number, height: number, text: string): string {
-  return renderBodyText(width, height, text, 'Thanks for watching', '#dbeafe');
+function renderEndCard(width: number, height: number, text: string, textColor = '#f8fafc', accent = '#dbeafe'): string {
+  return renderBodyText(width, height, text, 'Thanks for watching', accent, textColor);
 }
 
 export function createStillSceneSvg(scene: RenderPlanScene, width: number, height: number, background = '#020617'): string {
-  const base = svgHeader(width, height, background);
   const visual = scene.source;
+  const graphicStyle = resolveGraphicStyle(visual.style, background);
+  const base = svgHeader(width, height, graphicStyle.background);
   const overlayText = scene.overlay && scene.overlay.type !== 'none' ? scene.overlay.text ?? '' : '';
   const text = scene.source.text ?? overlayText;
 
   if (visual.kind === 'blank') {
-    return `${base}\n  <rect width="100%" height="100%" fill="${background}" />\n${svgFooter()}`;
+    return `${base}\n  <rect width="100%" height="100%" fill="${graphicStyle.background}" />\n${svgFooter()}`;
   }
 
   if (visual.kind === 'text') {
@@ -150,39 +179,39 @@ export function createStillSceneSvg(scene: RenderPlanScene, width: number, heigh
     if (template === 'title_card') {
       const title = typeof data.title === 'string' ? data.title : text || 'Title card';
       const subtitle = typeof data.subtitle === 'string' ? data.subtitle : undefined;
-      return `${base}${renderBodyText(width, height, title, subtitle)}\n${svgFooter()}`;
+      return `${base}${renderBodyText(width, height, title, subtitle, graphicStyle.accentColor ?? '#f2d17b', graphicStyle.textColor ?? '#f8fafc')}\n${svgFooter()}`;
     }
     if (template === 'bullet_list') {
       const title = typeof data.title === 'string' ? data.title : text || 'Bullet list';
       const items = Array.isArray(data.items) ? data.items.filter((item): item is string => typeof item === 'string') : [];
-      return `${base}${renderBodyText(width, height, title)}${renderList(width, height, items.length > 0 ? items : ['First point', 'Second point', 'Third point'])}\n${svgFooter()}`;
+      return `${base}${renderBodyText(width, height, title, undefined, graphicStyle.accentColor ?? '#f2d17b', graphicStyle.textColor ?? '#f8fafc')}${renderList(width, height, items.length > 0 ? items : ['First point', 'Second point', 'Third point'], graphicStyle.textColor ?? '#e2e8f0')}\n${svgFooter()}`;
     }
     if (template === 'statistic') {
       const value = typeof data.value === 'string' ? data.value : '42%';
       const label = typeof data.label === 'string' ? data.label : text || 'Statistic';
-      return `${base}${renderStatistic(width, height, value, label)}\n${svgFooter()}`;
+      return `${base}${renderStatistic(width, height, value, label, graphicStyle.textColor ?? '#f8fafc', graphicStyle.statisticLabelColor ?? '#93c5fd')}\n${svgFooter()}`;
     }
     if (template === 'quote') {
       const quote = typeof data.quote === 'string' ? data.quote : text || 'Quote';
       const author = typeof data.author === 'string' ? data.author : undefined;
-      return `${base}${renderQuote(width, height, quote, author)}\n${svgFooter()}`;
+      return `${base}${renderQuote(width, height, quote, author, graphicStyle.textColor ?? '#f8fafc', graphicStyle.accentColor ?? '#f2d17b')}\n${svgFooter()}`;
     }
     if (template === 'comparison') {
       const left = typeof data.left === 'string' ? data.left : 'Before';
       const right = typeof data.right === 'string' ? data.right : 'After';
-      return `${base}${renderComparison(width, height, left, right)}\n${svgFooter()}`;
+      return `${base}${renderComparison(width, height, left, right, graphicStyle.textColor ?? '#e2e8f0')}\n${svgFooter()}`;
     }
     if (template === 'callout') {
       const callout = typeof data.text === 'string' ? data.text : text || 'Callout';
-      return `${base}${renderCallout(width, height, callout)}\n${svgFooter()}`;
+      return `${base}${renderCallout(width, height, callout, graphicStyle.textColor ?? '#f8fafc', graphicStyle.accentColor ?? '#f2d17b')}\n${svgFooter()}`;
     }
     if (template === 'end_card') {
       const endText = typeof data.text === 'string' ? data.text : text || 'The End';
-      return `${base}${renderEndCard(width, height, endText)}\n${svgFooter()}`;
+      return `${base}${renderEndCard(width, height, endText, graphicStyle.textColor ?? '#f8fafc', graphicStyle.accentColor ?? '#dbeafe')}\n${svgFooter()}`;
     }
 
     const generic = typeof data.title === 'string' ? data.title : template.replace(/_/g, ' ');
-    return `${base}${renderBodyText(width, height, generic, text || 'Graphic scene')}\n${svgFooter()}`;
+    return `${base}${renderBodyText(width, height, generic, text || 'Graphic scene', graphicStyle.accentColor ?? '#f2d17b', graphicStyle.textColor ?? '#f8fafc')}\n${svgFooter()}`;
   }
 
   const fallbackText = text || scene.source.kind.toUpperCase();

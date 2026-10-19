@@ -132,6 +132,7 @@ async function createDependencies(project: Project, provider: PresenterProvider,
   let assetCount = 0;
   let submitCalls = 0;
   let statusCalls = 0;
+  let balanceCalls = 0;
 
   const store: Pick<ProjectStore, 'getProject' | 'mutateProject'> = {
     async getProject(id) {
@@ -179,6 +180,14 @@ async function createDependencies(project: Project, provider: PresenterProvider,
 
   const wrappedProvider: PresenterProvider = {
     ...provider,
+    ...(provider.getBillingBalanceUsd
+      ? {
+          async getBillingBalanceUsd() {
+            balanceCalls += 1;
+            return provider.getBillingBalanceUsd?.();
+          }
+        }
+      : {}),
     async submit(request) {
       submitCalls += 1;
       return provider.submit(request);
@@ -212,6 +221,9 @@ async function createDependencies(project: Project, provider: PresenterProvider,
     },
     get statusCalls() {
       return statusCalls;
+    },
+    get balanceCalls() {
+      return balanceCalls;
     }
   };
 }
@@ -234,6 +246,58 @@ function mockProvider(behavior: { failSubmit?: boolean } = {}): PresenterProvide
       return { data: Buffer.from('fake-video'), mimeType: 'video/mp4', durationSeconds: 2 };
     }
   };
+}
+
+function heygenProvider(balances: Array<number | undefined> = []): PresenterProvider {
+  let balanceIndex = 0;
+  return {
+    providerId: 'heygen',
+    displayName: 'Injected HeyGen',
+    capabilities: { supportsAudioInput: true, supportsTransparency: false, supportsWebm: false },
+    async submit() {
+      return { providerJobId: 'heygen-job-1', providerStatus: 'pending' };
+    },
+    async getStatus() {
+      return { status: 'generated', providerStatus: 'completed', durationSeconds: 2 };
+    },
+    async download() {
+      return { data: Buffer.from('fake-video'), mimeType: 'video/mp4', durationSeconds: 2 };
+    },
+    async getBillingBalanceUsd() {
+      const value = balances[Math.min(balanceIndex, balances.length - 1)];
+      balanceIndex += 1;
+      return value;
+    }
+  };
+}
+
+function configureRealPresenterPricing(pricing = JSON.stringify({
+  billingIncrementSeconds: 1,
+  rates: [
+    { engine: 'avatar_iii', avatarType: 'photo_avatar', resolution: '1080p', usdPerSecond: 0.05 }
+  ]
+})): void {
+  vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+  vi.stubEnv('HEYGEN_API_KEY', 'test-key');
+  vi.stubEnv('HEYGEN_AVATAR_TYPE', 'photo_avatar');
+  vi.stubEnv('HEYGEN_PRESENTER_ENGINE', 'avatar_iii');
+  vi.stubEnv('HEYGEN_PRICING_JSON', pricing);
+}
+
+function realProject(overrides: { maxCostUsd?: number; presenterClips?: Project['presenterClips'] } = {}): Project {
+  return buildProject({
+    presenter: {
+      enabled: true,
+      provider: 'heygen',
+      avatarId: 'avatar-1',
+      outputFormat: 'mp4',
+      sceneSettings: [{ sceneId: 'scene-1', layout: 'fullscreen' }],
+      maxGeneratedSeconds: 20,
+      maxPaidRequests: 2,
+      maxCostUsd: overrides.maxCostUsd ?? 0.2
+    },
+    presenterClips: overrides.presenterClips
+  });
 }
 
 afterEach(() => {
@@ -429,5 +493,118 @@ describe('presenter generation service', () => {
       PresenterGenerationError
     );
     expect(deps.state.project.presenterClips?.[0]?.status).toBe('failed');
+  });
+
+  it('records the conservative estimate and measured wallet delta for a paid clip', async () => {
+    configureRealPresenterPricing();
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5, 4.9]));
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(deps.balanceCalls).toBe(2);
+
+    const attempt = deps.state.project.presenterClips?.[0]?.attempts?.[0];
+    expect(attempt?.cost).toMatchObject({
+      currency: 'USD',
+      engine: 'avatar_iii',
+      avatarType: 'photo_avatar',
+      resolution: '1080p',
+      seconds: 2,
+      billableSeconds: 2,
+      usdPerSecond: 0.05,
+      linearUsd: 0.1,
+      estimatedUsd: 0.1,
+      maxCostUsd: 0.2,
+      observedUsd: 0.1,
+      observedSource: 'wallet_delta'
+    });
+    expect(attempt?.walletBalanceBeforeUsd).toBe(5);
+
+    const completed = await pollPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps);
+    expect(completed.status).toBe('generated');
+    expect(deps.state.project.presenterClips?.[0]?.attempts?.[0]?.cost?.observedUsd).toBe(0.1);
+  });
+
+  it('blocks a paid submission before any provider call when pricing config is missing', async () => {
+    configureRealPresenterPricing();
+    vi.stubEnv('HEYGEN_PRICING_JSON', '');
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.cost.notConfigured' });
+    expect(deps.submitCalls).toBe(0);
+    expect(deps.balanceCalls).toBe(0);
+    expect(deps.state.project.presenterClips ?? []).toEqual([]);
+  });
+
+  it('blocks a paid submission before any provider call when the rate is unknown', async () => {
+    configureRealPresenterPricing(JSON.stringify({
+      billingIncrementSeconds: 1,
+      rates: [
+        { engine: 'avatar_iii', avatarType: 'photo_avatar', resolution: '720p', usdPerSecond: 0.05 }
+      ]
+    }));
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.cost.notConfigured' });
+    expect(deps.submitCalls).toBe(0);
+    expect(deps.balanceCalls).toBe(0);
+  });
+
+  it('blocks a paid submission before any provider call when the USD limit is missing', async () => {
+    configureRealPresenterPricing();
+    const project = realProject({ maxCostUsd: 0 });
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.cost.notConfigured' });
+    expect(deps.submitCalls).toBe(0);
+    expect(deps.balanceCalls).toBe(0);
+    expect(deps.state.project.presenterClips ?? []).toEqual([]);
+  });
+
+  it('blocks a paid submission when the USD estimate exceeds the project limit', async () => {
+    configureRealPresenterPricing();
+    const project = realProject({ maxCostUsd: 0.01 });
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.budget.exceeded' });
+    expect(deps.submitCalls).toBe(0);
+    expect(deps.balanceCalls).toBe(0);
+    expect(deps.state.project.presenterClips ?? []).toEqual([]);
+  });
+
+  it('allows an explicit retry after a failed paid attempt within the budget', async () => {
+    configureRealPresenterPricing();
+    const project = realProject({
+      presenterClips: [
+        {
+          sceneId: 'scene-1',
+          status: 'failed',
+          provider: 'heygen',
+          outputFormat: 'mp4',
+          audioAssetId: 'audio-1',
+          narrationSignature: 'signature',
+          duration: 2,
+          lastAttemptId: 'presenter-attempt-old',
+          attempts: [realAttempt()]
+        }
+      ]
+    });
+    const deps = await createDependencies(project, heygenProvider([5, 4.9]));
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'real', regenerate: true }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(deps.submitCalls).toBe(1);
+    expect(deps.state.project.presenterClips?.[0]?.attempts).toHaveLength(2);
   });
 });

@@ -7,7 +7,7 @@ import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
-import type { MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, TransitionPreset, VisualSpec } from '@/lib/types/scene';
+import type { GraphicStyleSpec, LogoOverlaySpec, MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, TransitionPreset, VisualSpec } from '@/lib/types/scene';
 import type { StockOrientation, StockProviderId, StockSelection } from '@/lib/types/stock';
 
 type LegacyScene = {
@@ -25,6 +25,7 @@ type LegacyScene = {
   notes?: string;
   render?: RenderSpec;
   overlay?: OverlaySpec;
+  logo?: LogoOverlaySpec | null;
 };
 
 function nowIso(): string {
@@ -76,6 +77,23 @@ function normalizeTransition(transition?: TransitionPreset | { type: TransitionP
   };
 }
 
+function normalizeLogoOverlay(value: unknown): LogoOverlaySpec | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return { ...(value as LogoOverlaySpec) };
+}
+
+function normalizeGraphicStyle(value: unknown): GraphicStyleSpec | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return { ...(value as GraphicStyleSpec) };
+}
+
 function normalizeGenerationStatus(status: unknown): GenerationStatus {
   if (status === 'queued' || status === 'generating' || status === 'generated' || status === 'failed' || status === 'rejected' || status === 'planned') {
     return status;
@@ -107,6 +125,7 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
     negativePrompt?: string;
     template?: Scene['visual'] extends { template?: infer T } ? T : never;
     templateData?: Record<string, unknown>;
+    style?: GraphicStyleSpec;
     kind?: string;
     assetId?: string;
     generation?: Partial<GenerationRecord>;
@@ -221,7 +240,8 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
       kind: 'graphic',
       template: legacyVisual?.template ?? 'simple_diagram',
       prompt,
-      templateData: legacyVisual?.templateData
+      templateData: legacyVisual?.templateData,
+      style: normalizeGraphicStyle(legacyVisual?.style)
     };
   }
 
@@ -317,6 +337,7 @@ export function normalizeScene(scene: LegacyScene, project: Partial<Project>, in
       transition: normalizeTransition(scene.render?.transition ?? scene.transition)
     },
     overlay: scene.overlay ?? (scene.textOverlay ? { type: 'text', text: scene.textOverlay, position: 'bottom' } : { type: 'none' }),
+    logo: normalizeLogoOverlay(scene.logo),
     referenceIds: scene.referenceIds ?? [],
     notes: scene.notes ?? '',
     renders: legacySceneWithRenders.renders ?? []
@@ -423,7 +444,9 @@ export function normalizeProject(project: Project): Project {
         effectsVolume: project.renderSettings?.audio?.effectsVolume
       }),
       subtitlesEnabled: project.renderSettings?.subtitlesEnabled ?? DEFAULT_RENDER_SETTINGS.subtitlesEnabled,
-      seed: project.renderSettings?.seed
+      seed: project.renderSettings?.seed,
+      logo: normalizeLogoOverlay(project.renderSettings?.logo) ?? undefined,
+      graphicStyle: normalizeGraphicStyle(project.renderSettings?.graphicStyle)
     }
   };
 

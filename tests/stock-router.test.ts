@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { InMemoryStockStateStore } from '@/lib/ai/stock/stock-state-store';
 import { StockProviderError, type StockProvider } from '@/lib/ai/stock/stock-provider';
-import { StockRouter, StockRoutingError } from '@/lib/ai/stock/stock-router';
+import { StockRouter, StockRoutingError, stockPhotoKey } from '@/lib/ai/stock/stock-router';
 import type { StockPhoto, StockProviderId, StockSearchResult } from '@/lib/types/stock';
 
 function photo(provider: StockProviderId, index: number): StockPhoto {
@@ -84,6 +84,24 @@ describe('StockRouter', () => {
     expect(second.cached).toBe(true);
     expect(second.selection.photoId).toBe(first.selection.photoId);
     expect(fake.searchPhotos).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips an excluded cached selection and picks another candidate', async () => {
+    const fake = stubProvider('fake', {
+      photos: [photo('fake', 0), photo('fake', 1), photo('fake', 2), photo('fake', 3)]
+    });
+    const { router } = buildRouter({ providers: { fake }, order: ['fake'] });
+
+    const first = await router.resolve({ query: 'transient failure' });
+    const second = await router.resolve({
+      query: 'transient failure',
+      excludePhotoKeys: [stockPhotoKey(first.selection)]
+    });
+
+    expect(first.cached).toBe(false);
+    expect(second.cached).toBe(false);
+    expect(second.selection.photoId).not.toBe(first.selection.photoId);
+    expect(fake.searchPhotos).toHaveBeenCalledTimes(2);
   });
 
   it('falls back to the next provider on a rate limit', async () => {

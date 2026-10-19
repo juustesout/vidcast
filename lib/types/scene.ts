@@ -20,6 +20,34 @@ export type OverlayType = 'none' | 'text' | 'title' | 'subtitle' | 'callout' | '
 
 export type OverlayPosition = 'top' | 'center' | 'bottom';
 
+export type LogoOverlayPosition = 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+
+// Optional per-scene image layer rendered above the scene source (including
+// stock photos and graphic cards). The asset is referenced by project asset id;
+// no file bytes are embedded in the project document. `null` on a Scene means
+// "explicitly no logo" and takes precedence over a project-level default.
+export interface LogoOverlaySpec {
+  assetId: string;
+  // Defaults to bottom_right.
+  position?: LogoOverlayPosition;
+  // Target width as a fraction of the canvas width. Defaults to 0.15.
+  scale?: number;
+  // Optional pixel cap applied after `scale`, useful for very wide logos.
+  maxWidth?: number;
+  // Inset from the selected corner, in canvas pixels.
+  margin?: number;
+  // 0..1; defaults to 1. Fully transparent logos are skipped.
+  opacity?: number;
+}
+
+export interface GraphicStyleSpec {
+  // Optional per-template palette. Omitted fields keep the historical colors.
+  background?: string;
+  textColor?: string;
+  accentColor?: string;
+  statisticLabelColor?: string;
+}
+
 export type GraphicTemplateType =
   | 'title_card'
   | 'bullet_list'
@@ -156,6 +184,7 @@ export interface GraphicVisual {
   template?: GraphicTemplateType;
   prompt?: string;
   templateData?: Record<string, unknown>;
+  style?: GraphicStyleSpec;
 }
 
 export interface TextVisual {
@@ -200,6 +229,8 @@ export interface Scene {
   visual?: VisualSpec;
   render: RenderSpec;
   overlay?: OverlaySpec;
+  // Per-scene logo/sponsor layer. `null` explicitly disables a project default.
+  logo?: LogoOverlaySpec | null;
   referenceIds: string[];
   notes: string;
   renders?: SceneRenderArtifact[];

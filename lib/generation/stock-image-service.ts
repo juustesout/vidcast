@@ -5,7 +5,13 @@ import {
 } from '@/lib/ai/stock/registry';
 import { resolveStockQuotaReserve, FileStockStateStore, type StockStateStore } from '@/lib/ai/stock/stock-state-store';
 import { StockProviderError } from '@/lib/ai/stock/stock-provider';
-import { StockRouter, StockRoutingError, type StockRouterDiagnostic } from '@/lib/ai/stock/stock-router';
+import {
+  StockRouter,
+  StockRoutingError,
+  stockPhotoKey,
+  type StockRouterDiagnostic,
+  type StockRouterResult
+} from '@/lib/ai/stock/stock-router';
 import { resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -107,6 +113,22 @@ export function resolveStockMode(
 
 function nowIso(now: () => number): string {
   return new Date(now()).toISOString();
+}
+
+const DEFAULT_MAX_STOCK_SELECTION_CANDIDATES = 3;
+const MAX_STOCK_SELECTION_CANDIDATES = 5;
+
+// A download can fail for a reason that is specific to one image URL (an
+// expired Pixabay `get` token, a CDN-side 400, or a bad object). One unusable
+// candidate must not fail the scene while the same search has other results.
+// Each fallback resolves a fresh selection and excludes every candidate that
+// already failed.
+export function resolveMaxStockSelectionCandidates(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number.parseInt(env.STOCK_SELECTION_MAX_CANDIDATES ?? '', 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_MAX_STOCK_SELECTION_CANDIDATES;
+  }
+  return Math.min(MAX_STOCK_SELECTION_CANDIDATES, Math.max(1, parsed));
 }
 
 function getScene(project: Project, sceneId: string): Scene {
@@ -225,38 +247,62 @@ export async function selectSceneStockImage(
       now: dependencies.now
     });
 
-    let routed;
-    try {
-      routed = await router.resolve({
-        query: scene.visual.query,
-        orientation: scene.visual.orientation,
-        preferredProviders: scene.visual.preferredProviders
-      });
-    } catch (error) {
-      if (error instanceof StockRoutingError) {
-        throw new StockImageSelectionError(error.message, error.status, 'stock.routing.failed', error.diagnostics);
+    const resolveCandidate = async (excludePhotoKeys: string[], attempt: number): Promise<StockRouterResult> => {
+      try {
+        return await router.resolve({
+          query: scene.visual.query,
+          orientation: scene.visual.orientation,
+          preferredProviders: scene.visual.preferredProviders,
+          excludePhotoKeys,
+          selectionSeed: attempt === 0 ? undefined : `${scene.id}:fallback:${attempt}`
+        });
+      } catch (error) {
+        if (error instanceof StockRoutingError) {
+          throw new StockImageSelectionError(error.message, error.status, 'stock.routing.failed', error.diagnostics);
+        }
+        throw error;
       }
-      throw error;
+    };
+
+    const maxCandidates = resolveMaxStockSelectionCandidates();
+    const excludedPhotoKeys: string[] = [];
+    let routed = await resolveCandidate(excludedPhotoKeys, 0);
+
+    for (let attempt = 0; attempt < maxCandidates; attempt += 1) {
+      const { selection } = routed;
+      if (!allowedProviders.includes(selection.provider)) {
+        throw new StockImageSelectionError(
+          `Stock provider ${selection.provider} is not available in ${mode} mode.`,
+          403,
+          'stock.provider.notAllowed',
+          routed.diagnostics
+        );
+      }
+
+      try {
+        return await persistSceneSelection(
+          dependencies,
+          projectId,
+          sceneId,
+          scene,
+          { ...selection, origin: 'auto' },
+          routed.cached
+        );
+      } catch (error) {
+        const canRetry =
+          error instanceof StockImageSelectionError &&
+          error.code === 'stock.download.failed' &&
+          attempt + 1 < maxCandidates;
+        if (!canRetry) {
+          throw error;
+        }
+
+        excludedPhotoKeys.push(stockPhotoKey(selection));
+        routed = await resolveCandidate(excludedPhotoKeys, attempt + 1);
+      }
     }
 
-    const { selection } = routed;
-    if (!allowedProviders.includes(selection.provider)) {
-      throw new StockImageSelectionError(
-        `Stock provider ${selection.provider} is not available in ${mode} mode.`,
-        403,
-        'stock.provider.notAllowed',
-        routed.diagnostics
-      );
-    }
-
-    return await persistSceneSelection(
-      dependencies,
-      projectId,
-      sceneId,
-      scene,
-      { ...selection, origin: 'auto' },
-      routed.cached
-    );
+    throw new StockImageSelectionError('No stock image candidate could be downloaded.', 502, 'stock.download.failed');
   } finally {
     activeSelectionLocks.delete(lockKey);
   }
