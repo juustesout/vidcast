@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 
-import type { RenderPlan, RenderPlanScene, SceneRenderResult } from '@/lib/types/render';
+import type { RenderPlan, RenderPlanScene, RenderPlanStudioOverlay, SceneRenderResult } from '@/lib/types/render';
 import { createFFmpegRuntime, type FFmpegRuntime } from './ffmpeg-runtime';
 import { ProcessExecutionError, runFfmpeg } from './ffmpeg-executor';
 import { parseDurationSeconds, probeMedia, FFprobeError } from './ffprobe';
@@ -153,6 +153,13 @@ async function fetchRemoteSourceToFile(url: string, targetDir: string, baseName:
 }
 
 async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, options: SceneRenderOptions): Promise<string> {
+  // When a studio frames the scene, still graphics are authored at the size of
+  // the visible screen instead of the full canvas. The renderer pads/positions
+  // that content inside the studio cutout, so titles and cards are centered in
+  // the screen rather than behind the studio frame.
+  const contentWidth = plan.studio?.screen.width ?? options.sceneWidth;
+  const contentHeight = plan.studio?.screen.height ?? options.sceneHeight;
+
   if (scene.source.kind === 'blank') {
     return 'color=black';
   }
@@ -171,7 +178,7 @@ async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, 
     await assertFileExists(resolvedAssetPath);
     if (path.extname(resolvedAssetPath).toLowerCase() === '.svg') {
       const rasterizedPath = safePathForSvg(options.tempDir, `${options.sceneId}-${options.renderId}-source.png`);
-      await rasterizeSvgToPng(resolvedAssetPath, rasterizedPath, options.sceneWidth, options.sceneHeight);
+      await rasterizeSvgToPng(resolvedAssetPath, rasterizedPath, contentWidth, contentHeight);
       return rasterizedPath;
     }
     return resolvedAssetPath;
@@ -179,10 +186,10 @@ async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, 
 
   const svgPath = safePathForSvg(options.tempDir, `${options.sceneId}-${options.renderId}.svg`);
   const background = plan.background?.value ?? '#020617';
-  const svg = createStillSceneSvg(scene, options.sceneWidth, options.sceneHeight, background);
+  const svg = createStillSceneSvg(scene, contentWidth, contentHeight, background);
   await fs.writeFile(svgPath, svg, 'utf8');
   const rasterizedPath = safePathForSvg(options.tempDir, `${options.sceneId}-${options.renderId}-generated.png`);
-  await rasterizeSvgToPng(svgPath, rasterizedPath, options.sceneWidth, options.sceneHeight);
+  await rasterizeSvgToPng(svgPath, rasterizedPath, contentWidth, contentHeight);
   return rasterizedPath;
 }
 
@@ -248,9 +255,12 @@ function buildStudioStillArgs(
   sourcePath: string,
   overlayFilter: string | undefined,
   logoPath: string | undefined,
-  studioPath: string
+  studioPath: string,
+  studio: RenderPlanStudioOverlay
 ): string[] {
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
+  const contentWidth = studio.screen.width;
+  const contentHeight = studio.screen.height;
   const logo = logoPath && scene.logo
     ? {
         path: logoPath,
@@ -267,8 +277,9 @@ function buildStudioStillArgs(
   } else {
     const zoomPan = sceneMotionToZoomPan(scene, frameCount);
     const fadeFilters = buildSceneFadeFilters(scene.duration);
-    const fitFilter = buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT);
-    parts.push(`[0:v]${[fitFilter, `zoompan=${zoomPan}:d=${frameCount}:s=${options.sceneWidth}x${options.sceneHeight}:fps=${options.sceneFps}`, ...fadeFilters].join(',')}[pre]`);
+    const fitFilter = buildVideoScaleFilter(contentWidth, contentHeight, options.fit ?? DEFAULT_RENDER_FIT);
+    const padFilter = `pad=${options.sceneWidth}:${options.sceneHeight}:${studio.screen.x}:${studio.screen.y}:color=black`;
+    parts.push(`[0:v]${[fitFilter, `zoompan=${zoomPan}:d=${frameCount}:s=${contentWidth}x${contentHeight}:fps=${options.sceneFps}`, ...fadeFilters, padFilter].join(',')}[pre]`);
     currentLabel = 'pre';
   }
 
@@ -329,8 +340,11 @@ function buildStudioVideoArgs(
   hasAudio: boolean,
   overlayFilter: string | undefined,
   logoPath: string | undefined,
-  studioPath: string
+  studioPath: string,
+  studio: RenderPlanStudioOverlay
 ): string[] {
+  const contentWidth = studio.screen.width;
+  const contentHeight = studio.screen.height;
   const inputDuration = sourceDuration(scene);
   const extraDuration = Math.max(0, scene.duration - inputDuration);
   const fadeFilters = buildSceneFadeFilters(scene.duration);
@@ -338,9 +352,10 @@ function buildStudioVideoArgs(
     `trim=duration=${scene.duration}`,
     'setpts=PTS-STARTPTS',
     `tpad=stop_mode=clone:stop_duration=${extraDuration}`,
-    buildVideoScaleFilter(options.sceneWidth, options.sceneHeight, options.fit ?? DEFAULT_RENDER_FIT),
+    buildVideoScaleFilter(contentWidth, contentHeight, options.fit ?? DEFAULT_RENDER_FIT),
     ...fadeFilters,
-    `fps=${options.sceneFps}`
+    `fps=${options.sceneFps}`,
+    `pad=${options.sceneWidth}:${options.sceneHeight}:${studio.screen.x}:${studio.screen.y}:color=black`
   ];
   const logo = logoPath && scene.logo
     ? {
@@ -392,10 +407,11 @@ function buildStillArgs(
   sourcePath: string,
   overlayFilter?: string,
   logoPath?: string,
-  studioPath?: string
+  studioPath?: string,
+  studio?: RenderPlanStudioOverlay
 ): string[] {
-  if (studioPath) {
-    return buildStudioStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath);
+  if (studioPath && studio) {
+    return buildStudioStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath, studio);
   }
 
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
@@ -515,10 +531,11 @@ function buildVideoArgs(
   hasAudio: boolean,
   overlayFilter?: string,
   logoPath?: string,
-  studioPath?: string
+  studioPath?: string,
+  studio?: RenderPlanStudioOverlay
 ): string[] {
-  if (studioPath) {
-    return buildStudioVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath, studioPath);
+  if (studioPath && studio) {
+    return buildStudioVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath, studioPath, studio);
   }
 
   const inputDuration = sourceDuration(scene);
@@ -698,8 +715,8 @@ export class LocalFFmpegRenderer implements Renderer {
       });
 
       const args = sourceIsVideo(scene)
-        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath, studioPath)
-        : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath);
+        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath, studioPath, plan.studio)
+        : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath, plan.studio);
 
       const command = this.runtime.ffmpegPath;
       await runFfmpeg(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() }, 'scene_render');
@@ -742,9 +759,10 @@ async function buildVideoPipeline(
   runtime: FFmpegRuntime,
   overlayFilter?: string,
   logoPath?: string,
-  studioPath?: string
+  studioPath?: string,
+  studio?: RenderPlanStudioOverlay
 ): Promise<string[]> {
   const probe = await probeMedia(sourcePath, runtime);
   const hasAudio = probe.streams.some((stream) => stream.codec_type === 'audio');
-  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath, studioPath);
+  return buildVideoArgs(scene, options, sourcePath, hasAudio, overlayFilter, logoPath, studioPath, studio);
 }

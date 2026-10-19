@@ -19,8 +19,8 @@ describe('studio overlay geometry', () => {
       screen: {
         x: 96,
         y: 97,
-        width: 1306,
-        height: 756
+        width: 1229,
+        height: 691
       }
     });
   });

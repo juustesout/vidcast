@@ -17,16 +17,22 @@ Set `renderSettings.studio` on a project:
       "brand": "AI DEV FORUM",
       "program": "NEWS",
       "accentColor": "#ff5a5f",
-      "screen": { "x": 0.05, "y": 0.09, "width": 0.64, "height": 0.7 }
+      "screen": { "x": 0.05, "y": 0.09, "width": 0.64, "height": 0.64 }
     }
   }
 }
 ```
 
 All screen fields are normalized `0..1`, except `radius`, which is pixels.
-Omitted fields use the defaults in `lib/render/studio-overlay.ts`. The overlay is
-resolved to canvas pixels in `resolveRenderPlan`, so the client/preview and the
-FFmpeg renderer share one geometry source.
+Omitted fields use the defaults in `lib/render/studio-overlay.ts`; the default
+screen is 16:9 so stock images and graphic cards fill it without cropping. The
+overlay is resolved to canvas pixels in `resolveRenderPlan`, so the client/preview
+and the FFmpeg renderer share one geometry source.
+
+Still scene content is authored at the screen size and then positioned inside the
+cutout. This keeps graphic titles centered in the studio screen instead of behind
+the frame, and makes the existing `title_card` template wrap long titles naturally
+at the narrower screen width.
 
 The layer is optional and backward compatible: projects without
 `renderSettings.studio` render exactly as before.
@@ -53,12 +59,29 @@ so lower-third copy lines up with the set instead of the full canvas.
 Projects can keep using `AI_DEV_FORUM_GRAPHIC_STYLE` for graphic-card colors and
 the existing per-scene/project logo overlay.
 
-## Presenter
+## Three compositions
 
-Presenter clips from the mock provider are opaque, so the studio treats the
-presenter as a clean rectangular PiP. Place it in the right-hand studio panel
-(for example `top_right`, `widthRatio: 0.21`, `marginRatio: 0.06`) to keep it
-clear of the screen and lower third.
+The same studio supports the three scenes of a news broadcast. Content is
+swappable because only the scene source, overlay copy and presenter setting
+change:
+
+| Scene | Screen content | Lower third | Presenter |
+| --- | --- | --- | --- |
+| Intro | `title_card` with the broadcast name | short kicker, e.g. `Daily AI update` | larger PiP |
+| News item | stock image or graphic | headline | smaller PiP |
+| Outro | `title_card` with the closing line | short CTA | none |
+
+Presenter framing presets live in `lib/render/studio-compositions.ts`:
+
+| Kind | Position | Width ratio | Margin ratio |
+| --- | --- | --- | --- |
+| `intro` | `top_right` | `0.26` | `0.04` |
+| `news` | `top_right` | `0.20` | `0.06` |
+| `outro` | none | - | - |
+
+Presenter clips from the mock/current providers are opaque, so every preset stays
+a clean rectangular PiP in the right-hand studio panel. The intro PiP is larger
+than the news PiP and never overlaps the title card, logo or lower third.
 
 ## Prototype
 
@@ -71,7 +94,7 @@ network or paid provider calls:
 
 - `studio-prototype.mp4` — 9 second concatenated prototype
 - `intro.png`, `news.png`, `outro.png` — inspection frames
-- `news-with-presenter.mp4` — news scene with the mock presenter PiP
+- `intro-with-presenter.mp4`, `news-with-presenter.mp4` — scenes with the mock presenter PiP
 
 Inspect the frames for screen scale, text legibility, PiP placement and brand
 consistency before changing the defaults.
@@ -81,5 +104,7 @@ consistency before changing the defaults.
 - The studio is project-level; per-scene studio variants are not implemented.
 - The right panel assumes a 16:9 landscape canvas. Verify 9:16 renders before
   enabling the studio on vertical projects.
-- Graphic `title_card` templates do not wrap long titles; keep intro/outro copy
-  short or use a text scene.
+- No transparent avatar or desk foreground is used: current providers return
+  opaque video, so the presenter remains a rectangular PiP.
+- Source attribution is not a dedicated field yet; keep it in the headline copy
+  or omit it. Adding a separate source line needs a second text overlay stage.

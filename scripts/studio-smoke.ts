@@ -27,6 +27,7 @@ import { AI_DEV_FORUM_GRAPHIC_STYLE } from '../lib/render/graphic-style';
 import { buildPresenterOverlayArgs } from '../lib/render/presenter-overlay';
 import { LocalFFmpegRenderer } from '../lib/render/renderer';
 import { resolveRenderPlan } from '../lib/render/scene-resolver';
+import { studioPresenterSceneSetting, type StudioCompositionKind } from '../lib/render/studio-compositions';
 import type { CompositionPlan, RenderPlanScene } from '../lib/types/render';
 import type { Asset } from '../lib/types/asset';
 import type { Project } from '../lib/types/render';
@@ -136,23 +137,23 @@ async function main(): Promise<void> {
         'intro',
         1,
         2.5,
-        { kind: 'graphic', template: 'title_card', templateData: { title: 'AI NEWS', subtitle: 'Daily AI Dev Forum' } },
+        { kind: 'graphic', template: 'title_card', templateData: { title: 'AI Dev Forum News' } },
         'graphic',
-        { type: 'none' }
+        { type: 'text', text: 'Daily AI update', position: 'bottom', style: { fontSize: 28, color: '#ffffff', box: false, margin: 40 } }
       ),
       scene('news', 2, 4, { kind: 'asset', assetId: 'stock' }, 'image', {
         type: 'text',
         text: 'Models ship faster than\nteams can evaluate them',
         position: 'bottom',
-        style: { fontSize: 32, color: '#ffffff', box: false, margin: 62 }
+        style: { fontSize: 30, color: '#ffffff', box: false, margin: 44 }
       }),
       scene(
         'outro',
         3,
         2.5,
-        { kind: 'graphic', template: 'title_card', templateData: { title: 'Thanks', subtitle: 'See you next time' } },
+        { kind: 'graphic', template: 'title_card', templateData: { title: 'Thanks for watching' } },
         'graphic',
-        { type: 'none' }
+        { type: 'text', text: 'Subscribe for daily AI news', position: 'bottom', style: { fontSize: 28, color: '#ffffff', box: false, margin: 40 } }
       )
     ]
   };
@@ -167,6 +168,11 @@ async function main(): Promise<void> {
 
   const renderer = new LocalFFmpegRenderer(runtime);
   const scenePaths: string[] = [];
+  const presenterKinds: Record<string, StudioCompositionKind | undefined> = {
+    intro: 'intro',
+    news: 'news',
+    outro: 'outro'
+  };
 
   for (const scenePlan of fullPlan.scenes) {
     if (scenePlan.status !== 'renderable') {
@@ -189,7 +195,12 @@ async function main(): Promise<void> {
     );
 
     let finalScenePath = scenePath;
-    if (scenePlan.sceneId === 'news') {
+    const presenterKind = presenterKinds[scenePlan.sceneId];
+    const presenterSetting = presenterKind
+      ? studioPresenterSceneSetting(presenterKind, scenePlan.sceneId)
+      : undefined;
+
+    if (presenterSetting?.layout === 'pip' && presenterSetting.pip) {
       const plan: CompositionPlan = {
         projectId: PROJECT_ID,
         items: [],
@@ -207,13 +218,17 @@ async function main(): Promise<void> {
               startTime: 0,
               duration: scenePlan.duration,
               layout: 'pip',
-              startOffsetSeconds: 0,
-              pip: { position: 'top_right', widthRatio: 0.21, marginRatio: 0.06 }
+              startOffsetSeconds: presenterSetting.startOffsetSeconds ?? 0,
+              pip: {
+                position: presenterSetting.pip.position ?? 'top_right',
+                widthRatio: presenterSetting.pip.widthRatio ?? 0.2,
+                marginRatio: presenterSetting.pip.marginRatio ?? 0.05
+              }
             }
           ]
         }
       };
-      finalScenePath = path.join(OUTPUT_ROOT, 'news-with-presenter.mp4');
+      finalScenePath = path.join(OUTPUT_ROOT, `${scenePlan.sceneId}-with-presenter.mp4`);
       await runFfmpeg(runtime.ffmpegPath, buildPresenterOverlayArgs(scenePath, finalScenePath, plan), { timeoutMs: 180_000 }, 'scene_render');
     }
 

@@ -15,8 +15,8 @@ import { isValidGraphicColor } from './graphic-style';
 export const DEFAULT_STUDIO_SCREEN = {
   x: 0.05,
   y: 0.09,
-  width: 0.68,
-  height: 0.7
+  width: 0.64,
+  height: 0.64
 } as const;
 
 export const DEFAULT_STUDIO_BRAND = 'AI DEV FORUM';
@@ -128,9 +128,9 @@ export function createStudioOverlaySvg(
   const plateY = Math.round(s.y + s.height + h * 0.025);
   const plateHeight = Math.max(
     Math.round(h * 0.08),
-    Math.min(Math.round(h * 0.14), Math.round(h * 0.94 - plateY))
+    Math.min(Math.round(h * 0.17), Math.round(h * 0.955 - plateY))
   );
-  const deskY = Math.round(h * 0.945);
+  const deskY = Math.round(h * 0.955);
   const brand = escapeXml(studio.brand);
   const program = escapeXml(studio.program);
 
