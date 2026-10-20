@@ -1,5 +1,6 @@
 import type { CompositionPlan } from '@/lib/types/render';
 import type { PresenterOverlayPlacement } from '@/lib/types/presenter';
+import { presenterDecodeInputArgs, type PresenterVideoProbe } from './presenter-codec';
 
 function formatSeconds(value: number): string {
   return Number.isFinite(value) ? value.toFixed(3) : '0';
@@ -26,7 +27,8 @@ function placementOverlayExpressions(placement: PresenterOverlayPlacement, canva
 export function buildPresenterOverlayArgs(
   baseVideoPath: string,
   outputPath: string,
-  plan: CompositionPlan
+  plan: CompositionPlan,
+  options?: { clipProbes?: PresenterVideoProbe[] }
 ): string[] {
   const presenter = plan.presenter;
   if (!presenter || presenter.placements.length === 0) {
@@ -43,9 +45,9 @@ export function buildPresenterOverlayArgs(
   }
 
   const args: string[] = ['-y', '-i', baseVideoPath];
-  for (const placement of presenter.placements) {
-    args.push('-i', placement.clipPath);
-  }
+  presenter.placements.forEach((placement, index) => {
+    args.push(...presenterDecodeInputArgs(placement.clipPath, options?.clipProbes?.[index]));
+  });
 
   const filters: string[] = [];
   let baseLabel = '0:v';
@@ -67,6 +69,7 @@ export function buildPresenterOverlayArgs(
     const end = placement.startTime + placement.duration;
 
     const clipFilters: string[] = [
+      'format=yuva420p',
       `trim=start=${formatSeconds(offset)}:duration=${formatSeconds(sourceDuration)}`
     ];
     if (pad > 0.001) {
@@ -93,7 +96,7 @@ export function buildPresenterOverlayArgs(
     const nextLabel = `v${index}`;
     const enable = `between(t,${formatSeconds(placement.startTime)},${formatSeconds(end)})`;
     filters.push(
-      `[${baseLabel}][${clipLabel}]overlay=x=${x}:y=${y}:eof_action=pass:enable='${enable}'[${nextLabel}]`
+      `[${baseLabel}][${clipLabel}]overlay=x=${x}:y=${y}:eof_action=pass:format=auto:enable='${enable}'[${nextLabel}]`
     );
     baseLabel = nextLabel;
   });

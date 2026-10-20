@@ -14,12 +14,12 @@ import {
   evaluatePresenterChargeBudget,
   getPresenterClip,
   getPresenterSetting,
+  isPresenterClipCurrent,
+  resolvePresenterOutputFormat,
   resolvePresenterPip
 } from '@/lib/presenter/config';
 import {
-  evaluatePresenterCostLimit,
-  PresenterPricingError,
-  resolvePresenterCostEstimate
+  evaluatePresenterPaidCostPrecondition
 } from '@/lib/presenter/pricing';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
@@ -211,23 +211,28 @@ function resolveSceneDuration(project: Project, scene: Scene): number {
 }
 
 function estimateRealPresenterCost(project: Project, duration: number): PresenterCostRecord {
-  try {
-    return resolvePresenterCostEstimate({
-      height: project.renderSettings.height,
-      seconds: duration,
-      maxCostUsd: project.presenter?.maxCostUsd
-    });
-  } catch (error) {
-    if (error instanceof PresenterPricingError) {
+  const precondition = evaluatePresenterPaidCostPrecondition({
+    height: project.renderSettings.height,
+    seconds: duration,
+    maxCostUsd: project.presenter?.maxCostUsd
+  });
+  if (!precondition.allowed) {
+    if (precondition.code === 'BUDGET_EXCEEDED') {
       throw new PresenterGenerationError(
-        `Paid presenter generation is blocked: ${error.message}`,
-        409,
-        'presenter.cost.notConfigured',
-        { reason: error.code }
+        `Presenter budget exceeded. ${precondition.reason}`,
+        403,
+        'presenter.budget.exceeded',
+        precondition.estimate ? { ...precondition.estimate } : undefined
       );
     }
-    throw error;
+    throw new PresenterGenerationError(
+      `Paid presenter generation is blocked: ${precondition.reason}`,
+      409,
+      'presenter.cost.notConfigured',
+      { reason: precondition.code }
+    );
   }
+  return precondition.estimate;
 }
 
 async function readProviderBalance(provider: PresenterProvider): Promise<number | undefined> {
@@ -265,7 +270,7 @@ async function observeProviderCost(
 }
 
 function resolveOutputFormat(project: Project): PresenterOutputFormat {
-  return project.presenter?.outputFormat === 'webm' ? 'webm' : 'mp4';
+  return resolvePresenterOutputFormat(project);
 }
 
 function resolveAvatarId(project: Project, provider: PresenterProvider, override?: string): string {
@@ -324,7 +329,7 @@ export async function submitPresenterClip(
     }
 
     const existingClip = getPresenterClip(project, sceneId);
-    if (!options.regenerate && existingClip?.status === 'generated' && existingClip.assetId) {
+    if (!options.regenerate && isPresenterClipCurrent(project, scene, existingClip)) {
       throw new PresenterGenerationError('Presenter clip already exists for this scene. Use regenerate=true to create a new clip.', 409, 'presenter.scene.alreadyGenerated');
     }
     if (existingClip?.status === 'submitting' || existingClip?.status === 'generating') {
@@ -358,17 +363,6 @@ export async function submitPresenterClip(
     const cost = isRealPresenterProviderKey(provider.providerId)
       ? estimateRealPresenterCost(project, duration)
       : undefined;
-    if (cost) {
-      const limit = evaluatePresenterCostLimit(cost);
-      if (!limit.allowed) {
-        throw new PresenterGenerationError(
-          `Presenter budget exceeded. ${limit.reason}`,
-          403,
-          'presenter.budget.exceeded',
-          { ...cost }
-        );
-      }
-    }
 
     const avatarId = resolveAvatarId(project, provider, options.avatarId);
     const walletBalanceBeforeUsd = cost ? await readProviderBalance(provider) : undefined;

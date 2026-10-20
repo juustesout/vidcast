@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluatePresenterBudget,
   evaluatePresenterChargeBudget,
+  isPresenterClipCurrent,
   normalizeProjectPresenter,
   derivePresenterSignature
 } from '@/lib/presenter/config';
@@ -31,6 +32,24 @@ function audioAsset(): Asset {
     updatedAt: CREATED
   };
 }
+
+function presenterAsset(): Asset {
+  return {
+    id: 'presenter-1',
+    type: 'video',
+    status: 'available',
+    provenance: 'generated',
+    filename: 'presenter.mp4',
+    localPath: 'assets/presenter.mp4',
+    mimeType: 'video/mp4',
+    duration: 2,
+    metadata: {},
+    createdAt: CREATED,
+    updatedAt: CREATED
+  };
+}
+
+const CURRENT_NARRATION_SIGNATURE = 'text:Hello world|voice:voice-1|model:model-1|format:wav|asset:audio-1';
 
 function baseProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -137,6 +156,25 @@ function clip(overrides: Partial<PresenterClipSpec> = {}): PresenterClipSpec {
   };
 }
 
+function currentClip(overrides: Partial<PresenterClipSpec> = {}): PresenterClipSpec {
+  return clip({
+    status: 'generated',
+    assetId: 'presenter-1',
+    audioAssetId: 'audio-1',
+    narrationSignature: CURRENT_NARRATION_SIGNATURE,
+    outputFormat: 'mp4',
+    ...overrides
+  });
+}
+
+function projectWithCurrentClip(overrides: Partial<Project> = {}): Project {
+  return presenterProject({
+    assets: [audioAsset(), presenterAsset()],
+    presenterClips: [currentClip()],
+    ...overrides
+  });
+}
+
 describe('presenter config', () => {
   it('normalizes and clamps presenter settings', () => {
     const normalized = normalizeProjectPresenter({
@@ -200,6 +238,34 @@ describe('presenter config', () => {
     const charge = evaluatePresenterChargeBudget(project, { seconds: 2 });
     expect(charge.allowed).toBe(false);
   });
+
+  it('treats a generated MP4 clip as current only for an MP4 request', () => {
+    const project = projectWithCurrentClip();
+    expect(isPresenterClipCurrent(project, project.scenes[0], currentClip())).toBe(true);
+  });
+
+  it('does not treat an existing MP4 clip as current for a WebM request', () => {
+    const project = projectWithCurrentClip({
+      presenter: {
+        enabled: true,
+        provider: 'mock',
+        outputFormat: 'webm',
+        sceneSettings: [{ sceneId: 'scene-1', layout: 'pip' }]
+      }
+    });
+    expect(isPresenterClipCurrent(project, project.scenes[0], currentClip({ outputFormat: 'mp4' }))).toBe(false);
+  });
+
+  it('does not treat an existing WebM clip as current for an MP4 request', () => {
+    const project = projectWithCurrentClip();
+    expect(isPresenterClipCurrent(project, project.scenes[0], currentClip({ outputFormat: 'webm' }))).toBe(false);
+  });
+
+  it('does not treat a missing or unknown clip format as current', () => {
+    const project = projectWithCurrentClip();
+    expect(isPresenterClipCurrent(project, project.scenes[0], currentClip({ outputFormat: undefined as unknown as PresenterClipSpec['outputFormat'] }))).toBe(false);
+    expect(isPresenterClipCurrent(project, project.scenes[0], currentClip({ outputFormat: 'mov' as PresenterClipSpec['outputFormat'] }))).toBe(false);
+  });
 });
 
 describe('presenter planner', () => {
@@ -254,6 +320,49 @@ describe('presenter planner', () => {
   it('does not add presenter actions when disabled', () => {
     const plan = deriveProductionPlan(baseProject(), { mode: 'mock' });
     expect(plan.actions.some((action) => action.type.startsWith('presenter_'))).toBe(false);
+  });
+
+  it('reuses a current MP4 clip without planning a new submit', () => {
+    const plan = deriveProductionPlan(projectWithCurrentClip(), { mode: 'mock' });
+    const submit = plan.actions.find((action) => action.type === 'presenter_submit');
+    expect(submit?.status).toBe('current');
+    expect(submit?.execute).toBe(false);
+    expect(submit?.reason).toBe('Presenter clip is current.');
+  });
+
+  it('plans a single WebM submit when only an MP4 clip exists', () => {
+    const project = projectWithCurrentClip({
+      presenter: {
+        enabled: true,
+        provider: 'mock',
+        outputFormat: 'webm',
+        sceneSettings: [{ sceneId: 'scene-1', layout: 'pip' }]
+      }
+    });
+    const plan = deriveProductionPlan(project, { mode: 'mock' });
+    const submits = plan.actions.filter((action) => action.type === 'presenter_submit');
+    expect(submits).toHaveLength(1);
+    expect(submits[0]?.status).toBe('ready');
+    expect(submits[0]?.execute).toBe(true);
+  });
+
+  it('blocks a real submit before provider work when paid cost preconditions are missing', () => {
+    const project = presenterProject({
+      presenter: {
+        enabled: true,
+        provider: 'heygen',
+        avatarId: 'avatar-1',
+        outputFormat: 'webm',
+        sceneSettings: [{ sceneId: 'scene-1', layout: 'fullscreen' }],
+        maxGeneratedSeconds: 20,
+        maxPaidRequests: 1
+      }
+    });
+    const plan = deriveProductionPlan(project, { mode: 'real' });
+    const submit = plan.actions.find((action) => action.type === 'presenter_submit');
+    expect(submit?.status).toBe('blocked');
+    expect(submit?.execute).toBe(false);
+    expect(submit?.reason).toMatch(/HEYGEN_PRICING_JSON|maxCostUsd|HEYGEN_AVATAR_TYPE/);
   });
 });
 

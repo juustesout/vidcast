@@ -36,6 +36,25 @@ function audioAsset(): Asset {
   };
 }
 
+function presenterAsset(overrides: Partial<Asset> = {}): Asset {
+  return {
+    id: 'presenter-asset-existing',
+    type: 'video',
+    status: 'available',
+    provenance: 'generated',
+    filename: 'presenter.mp4',
+    localPath: 'assets/presenter.mp4',
+    mimeType: 'video/mp4',
+    duration: 2,
+    metadata: {},
+    createdAt: CREATED,
+    updatedAt: CREATED,
+    ...overrides
+  };
+}
+
+const CURRENT_NARRATION_SIGNATURE = 'text:Hello world|voice:voice-1|model:model-1|format:wav|asset:audio-1';
+
 function buildProject(overrides: Partial<Project> = {}): Project {
   return {
     id: 'project-presenter-service',
@@ -284,19 +303,25 @@ function configureRealPresenterPricing(pricing = JSON.stringify({
   vi.stubEnv('HEYGEN_PRICING_JSON', pricing);
 }
 
-function realProject(overrides: { maxCostUsd?: number; presenterClips?: Project['presenterClips'] } = {}): Project {
+function realProject(overrides: {
+  maxCostUsd?: number;
+  outputFormat?: 'mp4' | 'webm';
+  presenterClips?: Project['presenterClips'];
+  assets?: Asset[];
+} = {}): Project {
   return buildProject({
     presenter: {
       enabled: true,
       provider: 'heygen',
       avatarId: 'avatar-1',
-      outputFormat: 'mp4',
+      outputFormat: overrides.outputFormat ?? 'mp4',
       sceneSettings: [{ sceneId: 'scene-1', layout: 'fullscreen' }],
       maxGeneratedSeconds: 20,
       maxPaidRequests: 2,
       maxCostUsd: overrides.maxCostUsd ?? 0.2
     },
-    presenterClips: overrides.presenterClips
+    presenterClips: overrides.presenterClips,
+    ...(overrides.assets ? { assets: overrides.assets } : {})
   });
 }
 
@@ -341,6 +366,7 @@ describe('presenter generation service', () => {
 
   it('rejects duplicate submission while a generated clip already exists', async () => {
     const project = buildProject({
+      assets: [audioAsset(), presenterAsset()],
       presenterClips: [
         {
           sceneId: 'scene-1',
@@ -349,7 +375,7 @@ describe('presenter generation service', () => {
           outputFormat: 'mp4',
           assetId: 'presenter-asset-existing',
           audioAssetId: 'audio-1',
-          narrationSignature: 'text:Hello world|voice:voice-1|model:model-1|format:wav|asset:audio-1',
+          narrationSignature: CURRENT_NARRATION_SIGNATURE,
           duration: 2
         }
       ]
@@ -359,6 +385,91 @@ describe('presenter generation service', () => {
     await expect(submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps)).rejects.toMatchObject({
       code: 'presenter.scene.alreadyGenerated'
     });
+    expect(deps.submitCalls).toBe(0);
+  });
+
+  it('submits a WebM request even when an MP4 clip already exists', async () => {
+    const project = buildProject({
+      presenter: {
+        enabled: true,
+        provider: 'mock',
+        outputFormat: 'webm',
+        sceneSettings: [{ sceneId: 'scene-1', layout: 'pip' }],
+        maxGeneratedSeconds: 20,
+        maxPaidRequests: 2
+      },
+      assets: [audioAsset(), presenterAsset()],
+      presenterClips: [
+        {
+          sceneId: 'scene-1',
+          status: 'generated',
+          provider: 'mock',
+          outputFormat: 'mp4',
+          assetId: 'presenter-asset-existing',
+          audioAssetId: 'audio-1',
+          narrationSignature: CURRENT_NARRATION_SIGNATURE,
+          duration: 2
+        }
+      ]
+    });
+    const deps = await createDependencies(project, mockProvider());
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(deps.submitCalls).toBe(1);
+    expect(deps.state.project.presenterClips?.[0]?.outputFormat).toBe('webm');
+  });
+
+  it('submits an MP4 request even when a WebM clip already exists', async () => {
+    const project = buildProject({
+      assets: [audioAsset(), presenterAsset({ filename: 'presenter.webm', mimeType: 'video/webm' })],
+      presenterClips: [
+        {
+          sceneId: 'scene-1',
+          status: 'generated',
+          provider: 'mock',
+          outputFormat: 'webm',
+          assetId: 'presenter-asset-existing',
+          audioAssetId: 'audio-1',
+          narrationSignature: CURRENT_NARRATION_SIGNATURE,
+          duration: 2
+        }
+      ]
+    });
+    const deps = await createDependencies(project, mockProvider());
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(deps.submitCalls).toBe(1);
+    expect(deps.state.project.presenterClips?.[0]?.outputFormat).toBe('mp4');
+  });
+
+  it('submits once for a stale clip instead of treating it as current', async () => {
+    const project = buildProject({
+      assets: [audioAsset(), presenterAsset()],
+      presenterClips: [
+        {
+          sceneId: 'scene-1',
+          status: 'generated',
+          provider: 'mock',
+          outputFormat: 'mp4',
+          assetId: 'presenter-asset-existing',
+          audioAssetId: 'audio-1',
+          narrationSignature: 'stale-signature',
+          duration: 2
+        }
+      ]
+    });
+    const deps = await createDependencies(project, mockProvider());
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(deps.submitCalls).toBe(1);
+
+    await expect(submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps)).rejects.toMatchObject({
+      code: 'presenter.scene.alreadyRunning'
+    });
+    expect(deps.submitCalls).toBe(1);
   });
 
   it('rejects stale narration before calling the provider', async () => {
@@ -560,6 +671,35 @@ describe('presenter generation service', () => {
   it('blocks a paid submission before any provider call when the USD limit is missing', async () => {
     configureRealPresenterPricing();
     const project = realProject({ maxCostUsd: 0 });
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.cost.notConfigured' });
+    expect(deps.submitCalls).toBe(0);
+    expect(deps.balanceCalls).toBe(0);
+    expect(deps.state.project.presenterClips ?? []).toEqual([]);
+  });
+
+  it('blocks a WebM pilot before provider submit when the USD limit is negative', async () => {
+    configureRealPresenterPricing();
+    const project = realProject({ maxCostUsd: -1, outputFormat: 'webm' });
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.cost.notConfigured' });
+    expect(deps.submitCalls).toBe(0);
+    expect(deps.balanceCalls).toBe(0);
+    expect(deps.state.project.presenterClips ?? []).toEqual([]);
+  });
+
+  it('blocks a WebM pilot before provider submit when pricing JSON is missing', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('HEYGEN_API_KEY', 'test-key');
+    vi.stubEnv('HEYGEN_AVATAR_TYPE', 'photo_avatar');
+    vi.stubEnv('HEYGEN_PRESENTER_ENGINE', 'avatar_iii');
+    const project = realProject({ outputFormat: 'webm' });
     const deps = await createDependencies(project, heygenProvider([5]));
 
     await expect(

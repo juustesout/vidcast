@@ -29,12 +29,12 @@ afterEach(() => {
 });
 
 describe('HeyGen presenter provider', () => {
-  it('defaults to Avatar IV and emits the v3 resolution/aspect_ratio schema', () => {
-    expect(resolveHeyGenPresenterEngine({})).toBe('avatar_iv');
+  it('defaults to Avatar III and emits the v3 resolution/aspect_ratio schema', () => {
+    expect(resolveHeyGenPresenterEngine({})).toBe('avatar_iii');
     expect(resolveHeyGenResolution(1080)).toBe('1080p');
     expect(resolveHeyGenResolution(720)).toBe('720p');
 
-    const payload = buildHeyGenVideoPayload(request, 'asset-1', 'avatar_iv');
+    const payload = buildHeyGenVideoPayload(request, 'asset-1', 'avatar_iii');
     expect(payload).toEqual({
       type: 'avatar',
       avatar_id: 'look-photo-1',
@@ -43,7 +43,7 @@ describe('HeyGen presenter provider', () => {
       output_format: 'mp4',
       aspect_ratio: '16:9',
       resolution: '1080p',
-      engine: { type: 'avatar_iv' }
+      engine: { type: 'avatar_iii' }
     });
     expect(payload).not.toHaveProperty('dimension');
     expect(payload).not.toHaveProperty('script');
@@ -53,6 +53,7 @@ describe('HeyGen presenter provider', () => {
   it('selects Avatar III through the environment and rejects unknown engines', () => {
     expect(resolveHeyGenPresenterEngine({ HEYGEN_PRESENTER_ENGINE: 'avatar_iii' })).toBe('avatar_iii');
     expect(resolveHeyGenPresenterEngine({ HEYGEN_PRESENTER_ENGINE: 'Avatar_III' })).toBe('avatar_iii');
+    expect(resolveHeyGenPresenterEngine({ HEYGEN_PRESENTER_ENGINE: 'avatar_iv' })).toBe('avatar_iv');
     expect(() => resolveHeyGenPresenterEngine({ HEYGEN_PRESENTER_ENGINE: 'avatar_ii' })).toThrow(
       /Unsupported HEYGEN_PRESENTER_ENGINE/
     );

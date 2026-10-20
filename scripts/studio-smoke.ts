@@ -3,8 +3,8 @@
  *
  * It writes sample assets under `.tmp/studio-smoke`, builds an intro / news /
  * outro vertical slice through the normal render plan, renders each scene with
- * the studio overlay, applies a mock presenter PiP to the news scene, and
- * concatenates the result into one prototype MP4:
+ * the studio overlay, applies a synthetic alpha presenter PiP to intro/news,
+ * and concatenates the result into one prototype MP4:
  *
  *   intro: title card, no presenter
  *   news:  stock image + headline + presenter PiP
@@ -20,15 +20,15 @@ import path from 'node:path';
 
 import sharp from 'sharp';
 
-import { buildMockPresenterArgs } from '../lib/ai/presenter/fake-provider';
 import { createFFmpegRuntime } from '../lib/render/ffmpeg-runtime';
 import { runFfmpeg, runProcess } from '../lib/render/ffmpeg-executor';
 import { AI_DEV_FORUM_GRAPHIC_STYLE } from '../lib/render/graphic-style';
+import { probePresenterVideo } from '../lib/render/presenter-codec';
 import { buildPresenterOverlayArgs } from '../lib/render/presenter-overlay';
 import { LocalFFmpegRenderer } from '../lib/render/renderer';
 import { resolveRenderPlan } from '../lib/render/scene-resolver';
 import { studioPresenterSceneSetting, type StudioCompositionKind } from '../lib/render/studio-compositions';
-import type { CompositionPlan, RenderPlanScene } from '../lib/types/render';
+import type { CompositionPlan } from '../lib/types/render';
 import type { Asset } from '../lib/types/asset';
 import type { Project } from '../lib/types/render';
 import type { Scene } from '../lib/types/scene';
@@ -163,9 +163,37 @@ async function main(): Promise<void> {
     throw new Error('Studio overlay was not resolved.');
   }
 
-  const presenterClip = path.join(OUTPUT_ROOT, 'presenter-mock.mp4');
-  await runFfmpeg(runtime.ffmpegPath, buildMockPresenterArgs(presenterClip, 4), { timeoutMs: 120_000 }, 'presenter_generate');
+  const presenterClip = path.join(OUTPUT_ROOT, 'presenter-alpha.webm');
+  await runFfmpeg(
+    runtime.ffmpegPath,
+    [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=0x38bdf8:s=640x360:r=25:d=4',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=white:s=640x360:r=25:d=4',
+      '-filter_complex',
+      "[1]geq=lum='if(lt(hypot(X-W/2,Y-H*0.55),H*0.32),255,0)':cb=128:cr=128,format=gray[a];[0][a]alphamerge,format=yuva420p",
+      '-an',
+      '-c:v',
+      'libvpx-vp9',
+      '-pix_fmt',
+      'yuva420p',
+      '-auto-alt-ref',
+      '0',
+      '-t',
+      '4',
+      presenterClip
+    ],
+    { timeoutMs: 120_000 },
+    'presenter_generate'
+  );
 
+  const presenterProbe = await probePresenterVideo(presenterClip, runtime);
   const renderer = new LocalFFmpegRenderer(runtime);
   const scenePaths: string[] = [];
   const presenterKinds: Record<string, StudioCompositionKind | undefined> = {
@@ -229,7 +257,12 @@ async function main(): Promise<void> {
         }
       };
       finalScenePath = path.join(OUTPUT_ROOT, `${scenePlan.sceneId}-with-presenter.mp4`);
-      await runFfmpeg(runtime.ffmpegPath, buildPresenterOverlayArgs(scenePath, finalScenePath, plan), { timeoutMs: 180_000 }, 'scene_render');
+      await runFfmpeg(
+        runtime.ffmpegPath,
+        buildPresenterOverlayArgs(scenePath, finalScenePath, plan, { clipProbes: [presenterProbe] }),
+        { timeoutMs: 180_000 },
+        'scene_render'
+      );
     }
 
     const framePath = path.join(OUTPUT_ROOT, `${scenePlan.sceneId}.png`);

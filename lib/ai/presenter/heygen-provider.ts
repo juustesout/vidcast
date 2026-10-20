@@ -14,11 +14,11 @@ export type HeyGenPresenterEngine = 'avatar_iii' | 'avatar_iv' | 'avatar_v';
 const HEYGEN_PRESENTER_ENGINES: readonly HeyGenPresenterEngine[] = ['avatar_iii', 'avatar_iv', 'avatar_v'];
 
 // Engine selection is operational configuration, not project content. The
-// default preserves the previous HeyGen v3 behavior (Avatar IV).
+// default matches the proven P40.2 Avatar III photo-avatar route.
 export function resolveHeyGenPresenterEngine(env: Record<string, string | undefined> = process.env): HeyGenPresenterEngine {
   const raw = env.HEYGEN_PRESENTER_ENGINE?.trim().toLowerCase();
   if (!raw) {
-    return 'avatar_iv';
+    return 'avatar_iii';
   }
   if ((HEYGEN_PRESENTER_ENGINES as readonly string[]).includes(raw)) {
     return raw as HeyGenPresenterEngine;

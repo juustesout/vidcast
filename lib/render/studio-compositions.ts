@@ -3,9 +3,9 @@ import type { PresenterPipPosition, PresenterSceneSetting } from '@/lib/types/pr
 /**
  * Presenter framing presets for the three studio compositions.
  *
- * The current avatar providers return opaque video, so every preset stays a
- * rectangular PiP in the studio's right-hand panel. Intro is deliberately
- * larger than the news PiP; outro keeps the presenter off screen.
+ * Intro and news stay rectangular PiP in the studio's right-hand panel even
+ * when the clip carries an alpha matte. Intro is deliberately larger than the
+ * news PiP; outro keeps the presenter off screen.
  */
 export type StudioCompositionKind = 'intro' | 'news' | 'outro';
 

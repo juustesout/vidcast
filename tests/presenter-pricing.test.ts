@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   evaluatePresenterCostLimit,
+  evaluatePresenterPaidCostPrecondition,
   parsePresenterPricingConfig,
   PresenterPricingError,
   resolvePresenterCostEstimate
@@ -102,5 +103,34 @@ describe('presenter pricing', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(PresenterPricingError);
     }
+  });
+
+  it('fail-closes paid generation for missing, invalid, negative, and insufficient USD limits', () => {
+    const missing = evaluatePresenterPaidCostPrecondition({ height: 1080, seconds: 2, maxCostUsd: undefined }, env());
+    expect(missing).toMatchObject({ allowed: false, code: 'MISSING_COST_LIMIT' });
+
+    const negative = evaluatePresenterPaidCostPrecondition({ height: 1080, seconds: 2, maxCostUsd: -1 }, env());
+    expect(negative).toMatchObject({ allowed: false, code: 'MISSING_COST_LIMIT' });
+
+    const zero = evaluatePresenterPaidCostPrecondition({ height: 1080, seconds: 2, maxCostUsd: 0 }, env());
+    expect(zero).toMatchObject({ allowed: false, code: 'MISSING_COST_LIMIT' });
+
+    const missingPricing = evaluatePresenterPaidCostPrecondition(
+      { height: 1080, seconds: 2, maxCostUsd: 1 },
+      env({ HEYGEN_PRICING_JSON: undefined })
+    );
+    expect(missingPricing).toMatchObject({ allowed: false, code: 'MISSING_PRICING' });
+
+    const invalidPricing = evaluatePresenterPaidCostPrecondition(
+      { height: 1080, seconds: 2, maxCostUsd: 1 },
+      env({ HEYGEN_PRICING_JSON: '{' })
+    );
+    expect(invalidPricing).toMatchObject({ allowed: false, code: 'INVALID_PRICING' });
+
+    const overrun = evaluatePresenterPaidCostPrecondition({ height: 1080, seconds: 3.6, maxCostUsd: 0.05 }, env());
+    expect(overrun).toMatchObject({ allowed: false, code: 'BUDGET_EXCEEDED' });
+
+    const allowed = evaluatePresenterPaidCostPrecondition({ height: 1080, seconds: 2, maxCostUsd: 1 }, env());
+    expect(allowed.allowed).toBe(true);
   });
 });

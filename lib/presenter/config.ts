@@ -322,6 +322,12 @@ export function getPresenterClip(project: Project, sceneId: string): PresenterCl
   return project.presenterClips?.find((entry) => entry.sceneId === sceneId);
 }
 
+export function resolvePresenterOutputFormat(project: Project): PresenterOutputFormat {
+  return isPresenterOutputFormat(project.presenter?.outputFormat)
+    ? project.presenter.outputFormat
+    : PRESENTER_DEFAULT_OUTPUT_FORMAT;
+}
+
 export function resolvePresenterPip(setting: PresenterSceneSetting): Required<PresenterPipSettings> | undefined {
   if (setting.layout !== 'pip') {
     return undefined;
@@ -335,6 +341,12 @@ export function resolvePresenterPip(setting: PresenterSceneSetting): Required<Pr
 
 export function isPresenterClipCurrent(project: Project, scene: Scene, clip: PresenterClipSpec | undefined): boolean {
   if (!clip || clip.status !== 'generated' || !clip.assetId) {
+    return false;
+  }
+  if (!isPresenterOutputFormat(clip.outputFormat)) {
+    return false;
+  }
+  if (clip.outputFormat !== resolvePresenterOutputFormat(project)) {
     return false;
   }
   const asset = project.assets.find((entry) => entry.id === clip.assetId);

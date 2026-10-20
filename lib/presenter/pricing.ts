@@ -259,3 +259,31 @@ export function evaluatePresenterCostLimit(estimate: PresenterCostEstimate): {
   }
   return { allowed: true };
 }
+
+export type PresenterPaidCostPrecondition =
+  | { allowed: true; estimate: PresenterCostEstimate }
+  | { allowed: false; code: PresenterPricingErrorCode | 'BUDGET_EXCEEDED'; reason: string; estimate?: PresenterCostEstimate };
+
+export function evaluatePresenterPaidCostPrecondition(
+  input: PresenterCostEstimateInput,
+  env: Record<string, string | undefined> = process.env
+): PresenterPaidCostPrecondition {
+  try {
+    const estimate = resolvePresenterCostEstimate(input, env);
+    const limit = evaluatePresenterCostLimit(estimate);
+    if (!limit.allowed) {
+      return {
+        allowed: false,
+        code: 'BUDGET_EXCEEDED',
+        reason: limit.reason ?? 'Presenter USD budget exceeded.',
+        estimate
+      };
+    }
+    return { allowed: true, estimate };
+  } catch (error) {
+    if (error instanceof PresenterPricingError) {
+      return { allowed: false, code: error.code, reason: error.message };
+    }
+    throw error;
+  }
+}

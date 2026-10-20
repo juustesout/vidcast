@@ -5,6 +5,7 @@ import {
   getPresenterSetting,
   isPresenterClipCurrent
 } from '@/lib/presenter/config';
+import { evaluatePresenterPaidCostPrecondition } from '@/lib/presenter/pricing';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus } from '@/lib/render/render-status';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import type { Project } from '@/lib/types/render';
@@ -495,6 +496,20 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
         submitStatus = 'blocked';
         submitExecute = false;
         submitReason = `Presenter budget exceeded. ${budget.reasons.join(' ')}`;
+      } else if (options.mode === 'real') {
+        const planned = renderPlan.scenes.find((entry) => entry.sceneId === scene.id);
+        const paidCost = evaluatePresenterPaidCostPrecondition({
+          height: project.renderSettings.height,
+          seconds: planned?.duration ?? scene.duration,
+          maxCostUsd: project.presenter?.maxCostUsd
+        });
+        if (!paidCost.allowed) {
+          submitStatus = 'blocked';
+          submitExecute = false;
+          submitReason = paidCost.code === 'BUDGET_EXCEEDED'
+            ? `Presenter budget exceeded. ${paidCost.reason}`
+            : `Paid presenter generation is blocked: ${paidCost.reason}`;
+        }
       }
 
       register({

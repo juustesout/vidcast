@@ -10,6 +10,7 @@ import { resolveMusicFade } from './music-mix';
 import { buildVideoScaleFilter, DEFAULT_RENDER_FIT } from './fit-policy';
 import { sceneDurationMatches } from './scene-timing';
 import { buildPresenterOverlayArgs } from './presenter-overlay';
+import { probePresenterVideo } from './presenter-codec';
 import type { CompositionPlan } from '@/lib/types/render';
 
 export const COMPOSER_VERSION = 'p9';
@@ -240,7 +241,15 @@ async function mixMusic(concatVideoPath: string, musicPath: string, outputPath: 
 }
 
 async function applyPresenterOverlay(baseVideoPath: string, outputPath: string, plan: CompositionPlan, runtime: FFmpegRuntime): Promise<void> {
-  const args = buildPresenterOverlayArgs(baseVideoPath, outputPath, plan);
+  const placements = plan.presenter?.placements ?? [];
+  const clipProbes = await Promise.all(placements.map(async (placement) => {
+    try {
+      return await probePresenterVideo(placement.clipPath, runtime);
+    } catch {
+      return { path: placement.clipPath };
+    }
+  }));
+  const args = buildPresenterOverlayArgs(baseVideoPath, outputPath, plan, { clipProbes });
   await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: getFinalComposeTimeoutMs() }, 'final_compose');
 }
 

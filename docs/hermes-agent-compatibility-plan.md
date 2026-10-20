@@ -43,7 +43,7 @@ exists under `app/api/projects/[id]/scenes/[sceneId]/`.
 | Standalone presenter submit/poll | Missing | No MCP tool and no REST route |
 | Explicit paid presenter retry | Missing | Runner blocks it by design; no approval path |
 | Standalone narration/image/render/compose | Missing | Production run covers them |
-| Asset upload/list, MP4 download, claim | REST only | Documented in `agent_manual.md` |
+| Asset upload/list, MP4 download, claim | REST listing; MCP studio import | `import_studio_assets` copies tmp_images into `assets/studio/` |
 | Presenter budget authoring in the browser UI | Missing | Human UI only; Hermes can patch it |
 | Project deletion | Missing | Not exposed |
 
@@ -56,8 +56,11 @@ exists under `app/api/projects/[id]/scenes/[sceneId]/`.
   `presenter.cost.notConfigured` before any provider call.
 - Budget overruns fail with `presenter.budget.exceeded`.
 - Narration must be current before presenter submission.
-- `force: true` does not force a presenter clip. A stale clip is regenerated
-  automatically; a failed real clip stays blocked.
+- A presenter clip is current only when narration and `outputFormat` match.
+  An MP4 clip is not reused for a WebM request. Code checks do not prove
+  that an avatar supports WebM matting; that remains a manual confirmation.
+- `force: true` does not force a presenter clip. A stale or format-mismatched
+  clip is regenerated automatically; a failed real clip stays blocked.
 - Presenter clip attempts and estimated/observed cost are visible on
   `project.presenterClips[].attempts[]`.
 - Publication of stock-avatar output remains blocked pending written HeyGen
