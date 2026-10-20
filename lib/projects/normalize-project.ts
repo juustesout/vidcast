@@ -3,11 +3,13 @@ import { normalizeExplainer } from '@/lib/projects/explainer-normalization';
 import { normalizePresenterClips, normalizeProjectPresenter } from '@/lib/presenter/config';
 import { normalizeAudioMix } from '@/lib/render/audio-mix';
 import { isRenderFit } from '@/lib/render/fit-policy';
+import { normalizeSceneComposition } from '@/lib/render/scene-composition';
 import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { GraphicStyleSpec, LogoOverlaySpec, MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, StudioOverlaySpec, TransitionPreset, VisualSpec } from '@/lib/types/scene';
+import type { SceneCompositionSpec } from '@/lib/types/scene-composition';
 import type { StockOrientation, StockProviderId, StockSelection } from '@/lib/types/stock';
 
 type LegacyScene = {
@@ -26,6 +28,7 @@ type LegacyScene = {
   render?: RenderSpec;
   overlay?: OverlaySpec;
   logo?: LogoOverlaySpec | null;
+  composition?: SceneCompositionSpec;
 };
 
 function nowIso(): string {
@@ -345,6 +348,7 @@ export function normalizeScene(scene: LegacyScene, project: Partial<Project>, in
     },
     overlay: scene.overlay ?? (scene.textOverlay ? { type: 'text', text: scene.textOverlay, position: 'bottom' } : { type: 'none' }),
     logo: normalizeLogoOverlay(scene.logo),
+    composition: normalizeSceneComposition(scene.composition),
     referenceIds: scene.referenceIds ?? [],
     notes: scene.notes ?? '',
     renders: legacySceneWithRenders.renders ?? []

@@ -58,6 +58,12 @@ function validateSceneShape(scene: unknown, index: number, issues: RenderIssue[]
     push(issues, 'scene.logo.invalid', `${base}.logo`, 'scene.logo must be an object or null.');
   }
 
+  if ('composition' in scene && scene.composition !== undefined && scene.composition !== null && !isPlainObject(scene.composition)) {
+    push(issues, 'scene.composition.invalid', `${base}.composition`, 'scene.composition must be an object.');
+  } else if (isPlainObject(scene.composition) && 'layers' in scene.composition && scene.composition.layers !== undefined && !Array.isArray(scene.composition.layers)) {
+    push(issues, 'scene.composition.layers.invalid', `${base}.composition.layers`, 'scene.composition.layers must be an array.');
+  }
+
   if ('overlay' in scene && scene.overlay !== undefined && !isPlainObject(scene.overlay)) {
     push(issues, 'scene.overlay.invalid', `${base}.overlay`, 'scene.overlay must be an object.');
   } else if (isPlainObject(scene.overlay)) {

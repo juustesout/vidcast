@@ -1,4 +1,5 @@
 import type { GenerationAttempt, GenerationRecord } from './generation';
+import type { SceneCompositionSpec } from './scene-composition';
 import type { StockOrientation, StockProviderId, StockSelection } from './stock';
 
 export type SceneType = 'image' | 'video' | 'graphic' | 'text' | 'blank';
@@ -252,6 +253,9 @@ export interface Scene {
   overlay?: OverlaySpec;
   // Per-scene logo/sponsor layer. `null` explicitly disables a project default.
   logo?: LogoOverlaySpec | null;
+  // Optional versioned compositor intent. Absent keeps the historical scene
+  // render path unchanged for existing projects.
+  composition?: SceneCompositionSpec;
   referenceIds: string[];
   notes: string;
   renders?: SceneRenderArtifact[];

@@ -3,6 +3,7 @@ import { isValidGraphicColor } from '@/lib/render/graphic-style';
 import { isLogoOverlayPosition } from '@/lib/render/logo-overlay';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
 import { STUDIO_SCREEN_LIMITS } from '@/lib/render/studio-overlay';
+import { validateSceneComposition } from '@/lib/render/scene-composition';
 import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from '@/lib/render/scene-timing';
 import type { ExplainerSpec } from '@/lib/types/explainer';
 import type { Project } from '@/lib/types/render';
@@ -481,6 +482,10 @@ export function validateProject(project: Project): RenderValidationResult {
 
     if (scene.logo !== undefined) {
       validateLogoOverlay(scene.logo, `scenes.${scene.id}.logo`, project, errors, warnings);
+    }
+
+    if (scene.composition !== undefined) {
+      validateSceneComposition(scene.composition, `scenes.${scene.id}.composition`, project, errors, warnings);
     }
 
     if (scene.visual?.kind === 'graphic') {
