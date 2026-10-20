@@ -22,6 +22,7 @@ import { COMPOSER_VERSION, LocalFFmpegVideoCompositor, VideoCompositionError } f
 import { sceneRenderService } from './scene-render-service';
 import { deriveCompositionReadiness } from './render-status';
 import { resolveRenderPlan } from './scene-resolver';
+import { sceneBakesPresenter } from './scene-composition';
 import { resolveMeasuredNarrationDuration, sceneDurationMatches } from './scene-timing';
 
 const activeCompositionLocks = new Set<string>();
@@ -155,6 +156,10 @@ async function resolvePresenterPlan(project: Project, items: CompositionPlan['it
     }
 
     const scene = project.scenes.find((entry) => entry.id === item.sceneId);
+    if (sceneBakesPresenter(scene?.composition)) {
+      startTime += item.duration;
+      continue;
+    }
     const clip = project.presenterClips?.find((entry) => entry.sceneId === item.sceneId);
 
     if (!scene || !clip || clip.status !== 'generated' || !clip.assetId) {

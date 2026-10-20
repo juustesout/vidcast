@@ -2,16 +2,19 @@ import { describe, expect, it } from 'vitest';
 
 import { normalizeProject } from '@/lib/projects/normalize-project';
 import { collectProjectPatchShapeIssues } from '@/lib/projects/project-patch-shape';
+import { createSceneRenderFingerprint } from '@/lib/render/render-fingerprint';
 import {
   createStudioComposition,
   normalizeSceneComposition,
   resolveStudioPipRect,
+  sceneBakesPresenter,
   sortCompositionLayers,
   STUDIO_BIGSCREEN_RECT,
   STUDIO_COMPOSITION_CANVAS,
   STUDIO_LAYER_IDS,
   validateSceneComposition
 } from '@/lib/render/scene-composition';
+import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { STUDIO_PIP_PRESETS } from '@/lib/render/studio-compositions';
 import type { Asset } from '@/lib/types/asset';
 import type { Project, RenderIssue } from '@/lib/types/render';
@@ -359,5 +362,89 @@ describe('scene composition patch shape', () => {
 
     expect(invalidObject.some((issue) => issue.code === 'scene.composition.invalid')).toBe(true);
     expect(invalidLayers.some((issue) => issue.code === 'scene.composition.layers.invalid')).toBe(true);
+  });
+});
+
+describe('scene composition render plan', () => {
+  it('does not attach composition onto scenes without it', () => {
+    const project = makeProject([makeScene('scene-1', { kind: 'blank' })]);
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].composition).toBeUndefined();
+    expect(plan.scenes[0].status).toBe('renderable');
+  });
+
+  it('resolves studio layers, presenter clip, and bakes presenter out of final compose', () => {
+    const composition = createStudioComposition({
+      backgroundAssetId: 'studio_back',
+      imageAssetId: 'screen',
+      imageLocalPath: 'assets/studio/screen.png',
+      foregroundAssetId: 'studio_desk',
+      presenterMode: 'full_canvas'
+    });
+    const project = makeProject(
+      [makeScene('scene-1', { kind: 'blank' }, { composition })],
+      {
+        assets: [
+          makeAsset('studio_back'),
+          makeAsset('studio_desk'),
+          makeAsset('screen', { localPath: 'assets/studio/screen.png', width: 1346, height: 761 }),
+          makeAsset('presenter-1', {
+            type: 'video',
+            filename: 'presenter.webm',
+            localPath: 'assets/presenter.webm',
+            mimeType: 'video/webm'
+          })
+        ],
+        presenterClips: [
+          {
+            sceneId: 'scene-1',
+            status: 'generated',
+            provider: 'mock',
+            outputFormat: 'webm',
+            audioAssetId: '',
+            narrationSignature: '',
+            duration: 2,
+            assetId: 'presenter-1'
+          }
+        ]
+      }
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    expect(plan.scenes[0].composition?.canvas).toEqual(STUDIO_COMPOSITION_CANVAS);
+    expect(plan.scenes[0].composition?.layers.map((layer) => layer.id)).toEqual([
+      STUDIO_LAYER_IDS.background,
+      STUDIO_LAYER_IDS.image,
+      STUDIO_LAYER_IDS.presenter,
+      STUDIO_LAYER_IDS.foreground
+    ]);
+    const presenter = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'presenter');
+    expect(presenter).toMatchObject({
+      enabled: true,
+      assetPath: 'assets/presenter.webm',
+      mode: 'full_canvas',
+      mediaKind: 'video'
+    });
+    expect(sceneBakesPresenter(project.scenes[0].composition)).toBe(true);
+
+    const withComposition = createSceneRenderFingerprint(plan, plan.scenes[0]);
+    const without = createSceneRenderFingerprint(plan, { ...plan.scenes[0], composition: undefined });
+    expect(withComposition).not.toBe(without);
+  });
+
+  it('marks unsafe composition paths as invalid on the render plan', () => {
+    const project = makeProject([
+      makeScene('scene-1', { kind: 'blank' }, {
+        composition: createStudioComposition({
+          backgroundLocalPath: '../secret.png',
+          imageAssetId: 'screen',
+          foregroundAssetId: 'studio_desk'
+        })
+      })
+    ]);
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('invalid');
+    expect(plan.scenes[0].issues.some((issue) => issue.code === 'scene.composition.asset.path.unsafe')).toBe(true);
   });
 });

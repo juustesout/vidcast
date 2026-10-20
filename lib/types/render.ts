@@ -1,6 +1,7 @@
 import type { Asset, AssetType } from './asset';
 import type { ExplainerSpec } from './explainer';
 import type { GraphicStyleSpec, GraphicTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, StudioOverlaySpec, TransitionSpec } from './scene';
+import type { SceneCompositionFit, SceneCompositionLayerType, SceneCompositionPresenterMode, SceneCompositionPresetName, SceneCompositionRect, SceneCompositionSchemaVersion } from './scene-composition';
 import type { ReferenceImage } from './reference';
 import type { PresenterClipSpec, ProjectPresenterSettings, CompositionPresenterPlan } from './presenter';
 
@@ -182,6 +183,31 @@ export interface RenderPlanSceneStateIssue {
   severity: 'error' | 'warning';
 }
 
+export type RenderPlanCompositionMediaKind = 'image' | 'video';
+
+export interface RenderPlanCompositionLayer {
+  id: string;
+  type: SceneCompositionLayerType;
+  enabled: boolean;
+  zIndex: number;
+  rect: SceneCompositionRect;
+  fit: SceneCompositionFit;
+  assetId?: string;
+  assetPath?: string;
+  mediaKind?: RenderPlanCompositionMediaKind;
+  mode?: SceneCompositionPresenterMode;
+}
+
+export interface RenderPlanSceneComposition {
+  version: SceneCompositionSchemaVersion;
+  preset?: SceneCompositionPresetName;
+  canvas: { width: number; height: number };
+  layers: RenderPlanCompositionLayer[];
+  presenterAssetId?: string;
+  presenterClipDuration?: number;
+  presenterStartOffsetSeconds?: number;
+}
+
 export interface RenderPlanScene {
   sceneId: string;
   order: number;
@@ -193,6 +219,8 @@ export interface RenderPlanScene {
   transition: TransitionSpec;
   overlay?: OverlaySpec;
   logo?: RenderPlanLogoOverlay;
+  // Optional resolved layer stack. Absent keeps the historical still/video/studio path.
+  composition?: RenderPlanSceneComposition;
   narration?: NarrationSpec;
   referenceIds: string[];
   issues: RenderPlanSceneStateIssue[];

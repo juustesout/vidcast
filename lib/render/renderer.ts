@@ -16,6 +16,7 @@ import { buildSceneOverlayFilter } from './text-overlay';
 import { buildLogoOverlayFilter, resolveLogoGeometry } from './logo-overlay';
 import { buildStudioOverlayFilter, createStudioOverlaySvg } from './studio-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
+import { buildCompositionSceneArgs, CompositionRenderError } from './scene-composition-compositor';
 
 export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
 
@@ -60,6 +61,11 @@ function sceneSourceAssetIds(scene: RenderPlanScene): string[] {
   }
   if (scene.logo?.assetId) {
     ids.push(scene.logo.assetId);
+  }
+  for (const layer of scene.composition?.layers ?? []) {
+    if (layer.assetId) {
+      ids.push(layer.assetId);
+    }
   }
   return ids;
 }
@@ -703,20 +709,29 @@ export class LocalFFmpegRenderer implements Renderer {
     await fs.mkdir(options.tempDir, { recursive: true });
 
     try {
-      const sourcePath = await resolveSceneSourcePath(plan, scene, options);
       const logoPath = await resolveSceneLogoPath(scene, options);
-      const studioPath = await resolveStudioOverlayPath(plan, options);
       const overlayFilter = await buildSceneOverlayFilter(scene, {
         width: options.sceneWidth,
         height: options.sceneHeight,
         duration: scene.duration,
         tempDir: options.tempDir,
-        centerX: plan.studio ? plan.studio.screen.x + plan.studio.screen.width / 2 : undefined
+        centerX: scene.composition
+          ? undefined
+          : plan.studio
+            ? plan.studio.screen.x + plan.studio.screen.width / 2
+            : undefined
       });
 
-      const args = sourceIsVideo(scene)
-        ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath, studioPath, plan.studio)
-        : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath, plan.studio);
+      let args: string[];
+      if (scene.composition) {
+        args = await buildCompositionSceneArgs(plan, scene, options, this.runtime, overlayFilter, logoPath);
+      } else {
+        const sourcePath = await resolveSceneSourcePath(plan, scene, options);
+        const studioPath = await resolveStudioOverlayPath(plan, options);
+        args = sourceIsVideo(scene)
+          ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath, studioPath, plan.studio)
+          : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath, plan.studio);
+      }
 
       const command = this.runtime.ffmpegPath;
       await runFfmpeg(command, args, { cwd: options.tempDir, timeoutMs: getSceneRenderTimeoutMs() }, 'scene_render');
@@ -741,6 +756,9 @@ export class LocalFFmpegRenderer implements Renderer {
     } catch (error) {
       if (error instanceof ProcessExecutionError) {
         throw mapSceneProcessError(error);
+      }
+      if (error instanceof CompositionRenderError) {
+        throw new SceneRenderError(error.message, error.code);
       }
       if (error instanceof SceneRenderError) {
         throw error;

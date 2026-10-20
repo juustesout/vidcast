@@ -1,4 +1,4 @@
-import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanLogoOverlay, RenderPlanScene, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
+import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanCompositionLayer, RenderPlanLogoOverlay, RenderPlanScene, RenderPlanSceneComposition, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
 import type { Asset } from '@/lib/types/asset';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
 import { normalizeAudioMix } from './audio-mix';
@@ -7,6 +7,7 @@ import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mergeGraphicStyles } from './graphic-style';
 import { resolveStudioOverlay } from './studio-overlay';
+import { isSafeAssetPath, sortCompositionLayers, STUDIO_COMPOSITION_CANVAS } from './scene-composition';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -275,6 +276,131 @@ function resolveSceneLogo(project: Project, scene: Scene): {
   };
 }
 
+function resolveCompositionAssetPath(project: Project, assetId?: string, localPath?: string): { assetId?: string; assetPath?: string; issues: RenderPlanSceneStateIssue[] } {
+  const issues: RenderPlanSceneStateIssue[] = [];
+  if (assetId) {
+    const asset = findAsset(project, assetId);
+    if (!asset?.localPath) {
+      issues.push(createSceneIssue('scene.composition.asset.missing', `Composition asset ${assetId} does not exist.`, 'warning'));
+      return { assetId, issues };
+    }
+    if (!isSafeAssetPath(asset.localPath)) {
+      issues.push(createSceneIssue('scene.composition.asset.path.unsafe', `Composition asset ${assetId} path is not project-relative under assets/.`, 'error'));
+      return { assetId, issues };
+    }
+    return { assetId, assetPath: asset.localPath, issues };
+  }
+
+  if (localPath) {
+    if (!isSafeAssetPath(localPath)) {
+      issues.push(createSceneIssue('scene.composition.asset.path.unsafe', 'Composition asset path must be project-relative under assets/.', 'error'));
+      return { issues };
+    }
+    return { assetPath: localPath, issues };
+  }
+
+  return { issues };
+}
+
+function resolveScenePresenterClip(project: Project, scene: Scene): { assetId?: string; assetPath?: string; duration?: number; startOffsetSeconds: number; issues: RenderPlanSceneStateIssue[] } {
+  const clip = project.presenterClips?.find((entry) => entry.sceneId === scene.id);
+  const startOffsetSeconds = Math.max(0, project.presenter?.sceneSettings.find((entry) => entry.sceneId === scene.id)?.startOffsetSeconds ?? 0);
+  if (!clip || clip.status !== 'generated' || !clip.assetId) {
+    return {
+      startOffsetSeconds,
+      issues: [createSceneIssue('scene.composition.presenter.missing', 'Enabled presenter layer has no generated clip; rendering without it.', 'warning')]
+    };
+  }
+
+  const asset = findAsset(project, clip.assetId);
+  if (!asset?.localPath || !isSafeAssetPath(asset.localPath)) {
+    return {
+      startOffsetSeconds,
+      issues: [createSceneIssue('scene.composition.presenter.missing', 'Presenter clip asset is missing or unsafe; rendering without it.', 'warning')]
+    };
+  }
+
+  return {
+    assetId: clip.assetId,
+    assetPath: asset.localPath,
+    duration: clip.duration,
+    startOffsetSeconds,
+    issues: []
+  };
+}
+
+function resolveSceneComposition(project: Project, scene: Scene): { composition?: RenderPlanSceneComposition; issues: RenderPlanSceneStateIssue[] } {
+  if (!scene.composition) {
+    return { issues: [] };
+  }
+
+  const issues: RenderPlanSceneStateIssue[] = [];
+  const canvas = scene.composition.canvas ?? (scene.composition.preset === 'studio' ? STUDIO_COMPOSITION_CANVAS : {
+    width: project.renderSettings.width,
+    height: project.renderSettings.height
+  });
+  const layers: RenderPlanCompositionLayer[] = [];
+  let presenterAssetId: string | undefined;
+  let presenterClipDuration: number | undefined;
+  let presenterStartOffsetSeconds: number | undefined;
+
+  for (const layer of sortCompositionLayers(scene.composition.layers)) {
+    if (layer.type === 'presenter') {
+      const clip = layer.enabled !== false ? resolveScenePresenterClip(project, scene) : { startOffsetSeconds: 0, issues: [] as RenderPlanSceneStateIssue[] };
+      issues.push(...clip.issues);
+      if (clip.assetId) {
+        presenterAssetId = clip.assetId;
+        presenterClipDuration = clip.duration;
+        presenterStartOffsetSeconds = clip.startOffsetSeconds;
+      }
+      layers.push({
+        id: layer.id,
+        type: 'presenter',
+        enabled: layer.enabled !== false && Boolean(clip.assetPath),
+        zIndex: layer.zIndex,
+        rect: layer.rect ?? { x: 0, y: 0, width: canvas.width, height: canvas.height },
+        fit: layer.fit ?? 'contain',
+        assetId: clip.assetId,
+        assetPath: clip.assetPath,
+        mediaKind: clip.assetPath ? 'video' : undefined,
+        mode: layer.mode
+      });
+      continue;
+    }
+
+    const resolved = resolveCompositionAssetPath(project, layer.assetId, layer.localPath);
+    issues.push(...resolved.issues);
+    if (layer.enabled !== false && !resolved.assetPath && resolved.issues.length === 0) {
+      issues.push(createSceneIssue('scene.composition.asset.missing', `Enabled ${layer.type} layer has no assetId or localPath.`, 'warning'));
+    }
+    const mediaKind = resolved.assetPath && /\.(mp4|webm|mov|mkv)$/i.test(resolved.assetPath) ? 'video' : 'image';
+    layers.push({
+      id: layer.id,
+      type: layer.type,
+      enabled: layer.enabled !== false && Boolean(resolved.assetPath) && resolved.issues.every((issue) => issue.severity !== 'error'),
+      zIndex: layer.zIndex,
+      rect: layer.rect,
+      fit: layer.fit,
+      assetId: resolved.assetId,
+      assetPath: resolved.assetPath,
+      mediaKind: resolved.assetPath ? mediaKind : undefined
+    });
+  }
+
+  return {
+    composition: {
+      version: scene.composition.version,
+      preset: scene.composition.preset,
+      canvas,
+      layers,
+      presenterAssetId,
+      presenterClipDuration,
+      presenterStartOffsetSeconds
+    },
+    issues
+  };
+}
+
 export function resolveRenderPlan(project: Project): RenderPlan {
   const issues: RenderIssue[] = [];
   const fit = resolveRenderFit(project.renderSettings.fit);
@@ -302,7 +428,9 @@ export function resolveRenderPlan(project: Project): RenderPlan {
           ]
         : [];
       const logo = resolveSceneLogo(project, scene);
-      const sceneIssues = [...resolved.issues, ...timingIssues, ...resolveFitIssues(project, resolved.source, fit), ...logo.issues];
+      const composition = resolveSceneComposition(project, scene);
+      const sceneIssues = [...resolved.issues, ...timingIssues, ...resolveFitIssues(project, resolved.source, fit), ...logo.issues, ...composition.issues];
+      const compositionBlocked = composition.issues.some((issue) => issue.severity === 'error');
 
       for (const issue of sceneIssues) {
         issues.push({
@@ -318,12 +446,13 @@ export function resolveRenderPlan(project: Project): RenderPlan {
         order: scene.order,
         duration: timing.effectiveDuration,
         timing,
-        status: timing.exceedsMax ? 'invalid' : resolved.status,
+        status: timing.exceedsMax || compositionBlocked ? 'invalid' : resolved.status,
         source: resolved.source,
         motion: scene.render.motion,
         transition: scene.render.transition,
         overlay: scene.overlay,
         logo: logo.logo,
+        composition: composition.composition,
         narration: scene.narration,
         referenceIds: scene.referenceIds,
         issues: sceneIssues

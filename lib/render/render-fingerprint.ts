@@ -29,7 +29,8 @@ export function createSceneRenderFingerprint(plan: RenderPlan, scene: RenderPlan
       motion: scene.motion,
       transition: scene.transition,
       overlay: scene.overlay,
-      logo: scene.logo
+      logo: scene.logo,
+      composition: scene.composition
     },
     renderer: 'ffmpeg'
   });

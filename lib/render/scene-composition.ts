@@ -234,7 +234,7 @@ function normalizePresenterLayer(value: Record<string, unknown>, index: number, 
   };
 }
 
-export function sortCompositionLayers(layers: SceneCompositionLayer[]): SceneCompositionLayer[] {
+export function sortCompositionLayers<T extends { id: string; zIndex: number }>(layers: T[]): T[] {
   return layers.slice().sort((left, right) => left.zIndex - right.zIndex || left.id.localeCompare(right.id));
 }
 
@@ -293,8 +293,12 @@ function pushIssue(
   target.push({ severity, code, path, message });
 }
 
-function isSafeAssetPath(localPath: string): boolean {
+export function isSafeAssetPath(localPath: string): boolean {
   return localPath.startsWith('assets/') && !localPath.includes('..') && !localPath.includes('\\') && !localPath.startsWith('/');
+}
+
+export function sceneBakesPresenter(composition: SceneCompositionSpec | undefined): boolean {
+  return Boolean(composition?.layers.some((layer) => layer.type === 'presenter' && layer.enabled !== false));
 }
 
 function validateRect(rect: unknown, canvas: SceneCompositionCanvas | undefined, path: string, errors: RenderIssue[]): void {
