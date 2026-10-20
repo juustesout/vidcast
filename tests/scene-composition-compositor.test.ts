@@ -298,6 +298,40 @@ describe('composition compositor helpers', () => {
     expect(filters.indexOf('[3:v]')).toBeLessThan(filters.indexOf('[4:v]'));
   });
 
+  it('overlays a 50% presenter PiP from the bottom-left with a 100px left offset', () => {
+    const composition = createStudioComposition({ presenterMode: 'pip' });
+    const presenter = composition.layers.find((layer) => layer.type === 'presenter');
+    expect(presenter).toMatchObject({
+      mode: 'pip',
+      scale: 0.5,
+      offsetX: 100,
+      offsetY: 0,
+      zIndex: 20,
+      rect: { x: 100, y: 540, width: 960, height: 540 }
+    });
+    expect(composition.layers.find((layer) => layer.type === 'image')?.rect).toEqual(STUDIO_BIGSCREEN_RECT);
+    expect(composition.layers.find((layer) => layer.type === 'foreground')?.zIndex).toBe(30);
+
+    const layer: RenderPlanCompositionLayer = {
+      id: 'studio-presenter',
+      type: 'presenter',
+      enabled: true,
+      zIndex: 20,
+      rect: { x: 100, y: 540, width: 960, height: 540 },
+      fit: 'contain',
+      assetPath: 'assets/presenter-alpha.webm',
+      mediaKind: 'video',
+      mode: 'pip'
+    };
+    const filters = buildCompositionLayerFilters({
+      layers: [{ index: 1, layer, path: layer.assetPath ?? '' }],
+      fps: 30,
+      duration: 1
+    }).join(';');
+    expect(filters).toContain('scale=960:540:force_original_aspect_ratio=decrease');
+    expect(filters).toContain('overlay=x=100:y=540:eof_action=pass:format=auto:alpha=straight');
+  });
+
   it('rejects absolute and traversal asset paths', () => {
     expect(() => resolveSafeProjectAssetPath('project-comp-render', '../secret.png')).toThrow(/Unsafe/);
     expect(() => resolveSafeProjectAssetPath('project-comp-render', '/tmp/secret.png')).toThrow(/Unsafe/);
@@ -369,6 +403,55 @@ describe('composition scene renderer', () => {
     expect(avatar[0]).toBeGreaterThan(140);
     expect(desk[0]).toBeLessThan(80);
     expect(desk[1]).toBeLessThan(60);
+  }, 120_000);
+
+  it('places a 50% bottom-left presenter PiP without covering the sampled background', async () => {
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      presenterMode: 'pip',
+      presenterScale: 0.5,
+      presenterOffsetX: 100,
+      presenterOffsetY: 0,
+      deskEnabled: false,
+      bigscreenEnabled: false
+    });
+    const project = makeProject(
+      [makeScene(composition)],
+      [
+        makeAsset('presenter-1', {
+          type: 'video',
+          filename: 'presenter-alpha.webm',
+          localPath: 'assets/presenter-alpha.webm',
+          mimeType: 'video/webm'
+        })
+      ]
+    );
+    project.presenterClips = [
+      {
+        sceneId: 'scene-1',
+        status: 'generated',
+        provider: 'mock',
+        outputFormat: 'webm',
+        audioAssetId: '',
+        narrationSignature: '',
+        duration: DURATION,
+        assetId: 'presenter-1'
+      }
+    ];
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].composition?.layers.find((layer) => layer.type === 'presenter')?.rect).toEqual({
+      x: 100,
+      y: 90,
+      width: 160,
+      height: 90
+    });
+    const { outputPath } = await renderPlan(plan, 'studio-pip-bottom-left');
+    const pip = await samplePixel(outputPath, 180, 135);
+    const outside = await samplePixel(outputPath, 20, 20);
+    expect(pip[0]).toBeGreaterThan(140);
+    expect(outside[2]).toBeGreaterThan(120);
   }, 120_000);
 
   it('places a PiP presenter using explicit pixel geometry', async () => {

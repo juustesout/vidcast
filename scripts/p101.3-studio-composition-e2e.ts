@@ -159,7 +159,10 @@ async function main(): Promise<void> {
     imageLocalPath: 'assets/studio/screen.png',
     foregroundAssetId: 'studio_desk',
     foregroundLocalPath: 'assets/studio/studio_desk.png',
-    presenterMode: 'full_canvas'
+    presenterMode: 'pip',
+    presenterScale: 0.5,
+    presenterOffsetX: 100,
+    presenterOffsetY: 0
   });
 
   const scene: Scene = {
@@ -247,8 +250,8 @@ async function main(): Promise<void> {
     throw new Error('Composition was not resolved onto the RenderPlan');
   }
 
-  const outputPath = path.join(rendersDir, 'p101.3-studio-composition.mp4');
-  const framePath = path.join(rendersDir, 'p101.3-studio-composition-frame.png');
+  const outputPath = path.join(rendersDir, 'p101.5-studio-pip.mp4');
+  const framePath = path.join(rendersDir, 'p101.5-studio-pip-frame.png');
   const renderer = new LocalFFmpegRenderer(runtime);
   const result = await renderer.render(plan, {
     projectId: PROJECT_ID,
@@ -272,7 +275,8 @@ async function main(): Promise<void> {
     Math.round(STUDIO_BIGSCREEN_RECT.y + 80)
   );
   const desk = await samplePixel(outputPath, 960, 1000);
-  const presenter = await samplePixel(outputPath, 960, 540);
+  const presenter = await samplePixel(outputPath, 400, 700);
+  const leftOfPip = await samplePixel(outputPath, 40, 700);
 
   const report = {
     outputPath: path.relative(process.cwd(), outputPath),
@@ -309,15 +313,16 @@ async function main(): Promise<void> {
         mediaKind: layer.mediaKind
       }))
     },
-    pixels: { background, screen, presenter, desk },
+    pixels: { background, screen, presenter, desk, leftOfPip },
     notes: [
       'Studio stills were generated in-project; operator studio_back.png / studio_desk.png were not in the workspace.',
       'Presenter clip is the real P100.7j HeyGen Avatar III WebM.',
-      'Bigscreen rect is 293,98 1346x761.'
+      'Bigscreen rect is 293,98 1346x761.',
+      'Presenter PiP is 50% from bottom-left with offsetX=100: rect 100,540 960x540.'
     ]
   };
 
-  const reportPath = path.join(rendersDir, 'p101.3-studio-composition-report.json');
+  const reportPath = path.join(rendersDir, 'p101.5-studio-pip-report.json');
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
   console.log(JSON.stringify(report, null, 2));
 }

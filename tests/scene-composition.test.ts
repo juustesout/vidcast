@@ -7,11 +7,15 @@ import {
   createStudioComposition,
   normalizeSceneComposition,
   resolveStudioPipRect,
+  resolveStudioPresenterRect,
   sceneBakesPresenter,
   sortCompositionLayers,
   STUDIO_BIGSCREEN_RECT,
   STUDIO_COMPOSITION_CANVAS,
   STUDIO_LAYER_IDS,
+  STUDIO_PRESENTER_PIP_OFFSET_X,
+  STUDIO_PRESENTER_PIP_OFFSET_Y,
+  STUDIO_PRESENTER_PIP_SCALE,
   validateSceneComposition
 } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
@@ -129,8 +133,11 @@ describe('studio composition preset', () => {
     });
     expect(presenter).toMatchObject({
       type: 'presenter',
-      mode: 'full_canvas',
-      rect: { x: 0, y: 0, width: 1920, height: 1080 }
+      mode: 'pip',
+      scale: 0.5,
+      offsetX: 100,
+      offsetY: 0,
+      rect: { x: 100, y: 540, width: 960, height: 540 }
     });
     expect(foreground).toMatchObject({
       type: 'foreground',
@@ -182,6 +189,43 @@ describe('studio composition preset', () => {
     const pip = createStudioComposition({ presenterMode: 'pip', pipPreset: 'news' });
     const presenter = pip.layers.find((layer) => layer.type === 'presenter');
     expect(presenter).toMatchObject({ mode: 'pip', pipPreset: 'news', rect: news });
+  });
+
+  it('places a scalable presenter PiP from the bottom-left with an explicit left offset', () => {
+    expect(STUDIO_PRESENTER_PIP_SCALE).toBe(0.5);
+    expect(STUDIO_PRESENTER_PIP_OFFSET_X).toBe(100);
+    expect(STUDIO_PRESENTER_PIP_OFFSET_Y).toBe(0);
+    expect(resolveStudioPresenterRect(STUDIO_COMPOSITION_CANVAS)).toEqual({
+      x: 100,
+      y: 540,
+      width: 960,
+      height: 540
+    });
+
+    const composition = createStudioComposition({ presenterMode: 'pip' });
+    const presenter = composition.layers.find((layer) => layer.type === 'presenter');
+    const image = composition.layers.find((layer) => layer.type === 'image');
+    const foreground = composition.layers.find((layer) => layer.type === 'foreground');
+    expect(presenter).toMatchObject({
+      type: 'presenter',
+      mode: 'pip',
+      scale: 0.5,
+      offsetX: 100,
+      offsetY: 0,
+      rect: { x: 100, y: 540, width: 960, height: 540 },
+      zIndex: 20
+    });
+    expect(image).toMatchObject({ rect: STUDIO_BIGSCREEN_RECT, zIndex: 10 });
+    expect(foreground).toMatchObject({
+      rect: { x: 0, y: 0, width: 1920, height: 1080 },
+      zIndex: 30
+    });
+    expect(sortCompositionLayers(composition.layers).map((layer) => layer.type)).toEqual([
+      'background',
+      'image',
+      'presenter',
+      'foreground'
+    ]);
   });
 });
 
@@ -239,6 +283,33 @@ describe('scene composition normalize and round-trip', () => {
       mode: 'full_canvas',
       rect: { x: 0, y: 0, width: 1920, height: 1080 },
       enabled: true
+    });
+  });
+
+  it('resolves a PiP presenter from scale and bottom-left offsets when rect is omitted', () => {
+    const normalized = normalizeSceneComposition({
+      version: 1,
+      preset: 'studio',
+      canvas: { width: 1920, height: 1080 },
+      layers: [
+        {
+          id: 'studio-presenter',
+          type: 'presenter',
+          zIndex: 20,
+          mode: 'pip',
+          scale: 0.5,
+          offsetX: 100,
+          offsetY: 0
+        }
+      ]
+    });
+    expect(normalized?.layers[0]).toMatchObject({
+      type: 'presenter',
+      mode: 'pip',
+      scale: 0.5,
+      offsetX: 100,
+      offsetY: 0,
+      rect: { x: 100, y: 540, width: 960, height: 540 }
     });
   });
 });
@@ -329,7 +400,7 @@ describe('scene composition validation', () => {
     expect(codes).toContain('scene.composition.rect.bounds');
   });
 
-  it('requires an explicit PiP rect or named intro/news preset', () => {
+  it('requires an explicit PiP rect, scale, or named intro/news preset', () => {
     const errors: RenderIssue[] = [];
     const warnings: RenderIssue[] = [];
     const project = makeProject([makeScene('scene-1', { kind: 'blank' })]);
@@ -348,6 +419,30 @@ describe('scene composition validation', () => {
     }, 'scenes.scene-1.composition', project, errors, warnings);
 
     expect(collectCodes(errors)).toContain('scene.composition.presenter.pip.missing');
+  });
+
+  it('rejects a presenter scale outside 0-1', () => {
+    const errors: RenderIssue[] = [];
+    const warnings: RenderIssue[] = [];
+    const project = makeProject([makeScene('scene-1', { kind: 'blank' })]);
+
+    validateSceneComposition({
+      version: 1,
+      canvas: { width: 1920, height: 1080 },
+      layers: [
+        {
+          id: 'presenter',
+          type: 'presenter',
+          enabled: true,
+          zIndex: 20,
+          mode: 'pip',
+          scale: 1.5,
+          offsetX: 100
+        }
+      ]
+    }, 'scenes.scene-1.composition', project, errors, warnings);
+
+    expect(collectCodes(errors)).toContain('scene.composition.presenter.scale.invalid');
   });
 });
 

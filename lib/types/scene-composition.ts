@@ -43,6 +43,9 @@ export interface SceneCompositionPresenterLayer extends SceneCompositionLayerBas
   type: 'presenter';
   mode: SceneCompositionPresenterMode;
   pipPreset?: SceneCompositionPipPresetName;
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
   rect?: SceneCompositionRect;
   fit?: SceneCompositionFit;
 }

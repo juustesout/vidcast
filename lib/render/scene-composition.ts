@@ -73,6 +73,10 @@ export function isSceneCompositionPreset(value: unknown): value is SceneComposit
   return value === 'studio';
 }
 
+export const STUDIO_PRESENTER_PIP_SCALE = 0.5;
+export const STUDIO_PRESENTER_PIP_OFFSET_X = 100;
+export const STUDIO_PRESENTER_PIP_OFFSET_Y = 0;
+
 export function resolveStudioPipRect(
   canvas: SceneCompositionCanvas,
   preset: SceneCompositionPipPresetName
@@ -84,6 +88,23 @@ export function resolveStudioPipRect(
   const x = pip.position.endsWith('right') ? canvas.width - width - margin : margin;
   const y = pip.position.startsWith('top') ? margin : canvas.height - height - margin;
   return { x, y, width, height };
+}
+
+export function resolveStudioPresenterRect(
+  canvas: SceneCompositionCanvas,
+  options: { scale?: number; offsetX?: number; offsetY?: number } = {}
+): SceneCompositionRect {
+  const scale = options.scale ?? STUDIO_PRESENTER_PIP_SCALE;
+  const offsetX = options.offsetX ?? STUDIO_PRESENTER_PIP_OFFSET_X;
+  const offsetY = options.offsetY ?? STUDIO_PRESENTER_PIP_OFFSET_Y;
+  const width = Math.round(canvas.width * scale);
+  const height = Math.round(canvas.height * scale);
+  return {
+    x: offsetX,
+    y: canvas.height - height - offsetY,
+    width,
+    height
+  };
 }
 
 function fullCanvasRect(canvas: SceneCompositionCanvas): SceneCompositionRect {
@@ -100,12 +121,18 @@ export function createStudioComposition(options: {
   foregroundLocalPath?: string;
   presenterMode?: SceneCompositionPresenterMode;
   pipPreset?: SceneCompositionPipPresetName;
+  presenterScale?: number;
+  presenterOffsetX?: number;
+  presenterOffsetY?: number;
   deskEnabled?: boolean;
   bigscreenEnabled?: boolean;
 } = {}): SceneCompositionSpec {
   const canvas = options.canvas ?? STUDIO_COMPOSITION_CANVAS;
-  const presenterMode = options.presenterMode ?? 'full_canvas';
-  const pipPreset = options.pipPreset ?? 'news';
+  const presenterMode = options.presenterMode ?? 'pip';
+  const pipPreset = options.pipPreset;
+  const presenterScale = options.presenterScale ?? STUDIO_PRESENTER_PIP_SCALE;
+  const presenterOffsetX = options.presenterOffsetX ?? STUDIO_PRESENTER_PIP_OFFSET_X;
+  const presenterOffsetY = options.presenterOffsetY ?? STUDIO_PRESENTER_PIP_OFFSET_Y;
   const deskEnabled = options.deskEnabled ?? true;
   const bigscreenEnabled = options.bigscreenEnabled ?? true;
 
@@ -132,16 +159,33 @@ export function createStudioComposition(options: {
   };
 
   const presenter: SceneCompositionPresenterLayer = presenterMode === 'pip'
-    ? {
-        id: STUDIO_LAYER_IDS.presenter,
-        type: 'presenter',
-        enabled: true,
-        zIndex: DEFAULT_Z_INDEX.presenter,
-        mode: 'pip',
-        pipPreset,
-        rect: resolveStudioPipRect(canvas, pipPreset),
-        fit: 'contain'
-      }
+    ? pipPreset
+      ? {
+          id: STUDIO_LAYER_IDS.presenter,
+          type: 'presenter',
+          enabled: true,
+          zIndex: DEFAULT_Z_INDEX.presenter,
+          mode: 'pip',
+          pipPreset,
+          rect: resolveStudioPipRect(canvas, pipPreset),
+          fit: 'contain'
+        }
+      : {
+          id: STUDIO_LAYER_IDS.presenter,
+          type: 'presenter',
+          enabled: true,
+          zIndex: DEFAULT_Z_INDEX.presenter,
+          mode: 'pip',
+          scale: presenterScale,
+          offsetX: presenterOffsetX,
+          offsetY: presenterOffsetY,
+          rect: resolveStudioPresenterRect(canvas, {
+            scale: presenterScale,
+            offsetX: presenterOffsetX,
+            offsetY: presenterOffsetY
+          }),
+          fit: 'contain'
+        }
     : {
         id: STUDIO_LAYER_IDS.presenter,
         type: 'presenter',
@@ -213,14 +257,27 @@ function normalizeMediaLayer(
   };
 }
 
+function normalizePositiveNumber(value: unknown): number | undefined {
+  return isFiniteNumber(value) && value > 0 ? value : undefined;
+}
+
+function normalizeNonNegativeNumber(value: unknown): number | undefined {
+  return isFiniteNumber(value) && value >= 0 ? value : undefined;
+}
+
 function normalizePresenterLayer(value: Record<string, unknown>, index: number, canvas?: SceneCompositionCanvas): SceneCompositionPresenterLayer {
   const id = typeof value.id === 'string' && value.id.trim() ? value.id.trim() : `presenter-${index + 1}`;
   const mode = isSceneCompositionPresenterMode(value.mode) ? value.mode : 'full_canvas';
   const pipPreset = isSceneCompositionPipPreset(value.pipPreset) ? value.pipPreset : undefined;
+  const scale = normalizePositiveNumber(value.scale);
+  const offsetX = normalizeNonNegativeNumber(value.offsetX);
+  const offsetY = normalizeNonNegativeNumber(value.offsetY);
   const explicitRect = normalizeRect(value.rect);
   const resolvedCanvas = canvas ?? STUDIO_COMPOSITION_CANVAS;
   const rect = explicitRect
-    ?? (mode === 'pip' && pipPreset ? resolveStudioPipRect(resolvedCanvas, pipPreset) : mode === 'full_canvas' ? fullCanvasRect(resolvedCanvas) : undefined);
+    ?? (mode === 'pip' && pipPreset ? resolveStudioPipRect(resolvedCanvas, pipPreset)
+      : mode === 'pip' ? resolveStudioPresenterRect(resolvedCanvas, { scale, offsetX, offsetY })
+      : mode === 'full_canvas' ? fullCanvasRect(resolvedCanvas) : undefined);
 
   return {
     id,
@@ -229,6 +286,9 @@ function normalizePresenterLayer(value: Record<string, unknown>, index: number, 
     zIndex: isFiniteNumber(value.zIndex) ? value.zIndex : DEFAULT_Z_INDEX.presenter,
     mode,
     pipPreset,
+    ...(scale !== undefined ? { scale } : {}),
+    ...(offsetX !== undefined ? { offsetX } : {}),
+    ...(offsetY !== undefined ? { offsetY } : {}),
     rect,
     fit: isSceneCompositionFit(value.fit) ? value.fit : 'contain'
   };
@@ -408,8 +468,17 @@ export function validateSceneComposition(
       if (raw.pipPreset !== undefined && raw.pipPreset !== null && !isSceneCompositionPipPreset(raw.pipPreset)) {
         pushIssue(errors, 'error', 'scene.composition.presenter.pipPreset.invalid', `${layerPath}.pipPreset`, 'Presenter PiP preset must be intro or news.');
       }
-      if (raw.mode === 'pip' && raw.rect === undefined && raw.pipPreset === undefined) {
-        pushIssue(errors, 'error', 'scene.composition.presenter.pip.missing', layerPath, 'PiP presenter requires an explicit rect or a named pipPreset.');
+      if (raw.mode === 'pip' && raw.rect === undefined && raw.pipPreset === undefined && !isFiniteNumber(raw.scale)) {
+        pushIssue(errors, 'error', 'scene.composition.presenter.pip.missing', layerPath, 'PiP presenter requires an explicit rect, scale, or a named pipPreset.');
+      }
+      if (raw.scale !== undefined && raw.scale !== null && (!isFiniteNumber(raw.scale) || raw.scale <= 0 || raw.scale > 1)) {
+        pushIssue(errors, 'error', 'scene.composition.presenter.scale.invalid', `${layerPath}.scale`, 'Presenter scale must be a finite number greater than 0 and at most 1.');
+      }
+      if (raw.offsetX !== undefined && raw.offsetX !== null && (!isFiniteNumber(raw.offsetX) || raw.offsetX < 0)) {
+        pushIssue(errors, 'error', 'scene.composition.presenter.offset.invalid', `${layerPath}.offsetX`, 'Presenter offsetX must be a finite number greater than or equal to 0.');
+      }
+      if (raw.offsetY !== undefined && raw.offsetY !== null && (!isFiniteNumber(raw.offsetY) || raw.offsetY < 0)) {
+        pushIssue(errors, 'error', 'scene.composition.presenter.offset.invalid', `${layerPath}.offsetY`, 'Presenter offsetY must be a finite number greater than or equal to 0.');
       }
       if (raw.rect !== undefined && raw.rect !== null) {
         validateRect(raw.rect, canvas, `${layerPath}.rect`, errors);
