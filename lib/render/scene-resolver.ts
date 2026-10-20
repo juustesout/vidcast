@@ -368,9 +368,26 @@ function resolveSceneComposition(project: Project, scene: Scene): { composition?
       continue;
     }
 
-    const resolved = resolveCompositionAssetPath(project, layer.assetId, layer.localPath);
+    const boundStock = layer.type === 'image' && !layer.assetId && !layer.localPath && scene.visual?.kind === 'stock_image'
+      ? scene.visual.assetId
+      : undefined;
+    const resolved = resolveCompositionAssetPath(project, layer.assetId ?? boundStock, layer.localPath);
     issues.push(...resolved.issues);
-    if (layer.enabled !== false && !resolved.assetPath && resolved.issues.length === 0) {
+    if (
+      layer.enabled !== false &&
+      !resolved.assetPath &&
+      resolved.issues.length === 0 &&
+      layer.type === 'image' &&
+      scene.visual?.kind === 'stock_image' &&
+      scene.visual.selection?.usagePolicy === 'hotlink' &&
+      !scene.visual.assetId
+    ) {
+      issues.push(createSceneIssue(
+        'scene.composition.asset.hotlinkUnsupported',
+        'Composition bigscreen requires a downloaded stock asset; hotlinked photos are not copied into assets/.',
+        'warning'
+      ));
+    } else if (layer.enabled !== false && !resolved.assetPath && resolved.issues.length === 0) {
       issues.push(createSceneIssue('scene.composition.asset.missing', `Enabled ${layer.type} layer has no assetId or localPath.`, 'warning'));
     }
     const mediaKind = resolved.assetPath && /\.(mp4|webm|mov|mkv)$/i.test(resolved.assetPath) ? 'video' : 'image';

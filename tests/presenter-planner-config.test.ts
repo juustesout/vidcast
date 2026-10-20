@@ -8,6 +8,7 @@ import {
   derivePresenterSignature
 } from '@/lib/presenter/config';
 import { deriveProductionPlan } from '@/lib/production/production-planner';
+import { createStudioComposition } from '@/lib/render/scene-composition';
 import type { Asset } from '@/lib/types/asset';
 import type { PresenterClipAttempt, PresenterClipSpec } from '@/lib/types/presenter';
 import type { Project } from '@/lib/types/render';
@@ -344,6 +345,27 @@ describe('presenter planner', () => {
     expect(submits).toHaveLength(1);
     expect(submits[0]?.status).toBe('ready');
     expect(submits[0]?.execute).toBe(true);
+  });
+
+  it('waits to bake a composition scene until the presenter clip is current', () => {
+    const project = presenterProject();
+    project.scenes[0] = {
+      ...project.scenes[0],
+      composition: createStudioComposition({
+        backgroundLocalPath: 'assets/studio/studio_back.png',
+        foregroundLocalPath: 'assets/studio/studio_desk.png',
+        presenterMode: 'full_canvas',
+        bigscreenEnabled: false
+      })
+    };
+    const plan = deriveProductionPlan(project, { mode: 'mock' });
+    const render = plan.actions.find((action) => action.type === 'scene_render');
+    const submit = plan.actions.find((action) => action.type === 'presenter_submit');
+    expect(submit?.status).toBe('ready');
+    expect(render?.status).toBe('waiting_dependency');
+    expect(render?.execute).toBe(false);
+    expect(render?.dependencyActionIds).toContain('scene:scene-1:presenter_submit');
+    expect(render?.reason).toMatch(/presenter/i);
   });
 
   it('blocks a real submit before provider work when paid cost preconditions are missing', () => {

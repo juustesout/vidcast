@@ -7,6 +7,7 @@ import {
 } from '@/lib/presenter/config';
 import { evaluatePresenterPaidCostPrecondition } from '@/lib/presenter/pricing';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus } from '@/lib/render/render-status';
+import { sceneBakesPresenter } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import type { Project } from '@/lib/types/render';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
@@ -592,6 +593,26 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       }
       if (videoPoll) {
         renderDependencies.push(videoPoll.id);
+      }
+    }
+
+    if (renderExecute && sceneBakesPresenter(scene.composition)) {
+      const presenterSubmit = actions.find((action) => action.sceneId === scene.id && action.type === 'presenter_submit');
+      const presenterPoll = actions.find((action) => action.sceneId === scene.id && action.type === 'presenter_poll');
+      const presenterPending = Boolean(
+        (presenterSubmit && (presenterSubmit.status === 'ready' || presenterSubmit.status === 'running' || presenterSubmit.status === 'waiting_dependency')) ||
+        (presenterPoll && (presenterPoll.status === 'ready' || presenterPoll.status === 'running'))
+      );
+      if (presenterPending) {
+        renderActionStatus = 'waiting_dependency';
+        renderExecute = false;
+        renderReason = 'Waiting for presenter clip before baking scene composition.';
+        if (presenterSubmit) {
+          renderDependencies.push(presenterSubmit.id);
+        }
+        if (presenterPoll) {
+          renderDependencies.push(presenterPoll.id);
+        }
       }
     }
 

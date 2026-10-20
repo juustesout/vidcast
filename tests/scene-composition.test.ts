@@ -433,6 +433,81 @@ describe('scene composition render plan', () => {
     expect(withComposition).not.toBe(without);
   });
 
+  it('binds a downloaded stock asset onto the studio bigscreen layer', () => {
+    const composition = createStudioComposition({
+      backgroundAssetId: 'studio_back',
+      foregroundAssetId: 'studio_desk',
+      presenterMode: 'full_canvas'
+    });
+    composition.layers = composition.layers.filter((layer) => layer.type !== 'presenter');
+    const project = makeProject(
+      [makeScene('scene-1', {
+        kind: 'stock_image',
+        query: 'news studio',
+        assetId: 'stock-1'
+      }, { composition })],
+      {
+        assets: [
+          makeAsset('studio_back'),
+          makeAsset('studio_desk'),
+          makeAsset('stock-1', {
+            provenance: 'stock',
+            filename: 'stock-1.jpg',
+            localPath: 'assets/stock-1.jpg',
+            mimeType: 'image/jpeg'
+          })
+        ]
+      }
+    );
+    const plan = resolveRenderPlan(project);
+    const screen = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'image');
+    expect(screen).toMatchObject({
+      enabled: true,
+      assetId: 'stock-1',
+      assetPath: 'assets/stock-1.jpg',
+      rect: STUDIO_BIGSCREEN_RECT
+    });
+  });
+
+  it('warns when a hotlinked stock photo cannot fill the studio bigscreen', () => {
+    const composition = createStudioComposition({
+      backgroundAssetId: 'studio_back',
+      foregroundAssetId: 'studio_desk',
+      presenterMode: 'full_canvas'
+    });
+    composition.layers = composition.layers.filter((layer) => layer.type !== 'presenter');
+    const project = makeProject(
+      [makeScene('scene-1', {
+        kind: 'stock_image',
+        query: 'news studio',
+        selection: {
+          provider: 'unsplash',
+          photoId: 'abc',
+          query: 'news studio',
+          usagePolicy: 'hotlink',
+          attribution: {
+            provider: 'unsplash',
+            providerName: 'Unsplash',
+            photoId: 'abc',
+            photographerName: 'Jane',
+            sourceUrl: 'https://unsplash.com/photos/abc',
+            license: 'Unsplash License'
+          },
+          sourceUrl: 'https://unsplash.com/photos/abc',
+          imageUrl: 'https://images.unsplash.com/abc?w=1200',
+          width: 1200,
+          height: 800,
+          selectedAt: NOW,
+          selectionKey: 'any::news studio'
+        }
+      }, { composition })]
+    );
+    const plan = resolveRenderPlan(project);
+    const screen = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'image');
+    expect(screen?.assetPath).toBeUndefined();
+    expect(plan.scenes[0].issues.some((issue) => issue.code === 'scene.composition.asset.hotlinkUnsupported')).toBe(true);
+  });
+
   it('marks unsafe composition paths as invalid on the render plan', () => {
     const project = makeProject([
       makeScene('scene-1', { kind: 'blank' }, {
