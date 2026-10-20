@@ -121,6 +121,25 @@ export interface CreateReferenceResponse {
   filesize?: number;
 }
 
+export interface ImportStudioAssetsInput {
+  fileNames: string[];
+}
+
+export interface ImportedStudioAsset {
+  assetId: string;
+  filename: string;
+  localPath: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  filesize?: number;
+}
+
+export interface ImportStudioAssetsResponse {
+  projectId: string;
+  assets: ImportedStudioAsset[];
+}
+
 export interface GenerateVideoInput {
   regenerate?: boolean;
   // Explicit provider/model selection forwarded to the video service. When

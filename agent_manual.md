@@ -31,7 +31,8 @@ the finished MP4. Presenter generation is part of that production run.
 | Standalone narration generation | No | No MCP tool; use a production run |
 | Standalone image generation | No | No MCP tool; use a production run |
 | Standalone render/compose | No | No MCP tool; use a production run |
-| Asset upload/listing | REST only | `POST`/`GET /api/projects/{id}/assets` |
+| Asset upload/listing | REST listing; MCP import for studio stills | `GET /api/projects/{id}/assets`; `import_studio_assets` |
+| Studio stills from tmp_images | Yes | `import_studio_assets` |
 | Download final MP4 | REST only | Authenticated `GET` of `downloadPath` |
 | Delete project | No | Not exposed |
 
@@ -163,6 +164,7 @@ resubmit a live provider job.
 | `materialize_scene_intents` | `{ projectId, project?, intentIds? }` |
 | `manage_project_music` | `{ projectId, action, ... }` |
 | `create_reference` | `{ projectId, name, contentBase64, mimeType?, fileName?, description?, tags? }` |
+| `import_studio_assets` | `{ projectId, fileNames }` |
 | `generate_video` | `{ projectId, sceneId, regenerate?, provider?, model?, mode? }` |
 | `cancel_video` | `{ projectId, sceneId }` |
 
@@ -175,6 +177,14 @@ resubmit a live provider job.
 `create_reference` takes raw base64 or a full `data:image/...;base64,...` URL.
 Accepted decoded formats are PNG, JPEG, and WebP, capped at 25 MB. Returns the
 `referenceId`, stored path, dimensions, and size.
+
+`import_studio_assets` copies named files from `STUDIO_IMPORT_SOURCE_DIR`
+(the operator `tmp_images` folder) into `assets/studio/` on the project.
+`fileNames` must be an explicit list of bare names such as `studio_back.png`,
+`studio_desk.png`, `studio_intro.png`, and `studio_outtro.png`. Extra
+png/jpg/jpeg/webp names are allowed. Absolute paths, `..`, and overwrite of
+existing project files are rejected. Returns project-relative `localPath`
+values; later work must use those, never `tmp_images`.
 
 `create_project` is not idempotent. Call `list_projects` first if reuse is
 intended. It creates one default scene; overwrite the scene array when authoring
@@ -359,7 +369,10 @@ Fields:
 - `avatarId`: project override. Real generation falls back to
   `HEYGEN_AVATAR_ID`; without either it fails.
 - `provider`: `"mock"` or `"heygen"`. `fake` and `local` normalize to `mock`.
-- `outputFormat`: `"mp4"` or `"webm"`; default `mp4`.
+- `outputFormat`: `"mp4"` or `"webm"`; default `mp4`. A generated clip is
+  current only when its stored format matches this request. An MP4 clip is
+  not reused for a WebM request, and the reverse is also true. Code checks
+  do not prove that a chosen avatar supports WebM matting.
 - `sceneSettings`: up to 40 entries, one per scene.
   - `layout`: `"fullscreen"` or `"pip"`.
   - `pip.position`: default `bottom_right`.
@@ -409,7 +422,7 @@ Relevant failures:
 | `presenter.narration.notCurrent` (409) | Narration text/audio is missing or stale |
 | `presenter.scene.notConfigured` (409) | Presenter is not enabled for that scene |
 | `presenter.scene.alreadyRunning` (409) | A submit or provider job is in flight |
-| `presenter.scene.alreadyGenerated` (409) | Clip exists; regenerate explicitly |
+| `presenter.scene.alreadyGenerated` (409) | Current clip exists for this format; regenerate explicitly |
 
 Pricing configuration is not a public tariff. It must reflect the account's
 actual contract. Observed wallet delta is stored separately from the estimate;
@@ -516,8 +529,10 @@ curl -H "Authorization: Bearer $EXPLAINER_API_TOKEN" \
 
 These have no MCP tool:
 
-- `POST /api/projects/{id}/assets` and `GET /api/projects/{id}/assets`
-  (multipart upload, listing).
+- `POST /api/projects/{id}/assets` (multipart browser upload) and
+  `GET /api/projects/{id}/assets` (listing). Studio stills from the operator
+  source directory use `import_studio_assets` /
+  `POST /api/projects/{id}/studio-assets` instead.
 - Claiming an ownerless project with the single-use token:
   `POST /api/projects/{id}/claim`.
 - Downloading a composition file:

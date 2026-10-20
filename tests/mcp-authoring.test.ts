@@ -44,6 +44,7 @@ function makeClient(overrides: Partial<AuthoringApiClient> = {}): AuthoringApiCl
     approveSceneIntents: async () => ({ project: makeProject() as never, approved: ['intent-1'], skipped: [] }),
     manageMusic: async () => ({ action: 'clear', status: 'cleared' }),
     createReference: async () => ({ reference: { id: 'reference-1', name: 'ref', description: '', tags: [], createdAt: '', updatedAt: '' } as never }),
+    importStudioAssets: async () => ({ projectId: 'project-1', assets: [] }),
     generateVideo: async () => ({
       sceneId: 'scene-1',
       generationAttemptId: 'generation_attempt_1',
@@ -85,6 +86,7 @@ describe('authoring MCP tool definitions', () => {
       'approve_scene_intents',
       'manage_project_music',
       'create_reference',
+      'import_studio_assets',
       'generate_video',
       'cancel_video'
     ]);
@@ -434,6 +436,116 @@ describe('create_reference tool', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+  });
+});
+
+describe('import_studio_assets tool', () => {
+  it('is registered as a mutating tool', () => {
+    const entry = AUTHORING_TOOL_DEFINITIONS.find((definition) => definition.name === 'import_studio_assets');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(false);
+  });
+
+  it('forwards an explicit file list and returns project-relative paths', async () => {
+    const calls: Array<{ projectId: string; input: unknown }> = [];
+    const service = createAuthoringToolService(
+      makeClient({
+        importStudioAssets: async (projectId, input) => {
+          calls.push({ projectId, input });
+          return {
+            projectId,
+            assets: [
+              {
+                id: 'asset_1',
+                type: 'image',
+                status: 'available',
+                provenance: 'imported',
+                filename: 'studio_back.png',
+                localPath: 'assets/studio/studio_back.png',
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                filesize: 70,
+                metadata: {},
+                createdAt: ''
+              } as never
+            ]
+          };
+        }
+      })
+    );
+
+    const result = await service.importStudioAssets({
+      projectId: 'project-1',
+      fileNames: ['studio_back.png']
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([{ projectId: 'project-1', input: { fileNames: ['studio_back.png'] } }]);
+    if (result.ok) {
+      expect(result.data).toEqual({
+        projectId: 'project-1',
+        assets: [
+          {
+            assetId: 'asset_1',
+            filename: 'studio_back.png',
+            localPath: 'assets/studio/studio_back.png',
+            mimeType: 'image/png',
+            width: 1,
+            height: 1,
+            filesize: 70
+          }
+        ]
+      });
+    }
+  });
+
+  it('rejects an empty file list without calling the API', async () => {
+    const client = makeClient();
+    const spy = vi.spyOn(client, 'importStudioAssets');
+    const service = createAuthoringToolService(client);
+
+    const result = await service.importStudioAssets({ projectId: 'project-1', fileNames: [] });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('maps a missing source file to NOT_FOUND', async () => {
+    const client = new HttpAuthoringApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: (async () => new Response(JSON.stringify({ message: 'missing', code: 'studio.import.fileMissing' }), { status: 404 })) as unknown as typeof fetch
+    });
+
+    const result = await createAuthoringToolService(client).importStudioAssets({
+      projectId: 'project-1',
+      fileNames: ['studio_back.png']
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('NOT_FOUND');
+    }
+  });
+
+  it('maps an existing studio file to CONFLICT', async () => {
+    const client = new HttpAuthoringApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: (async () => new Response(JSON.stringify({ message: 'exists', code: 'studio.import.alreadyExists' }), { status: 409 })) as unknown as typeof fetch
+    });
+
+    const result = await createAuthoringToolService(client).importStudioAssets({
+      projectId: 'project-1',
+      fileNames: ['studio_back.png']
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('CONFLICT');
     }
   });
 });

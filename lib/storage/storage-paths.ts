@@ -24,6 +24,10 @@ export function getProjectAssetsRoot(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'assets');
 }
 
+export function getProjectStudioAssetsRoot(projectId: string): string {
+  return path.join(getProjectAssetsRoot(projectId), 'studio');
+}
+
 export function getProjectReferencesRoot(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'references');
 }

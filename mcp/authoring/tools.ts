@@ -11,6 +11,7 @@ import type {
   CreateProjectResponse,
   CreateReferenceResponse,
   GenerateVideoResponse,
+  ImportStudioAssetsResponse,
   ManageProjectMusicResponse,
   MaterializeSceneIntentsResponse,
   PlanSceneIntentsResponse,
@@ -75,6 +76,11 @@ export const createReferenceInputSchema = z.object({
   fileName: z.string().trim().max(200).optional(),
   description: z.string().max(2000).optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(50).optional()
+});
+
+export const importStudioAssetsInputSchema = z.object({
+  projectId: projectIdSchema,
+  fileNames: z.array(z.string().trim().min(1).max(200)).min(1).max(20)
 });
 
 export const generateVideoInputSchema = z.object({
@@ -170,6 +176,17 @@ export const AUTHORING_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: 'import_studio_assets',
+    description:
+      'Copy selected studio image files from the configured operator source directory (STUDIO_IMPORT_SOURCE_DIR, typically tmp_images) into the project assets/studio folder via POST /api/projects/{id}/studio-assets. Requires an explicit fileNames list of bare names such as studio_back.png, studio_desk.png, studio_intro.png, studio_outtro.png, plus optional extra png/jpg/jpeg/webp images. Path traversal and absolute paths are rejected. Existing project files are never overwritten. Returns project-relative localPath values so later render work does not depend on tmp_images. Missing source dir/files return NOT_FOUND; unconfigured source returns PROVIDER_NOT_CONFIGURED; collisions return CONFLICT.',
+    inputSchema: importStudioAssetsInputSchema,
+    annotations: {
+      title: 'Import Studio Assets',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
+  },
+  {
     name: 'generate_video',
     description:
       'Submit (or regenerate) a single scene video via POST /api/projects/{id}/scenes/{sceneId}/generate-video. This is the manual alternative to run_production for one scene. It forwards an explicit `provider` and `model` (e.g. provider=fal, model=minimax/h3-max-turbo/image-to-video for image-to-video, or .../text-to-video for text-to-video) and an optional `mode` (mock|real). The start/end frames and the reference set come from the scene, not this call: set scene.referenceIds and scene.visual.generation.startFrameReferenceId/endFrameReferenceId with update_project first. GENERATION IS AN EXPLICIT PAID ACTION in real mode; it is never retried automatically. Mock mode only allows the local video provider; real mode requires a real provider and its credentials. A scene that already has an active job returns CONFLICT (generation.scene.busy) so a second paid submit can never be started.',
@@ -200,6 +217,7 @@ export interface AuthoringToolService {
   approveSceneIntents(args: unknown): Promise<AuthoringMcpResult<ApproveSceneIntentsResponse>>;
   manageProjectMusic(args: unknown): Promise<AuthoringMcpResult<ManageProjectMusicResponse>>;
   createReference(args: unknown): Promise<AuthoringMcpResult<CreateReferenceResponse>>;
+  importStudioAssets(args: unknown): Promise<AuthoringMcpResult<ImportStudioAssetsResponse>>;
   generateVideo(args: unknown): Promise<AuthoringMcpResult<GenerateVideoResponse>>;
   cancelVideo(args: unknown): Promise<AuthoringMcpResult<CancelVideoResponse>>;
 }
@@ -329,6 +347,27 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
           width: typeof metadata.width === 'number' ? metadata.width : undefined,
           height: typeof metadata.height === 'number' ? metadata.height : undefined,
           filesize: typeof metadata.filesize === 'number' ? metadata.filesize : undefined
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async importStudioAssets(args: unknown) {
+      try {
+        const parsed = importStudioAssetsInputSchema.parse(args ?? {});
+        const result = await apiClient.importStudioAssets(parsed.projectId, { fileNames: parsed.fileNames });
+        return toSuccess({
+          projectId: result.projectId,
+          assets: result.assets.map((asset) => ({
+            assetId: asset.id,
+            filename: asset.filename,
+            localPath: asset.localPath ?? `assets/studio/${asset.filename}`,
+            mimeType: asset.mimeType,
+            width: asset.width,
+            height: asset.height,
+            filesize: asset.filesize
+          }))
         });
       } catch (error) {
         return toFailure(fromValidationError(error));
@@ -496,7 +535,7 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       inputSchema: AUTHORING_TOOL_DEFINITIONS[7].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[7].annotations
     },
-    async (args) => asToolResponse(await service.generateVideo(args))
+    async (args) => asToolResponse(await service.importStudioAssets(args))
   );
 
   server.registerTool(
@@ -505,6 +544,16 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       description: AUTHORING_TOOL_DEFINITIONS[8].description,
       inputSchema: AUTHORING_TOOL_DEFINITIONS[8].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[8].annotations
+    },
+    async (args) => asToolResponse(await service.generateVideo(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[9].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[9].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[9].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[9].annotations
     },
     async (args) => asToolResponse(await service.cancelVideo(args))
   );

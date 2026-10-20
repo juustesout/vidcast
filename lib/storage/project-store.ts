@@ -15,7 +15,7 @@ import { withKeyedLock } from '@/lib/utils/keyed-mutex';
 import { claimExpiresAtFromNow, claimTokenMatches, generateClaimToken, hashClaimToken, isClaimExpired } from '@/lib/security/claim-token';
 import { deleteProjectClaim, readProjectClaim, writeProjectClaim } from './claim-store';
 import type { ProjectClaimRecord } from './claim-store';
-import { getProjectAssetsRoot, getProjectJsonPath, getProjectPreviewsRoot, getProjectReferencesRoot, getProjectRoot, getProjectRendersRoot, getProjectsRoot } from './storage-paths';
+import { getProjectAssetsRoot, getProjectJsonPath, getProjectPreviewsRoot, getProjectReferencesRoot, getProjectRoot, getProjectRendersRoot, getProjectStudioAssetsRoot, getProjectsRoot } from './storage-paths';
 
 export interface ProjectSummary {
   id: string;
@@ -166,6 +166,7 @@ async function writeProjectFile(project: Project): Promise<Project> {
   const normalizedProject = normalizeProject(project);
   await ensureDirectory(getProjectRoot(normalizedProject.id));
   await ensureDirectory(getProjectAssetsRoot(normalizedProject.id));
+  await ensureDirectory(getProjectStudioAssetsRoot(normalizedProject.id));
   await ensureDirectory(getProjectReferencesRoot(normalizedProject.id));
   await ensureDirectory(getProjectRendersRoot(normalizedProject.id));
   await ensureDirectory(getProjectPreviewsRoot(normalizedProject.id));

@@ -1,7 +1,8 @@
+import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import { AuthoringMcpToolError } from './errors';
-import type { AuthoringMcpErrorCode, CreateProjectInput, CreateReferenceInput, GenerateVideoInput, ManageProjectMusicInput } from './types';
+import type { AuthoringMcpErrorCode, CreateProjectInput, CreateReferenceInput, GenerateVideoInput, ImportStudioAssetsInput, ManageProjectMusicInput } from './types';
 
 interface ApiErrorPayload {
   message?: string;
@@ -85,6 +86,11 @@ export interface CreateReferenceResult {
   reference: ReferenceImage;
 }
 
+export interface ImportStudioAssetsResult {
+  projectId: string;
+  assets: Asset[];
+}
+
 export interface GenerateVideoResult {
   sceneId: string;
   generationAttemptId: string;
@@ -113,6 +119,7 @@ export interface AuthoringApiClient {
   approveSceneIntents(projectId: string, intentIds?: string[]): Promise<ApproveSceneIntentsResult>;
   manageMusic(projectId: string, input: ManageProjectMusicInput): Promise<ManageMusicResult>;
   createReference(projectId: string, input: CreateReferenceInput): Promise<CreateReferenceResult>;
+  importStudioAssets(projectId: string, input: ImportStudioAssetsInput): Promise<ImportStudioAssetsResult>;
   generateVideo(projectId: string, sceneId: string, input: GenerateVideoInput): Promise<GenerateVideoResult>;
   cancelVideo(projectId: string, sceneId: string): Promise<CancelVideoResult>;
 }
@@ -186,6 +193,23 @@ function mapGenerationApiCode(apiCode: string | undefined): AuthoringMcpErrorCod
   // problems surfaced as INVALID_ARGUMENT.
   if (apiCode.startsWith('reference.')) {
     return 'INVALID_ARGUMENT';
+  }
+
+  if (apiCode.startsWith('studio.import.')) {
+    switch (apiCode) {
+      case 'studio.import.projectNotFound':
+      case 'studio.import.sourceMissing':
+      case 'studio.import.fileMissing':
+        return 'NOT_FOUND';
+      case 'studio.import.alreadyExists':
+        return 'CONFLICT';
+      case 'studio.import.sourceNotConfigured':
+        return 'PROVIDER_NOT_CONFIGURED';
+      case 'studio.import.copyFailed':
+        return 'API_ERROR';
+      default:
+        return 'INVALID_ARGUMENT';
+    }
   }
 
   switch (apiCode) {
@@ -442,6 +466,15 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
       throw new AuthoringMcpToolError('API_ERROR', 'Invalid reference creation response payload.', { endpoint: path, projectId });
     }
     return { reference: payload.reference };
+  }
+
+  async importStudioAssets(projectId: string, input: ImportStudioAssetsInput): Promise<ImportStudioAssetsResult> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/studio-assets`;
+    const payload = (await this.request(path, 'POST', input)) as { projectId?: string; assets?: Asset[] };
+    if (typeof payload.projectId !== 'string' || !Array.isArray(payload.assets)) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid studio import response payload.', { endpoint: path, projectId });
+    }
+    return { projectId: payload.projectId, assets: payload.assets };
   }
 
   async generateVideo(projectId: string, sceneId: string, input: GenerateVideoInput): Promise<GenerateVideoResult> {
