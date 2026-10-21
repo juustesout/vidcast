@@ -61,6 +61,23 @@ function makeClient(overrides: Partial<AuthoringApiClient> = {}): AuthoringApiCl
       providerJobId: 'fal:minimax/h3-max-turbo:req-1',
       providerStatus: 'canceled'
     }),
+    renderAnimationTemplate: async () => ({
+      projectId: 'project-1',
+      templateId: 'northwind_arr_chart',
+      assetId: 'asset_chart',
+      localPath: 'assets/mc-northwind-arr-chart.mp4',
+      mimeType: 'video/mp4',
+      destination: 'bigscreen'
+    }),
+    attachAnimation: async () => ({
+      projectId: 'project-1',
+      sceneId: 'scene-1',
+      assetId: 'asset_chart',
+      localPath: 'assets/mc-northwind-arr-chart.mp4',
+      destination: 'bigscreen',
+      layerId: 'studio-screen',
+      rect: { x: 293, y: 98, width: 1346, height: 761 }
+    }),
     ...overrides
   };
 }
@@ -88,7 +105,9 @@ describe('authoring MCP tool definitions', () => {
       'create_reference',
       'import_studio_assets',
       'generate_video',
-      'cancel_video'
+      'cancel_video',
+      'render_animation_template',
+      'attach_animation'
     ]);
     expect(AUTHORING_TOOL_DEFINITIONS.every((entry) => entry.annotations.readOnlyHint === false)).toBe(true);
   });

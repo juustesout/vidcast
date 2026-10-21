@@ -2,7 +2,18 @@ import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import { AuthoringMcpToolError } from './errors';
-import type { AuthoringMcpErrorCode, CreateProjectInput, CreateReferenceInput, GenerateVideoInput, ImportStudioAssetsInput, ManageProjectMusicInput } from './types';
+import type {
+  AttachAnimationInput,
+  AttachAnimationResponse,
+  AuthoringMcpErrorCode,
+  CreateProjectInput,
+  CreateReferenceInput,
+  GenerateVideoInput,
+  ImportStudioAssetsInput,
+  ManageProjectMusicInput,
+  RenderAnimationTemplateInput,
+  RenderAnimationTemplateResponse
+} from './types';
 
 interface ApiErrorPayload {
   message?: string;
@@ -122,6 +133,8 @@ export interface AuthoringApiClient {
   importStudioAssets(projectId: string, input: ImportStudioAssetsInput): Promise<ImportStudioAssetsResult>;
   generateVideo(projectId: string, sceneId: string, input: GenerateVideoInput): Promise<GenerateVideoResult>;
   cancelVideo(projectId: string, sceneId: string): Promise<CancelVideoResult>;
+  renderAnimationTemplate(projectId: string, input: RenderAnimationTemplateInput): Promise<RenderAnimationTemplateResponse>;
+  attachAnimation(projectId: string, sceneId: string, input: AttachAnimationInput): Promise<AttachAnimationResponse>;
 }
 
 export interface HttpAuthoringApiClientOptions {
@@ -193,6 +206,25 @@ function mapGenerationApiCode(apiCode: string | undefined): AuthoringMcpErrorCod
   // problems surfaced as INVALID_ARGUMENT.
   if (apiCode.startsWith('reference.')) {
     return 'INVALID_ARGUMENT';
+  }
+
+  if (apiCode.startsWith('animation.')) {
+    switch (apiCode) {
+      case 'animation.template.notFound':
+      case 'animation.project.notFound':
+      case 'animation.scene.notFound':
+      case 'animation.asset.notFound':
+        return 'NOT_FOUND';
+      case 'animation.chromium.missing':
+      case 'animation.ffmpeg.unavailable':
+        return 'PROVIDER_NOT_CONFIGURED';
+      case 'animation.render.failed':
+      case 'animation.render.timeout':
+      case 'animation.output.incomplete':
+        return 'API_ERROR';
+      default:
+        return 'INVALID_ARGUMENT';
+    }
   }
 
   if (apiCode.startsWith('studio.import.')) {
@@ -493,6 +525,24 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
       throw new AuthoringMcpToolError('API_ERROR', 'Invalid video cancel response payload.', { endpoint: path, projectId, sceneId });
     }
     return payload as CancelVideoResult;
+  }
+
+  async renderAnimationTemplate(projectId: string, input: RenderAnimationTemplateInput): Promise<RenderAnimationTemplateResponse> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/animations/render`;
+    const payload = (await this.request(path, 'POST', input)) as Partial<RenderAnimationTemplateResponse>;
+    if (!payload.assetId || !payload.localPath || !payload.templateId || !payload.destination) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid animation render response payload.', { endpoint: path, projectId });
+    }
+    return payload as RenderAnimationTemplateResponse;
+  }
+
+  async attachAnimation(projectId: string, sceneId: string, input: AttachAnimationInput): Promise<AttachAnimationResponse> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}/animations/attach`;
+    const payload = (await this.request(path, 'POST', input)) as Partial<AttachAnimationResponse>;
+    if (!payload.assetId || !payload.localPath || !payload.layerId || !payload.destination || !payload.rect) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid animation attach response payload.', { endpoint: path, projectId, sceneId });
+    }
+    return payload as AttachAnimationResponse;
   }
 }
 

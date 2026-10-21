@@ -1,3 +1,4 @@
+import type { AnimationTemplateSummary } from '@/lib/animation/types';
 import type { Project } from '@/lib/types/render';
 import type { CompositionArtifact } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
@@ -84,6 +85,10 @@ export interface GetProjectCompositionsResponse {
   available: boolean;
   latest: CompositionInfo | null;
   compositions: CompositionInfo[];
+}
+
+export interface ListAnimationTemplatesResponse {
+  templates: AnimationTemplateSummary[];
 }
 
 // Result of polling one video generation attempt (GET /generation-jobs/{id}).

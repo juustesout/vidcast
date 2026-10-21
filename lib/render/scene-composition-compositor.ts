@@ -87,8 +87,14 @@ export function buildCompositionLayerFilters(options: {
     const nextLabel = `base${order + 1}`;
     const withAlpha = layer.type !== 'image';
     const clipFilters: string[] = ['format=rgba'];
+    const timedVideo = layer.type === 'overlay' || (layer.type === 'image' && layer.mediaKind === 'video');
+    const overlayStart = timedVideo ? Math.max(0, layer.startSeconds ?? 0) : 0;
 
-    if (layer.mediaKind === 'video' || layer.type === 'presenter') {
+    if (timedVideo) {
+      const playDuration = Math.max(0.001, layer.durationSeconds ?? options.duration);
+      const sourceDuration = Math.min(playDuration, Math.max(0.001, options.duration - overlayStart));
+      clipFilters.push(`trim=duration=${formatSeconds(sourceDuration)}`);
+    } else if (layer.mediaKind === 'video' || layer.type === 'presenter') {
       const offset = Math.max(0, options.presenterStartOffsetSeconds ?? 0);
       const clipDuration = options.presenterClipDuration ?? options.duration;
       const available = Math.max(0.001, clipDuration - offset);
@@ -104,12 +110,16 @@ export function buildCompositionLayerFilters(options: {
     clipFilters.push('setsar=1');
     clipFilters.push('format=rgba');
     clipFilters.push(`fps=${options.fps}`);
-    clipFilters.push('setpts=PTS-STARTPTS');
+    clipFilters.push(overlayStart > 0.001
+      ? `setpts=PTS-STARTPTS+${formatSeconds(overlayStart)}/TB`
+      : 'setpts=PTS-STARTPTS');
 
     filters.push(`[${inputLabel}]${clipFilters.join(',')}[${preparedLabel}]`);
-    const overlay = layer.type === 'presenter'
-      ? `x=${Math.round(layer.rect.x)}:y=${Math.round(layer.rect.y)}:eof_action=pass:format=auto:alpha=straight`
-      : `x=${Math.round(layer.rect.x)}:y=${Math.round(layer.rect.y)}:shortest=1:format=auto:alpha=straight`;
+    const overlay = timedVideo
+      ? `x=${Math.round(layer.rect.x)}:y=${Math.round(layer.rect.y)}:eof_action=pass:repeatlast=0:format=auto:alpha=straight`
+      : layer.type === 'presenter'
+        ? `x=${Math.round(layer.rect.x)}:y=${Math.round(layer.rect.y)}:eof_action=pass:format=auto:alpha=straight`
+        : `x=${Math.round(layer.rect.x)}:y=${Math.round(layer.rect.y)}:shortest=1:format=auto:alpha=straight`;
     filters.push(`[${baseLabel}][${preparedLabel}]overlay=${overlay}[${nextLabel}]`);
     baseLabel = nextLabel;
   });
@@ -165,7 +175,10 @@ export async function buildCompositionSceneArgs(
     await assertReadableFile(absolutePath);
 
     let decodeArgs: string[];
-    if (layer.type === 'presenter' || layer.mediaKind === 'video') {
+    if (layer.type === 'overlay' && layer.mediaKind !== 'video') {
+      const hold = Math.max(0.001, layer.durationSeconds ?? scene.duration);
+      decodeArgs = ['-loop', '1', '-framerate', String(options.sceneFps), '-t', String(hold), '-i', absolutePath];
+    } else if (layer.type === 'presenter' || layer.type === 'overlay' || layer.mediaKind === 'video') {
       let probe: PresenterVideoProbe | undefined;
       try {
         probe = await probePresenterVideo(absolutePath, runtime);

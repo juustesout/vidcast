@@ -11,6 +11,7 @@ import type {
   GetProductionPlanResponse,
   GetSceneResponse,
   GetValidationReportResponse,
+  ListAnimationTemplatesResponse,
   ListProjectsResponse,
   ReadOnlyMcpResult
 } from './types';
@@ -41,6 +42,7 @@ export const getGenerationJobInputSchema = z.object({
   projectId: projectIdSchema,
   attemptId: z.string().trim().min(1).max(200)
 });
+export const listAnimationTemplatesInputSchema = z.object({}).strict();
 
 export const READ_ONLY_TOOL_DEFINITIONS = [
   {
@@ -117,6 +119,17 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
       readOnlyHint: false,
       openWorldHint: false
     }
+  },
+  {
+    name: 'list_animation_templates',
+    description:
+      'List the server-owned Motion Canvas animation templates Hermes may render. Returns id, destination (bigscreen|overlay), output codec/container, allowedParamKeys, paramsSchema, and defaults. Structured numbers/colors/text only; unknown fields are rejected. Does not execute code or render.',
+    inputSchema: listAnimationTemplatesInputSchema,
+    annotations: {
+      title: 'List Animation Templates',
+      readOnlyHint: true,
+      openWorldHint: false
+    }
   }
 ] as const;
 
@@ -128,6 +141,7 @@ export interface ReadOnlyToolService {
   getProductionPlan(args: unknown): Promise<ReadOnlyMcpResult<GetProductionPlanResponse>>;
   getProjectCompositions(args: unknown): Promise<ReadOnlyMcpResult<GetProjectCompositionsResponse>>;
   getGenerationJob(args: unknown): Promise<ReadOnlyMcpResult<GetGenerationJobResponse>>;
+  listAnimationTemplates(args: unknown): Promise<ReadOnlyMcpResult<ListAnimationTemplatesResponse>>;
 }
 
 export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppApiClient()): ReadOnlyToolService {
@@ -234,6 +248,16 @@ export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppA
         const parsed = getGenerationJobInputSchema.parse(args ?? {});
         const job = await apiClient.getGenerationJob(parsed.projectId, parsed.attemptId);
         return toSuccess(job);
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async listAnimationTemplates(args: unknown) {
+      try {
+        listAnimationTemplatesInputSchema.parse(args ?? {});
+        const templates = await apiClient.listAnimationTemplates();
+        return toSuccess({ templates });
       } catch (error) {
         return toFailure(fromValidationError(error));
       }
@@ -348,5 +372,15 @@ export function registerReadOnlyTools(server: McpServer, service: ReadOnlyToolSe
       annotations: READ_ONLY_TOOL_DEFINITIONS[6].annotations
     },
     async (args) => asToolResponse(await service.getGenerationJob(args))
+  );
+
+  server.registerTool(
+    'list_animation_templates',
+    {
+      description: READ_ONLY_TOOL_DEFINITIONS[7].description,
+      inputSchema: READ_ONLY_TOOL_DEFINITIONS[7].inputSchema,
+      annotations: READ_ONLY_TOOL_DEFINITIONS[7].annotations
+    },
+    async (args) => asToolResponse(await service.listAnimationTemplates(args))
   );
 }

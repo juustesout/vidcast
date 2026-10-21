@@ -7,6 +7,7 @@ import { AuthoringMcpToolError, toFailure, toSuccess } from './errors';
 import type {
   ApproveSceneIntentsResponse,
   AuthoringMcpResult,
+  AttachAnimationResponse,
   CancelVideoResponse,
   CreateProjectResponse,
   CreateReferenceResponse,
@@ -15,6 +16,7 @@ import type {
   ManageProjectMusicResponse,
   MaterializeSceneIntentsResponse,
   PlanSceneIntentsResponse,
+  RenderAnimationTemplateResponse,
   UpdateProjectResponse
 } from './types';
 
@@ -96,6 +98,32 @@ export const cancelVideoInputSchema = z.object({
   projectId: projectIdSchema,
   sceneId: sceneIdSchema
 });
+
+export const renderAnimationTemplateInputSchema = z.object({
+  projectId: projectIdSchema,
+  templateId: z.enum(['northwind_arr_chart', 'nix_overlay']),
+  params: z.record(z.string(), z.unknown()).optional()
+}).strict();
+
+export const attachAnimationInputSchema = z.object({
+  projectId: projectIdSchema,
+  sceneId: sceneIdSchema,
+  assetId: z.string().trim().min(1).max(200),
+  destination: z.enum(['bigscreen', 'overlay']),
+  startSeconds: z.number().min(0).max(600).optional(),
+  durationSeconds: z.number().min(0.04).max(600).optional(),
+  scale: z.number().min(0.05).max(2).optional(),
+  position: z.object({
+    x: z.number().min(-1920).max(3840),
+    y: z.number().min(-1080).max(2160)
+  }).strict().optional(),
+  rect: z.object({
+    x: z.number().min(-1920).max(3840),
+    y: z.number().min(-1080).max(2160),
+    width: z.number().min(1).max(1920),
+    height: z.number().min(1).max(1080)
+  }).strict().optional()
+}).strict();
 
 export const AUTHORING_TOOL_DEFINITIONS = [
   {
@@ -207,6 +235,28 @@ export const AUTHORING_TOOL_DEFINITIONS = [
       readOnlyHint: false,
       openWorldHint: false
     }
+  },
+  {
+    name: 'render_animation_template',
+    description:
+      'Render a server-owned Motion Canvas template into a project asset via POST /api/projects/{id}/animations/render. templateId must be northwind_arr_chart (opaque 1920x1080 H.264 bigscreen) or nix_overlay (transparent VP9/WebM overlay). params is optional structured JSON merged with catalog defaults; unknown keys, generated code, and unsafe paths are rejected. Returns assetId and project-relative localPath. A failed render does not attach anything to a scene.',
+    inputSchema: renderAnimationTemplateInputSchema,
+    annotations: {
+      title: 'Render Animation Template',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
+  },
+  {
+    name: 'attach_animation',
+    description:
+      'Attach a previously rendered Motion Canvas asset to a scene composition via POST /api/projects/{id}/scenes/{sceneId}/animations/attach. destination=bigscreen writes the studio-screen image layer; destination=overlay writes the studio-overlay layer (z=25). Optional startSeconds/durationSeconds, scale, position, and rect. Presenter PiP and desk are left unchanged. Requires an existing asset from render_animation_template; never invents paths.',
+    inputSchema: attachAnimationInputSchema,
+    annotations: {
+      title: 'Attach Animation',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
   }
 ] as const;
 export interface AuthoringToolService {
@@ -220,6 +270,8 @@ export interface AuthoringToolService {
   importStudioAssets(args: unknown): Promise<AuthoringMcpResult<ImportStudioAssetsResponse>>;
   generateVideo(args: unknown): Promise<AuthoringMcpResult<GenerateVideoResponse>>;
   cancelVideo(args: unknown): Promise<AuthoringMcpResult<CancelVideoResponse>>;
+  renderAnimationTemplate(args: unknown): Promise<AuthoringMcpResult<RenderAnimationTemplateResponse>>;
+  attachAnimation(args: unknown): Promise<AuthoringMcpResult<AttachAnimationResponse>>;
 }
 
 export function createAuthoringToolService(apiClient: AuthoringApiClient = new HttpAuthoringApiClient()): AuthoringToolService {
@@ -415,6 +467,37 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
       } catch (error) {
         return toFailure(fromValidationError(error));
       }
+    },
+
+    async renderAnimationTemplate(args: unknown) {
+      try {
+        const parsed = renderAnimationTemplateInputSchema.parse(args ?? {});
+        const result = await apiClient.renderAnimationTemplate(parsed.projectId, {
+          templateId: parsed.templateId,
+          params: parsed.params
+        });
+        return toSuccess(result);
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async attachAnimation(args: unknown) {
+      try {
+        const parsed = attachAnimationInputSchema.parse(args ?? {});
+        const result = await apiClient.attachAnimation(parsed.projectId, parsed.sceneId, {
+          assetId: parsed.assetId,
+          destination: parsed.destination,
+          startSeconds: parsed.startSeconds,
+          durationSeconds: parsed.durationSeconds,
+          scale: parsed.scale,
+          position: parsed.position,
+          rect: parsed.rect
+        });
+        return toSuccess(result);
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
     }
   };
 }
@@ -556,5 +639,25 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       annotations: AUTHORING_TOOL_DEFINITIONS[9].annotations
     },
     async (args) => asToolResponse(await service.cancelVideo(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[10].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[10].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[10].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[10].annotations
+    },
+    async (args) => asToolResponse(await service.renderAnimationTemplate(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[11].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[11].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[11].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[11].annotations
+    },
+    async (args) => asToolResponse(await service.attachAnimation(args))
   );
 }

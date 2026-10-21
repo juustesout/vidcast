@@ -172,4 +172,44 @@ export interface CancelVideoResponse {
   providerStatus: string;
 }
 
+export interface RenderAnimationTemplateInput {
+  templateId: 'northwind_arr_chart' | 'nix_overlay';
+  params?: Record<string, unknown>;
+}
+
+export interface RenderAnimationTemplateResponse {
+  projectId: string;
+  templateId: 'northwind_arr_chart' | 'nix_overlay';
+  assetId: string;
+  localPath: string;
+  mimeType: string;
+  destination: 'bigscreen' | 'overlay';
+  width?: number;
+  height?: number;
+  duration?: number;
+  filesize?: number;
+}
+
+export interface AttachAnimationInput {
+  assetId: string;
+  destination: 'bigscreen' | 'overlay';
+  startSeconds?: number;
+  durationSeconds?: number;
+  scale?: number;
+  position?: { x: number; y: number };
+  rect?: { x: number; y: number; width: number; height: number };
+}
+
+export interface AttachAnimationResponse {
+  projectId: string;
+  sceneId: string;
+  assetId: string;
+  localPath: string;
+  destination: 'bigscreen' | 'overlay';
+  layerId: string;
+  rect: { x: number; y: number; width: number; height: number };
+  startSeconds?: number;
+  durationSeconds?: number;
+}
+
 

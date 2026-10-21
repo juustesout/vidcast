@@ -13,7 +13,7 @@ import {
   buildLayerScaleFilter,
   resolveSafeProjectAssetPath
 } from '@/lib/render/scene-composition-compositor';
-import { createStudioComposition, STUDIO_BIGSCREEN_RECT } from '@/lib/render/scene-composition';
+import { createStudioComposition, STUDIO_BIGSCREEN_RECT, STUDIO_OVERLAY_RECT } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { Asset } from '@/lib/types/asset';
@@ -35,6 +35,8 @@ let screenPath = '';
 let deskPath = '';
 let alphaClip = '';
 let opaqueMp4 = '';
+let overlayClip = '';
+let chartClip = '';
 
 async function ffmpeg(args: string[]): Promise<void> {
   await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: 90_000 }, 'scene_render');
@@ -211,6 +213,49 @@ beforeAll(async () => {
     alphaClip
   ]);
 
+  overlayClip = path.join(projectRoot, 'assets', 'studio', 'overlay-alpha.webm');
+  await ffmpeg([
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    `color=c=green:s=80x80:r=${FPS}:d=${DURATION}`,
+    '-f',
+    'lavfi',
+    '-i',
+    `color=c=white:s=80x80:r=${FPS}:d=${DURATION}`,
+    '-filter_complex',
+    "[1]geq=lum='if(lt(hypot(X-W/2,Y-H/2),H*0.38),255,0)':cb=128:cr=128,format=gray[a];[0][a]alphamerge,format=yuva420p",
+    '-an',
+    '-c:v',
+    'libvpx-vp9',
+    '-pix_fmt',
+    'yuva420p',
+    '-auto-alt-ref',
+    '0',
+    '-t',
+    String(DURATION),
+    overlayClip
+  ]);
+
+  chartClip = path.join(projectRoot, 'assets', 'studio', 'chart.mp4');
+  await ffmpeg([
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    `color=c=yellow:s=160x90:r=${FPS}:d=0.5`,
+    '-t',
+    '0.5',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-pix_fmt',
+    'yuv420p',
+    chartClip
+  ]);
+
   opaqueMp4 = path.join(projectRoot, 'assets', 'presenter-opaque.mp4');
   await ffmpeg([
     '-y',
@@ -330,6 +375,56 @@ describe('composition compositor helpers', () => {
     }).join(';');
     expect(filters).toContain('scale=960:540:force_original_aspect_ratio=decrease');
     expect(filters).toContain('overlay=x=100:y=540:eof_action=pass:format=auto:alpha=straight');
+  });
+
+  it('places a timed overlay with eof_action=pass and no freeze pad', () => {
+    const layer: RenderPlanCompositionLayer = {
+      id: 'studio-overlay',
+      type: 'overlay',
+      enabled: true,
+      zIndex: 25,
+      rect: STUDIO_OVERLAY_RECT,
+      fit: 'contain',
+      assetPath: 'assets/studio/overlay.webm',
+      mediaKind: 'video',
+      startSeconds: 0.2,
+      durationSeconds: 4
+    };
+    const filters = buildCompositionLayerFilters({
+      layers: [{ index: 1, layer, path: layer.assetPath ?? '' }],
+      fps: 30,
+      duration: 5
+    }).join(';');
+    expect(filters).toContain('trim=duration=4.000');
+    expect(filters).toContain('setpts=PTS-STARTPTS+0.200/TB');
+    expect(filters).toContain(`overlay=x=${STUDIO_OVERLAY_RECT.x}:y=${STUDIO_OVERLAY_RECT.y}:eof_action=pass:repeatlast=0:format=auto:alpha=straight`);
+    expect(filters).not.toContain('tpad=stop_mode=clone');
+    expect(filters).not.toContain('shortest=1');
+  });
+
+  it('places a timed bigscreen video with contain scale, clipping rect, and no freeze pad', () => {
+    const layer: RenderPlanCompositionLayer = {
+      id: 'studio-screen',
+      type: 'image',
+      enabled: true,
+      zIndex: 10,
+      rect: STUDIO_BIGSCREEN_RECT,
+      fit: 'contain',
+      assetPath: 'assets/studio/chart.mp4',
+      mediaKind: 'video',
+      startSeconds: 0,
+      durationSeconds: 5
+    };
+    const filters = buildCompositionLayerFilters({
+      layers: [{ index: 1, layer, path: layer.assetPath ?? '' }],
+      fps: 30,
+      duration: 5
+    }).join(';');
+    expect(filters).toContain('trim=duration=5.000');
+    expect(filters).toContain(`scale=${STUDIO_BIGSCREEN_RECT.width}:${STUDIO_BIGSCREEN_RECT.height}:force_original_aspect_ratio=decrease`);
+    expect(filters).toContain(`overlay=x=${STUDIO_BIGSCREEN_RECT.x}:y=${STUDIO_BIGSCREEN_RECT.y}:eof_action=pass:repeatlast=0:format=auto:alpha=straight`);
+    expect(filters).not.toContain('tpad=stop_mode=clone');
+    expect(filters).not.toContain('shortest=1');
   });
 
   it('rejects absolute and traversal asset paths', () => {
@@ -538,6 +633,99 @@ describe('composition scene renderer', () => {
     const { outputPath } = await renderPlan(plan, 'opaque-mp4');
     const center = await samplePixel(outputPath, 160, 90);
     expect(center[0]).toBeGreaterThan(140);
+  }, 120_000);
+
+  it('composites a timed alpha overlay above the background and stops without freeze', async () => {
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      overlayAssetId: 'overlay-1',
+      overlayLocalPath: 'assets/studio/overlay-alpha.webm',
+      overlayRect: { x: 240, y: 20, width: 60, height: 90 },
+      overlayStartSeconds: 0.25,
+      overlayDurationSeconds: 0.4,
+      deskEnabled: false,
+      bigscreenEnabled: false
+    });
+    composition.layers = composition.layers.filter((layer) => layer.type !== 'presenter');
+    const project = makeProject(
+      [makeScene(composition)],
+      [
+        makeAsset('overlay-1', {
+          type: 'video',
+          filename: 'overlay-alpha.webm',
+          localPath: 'assets/studio/overlay-alpha.webm',
+          mimeType: 'video/webm'
+        })
+      ]
+    );
+    const plan = resolveRenderPlan(project);
+    const overlay = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'overlay');
+    expect(overlay).toMatchObject({
+      enabled: true,
+      mediaKind: 'video',
+      startSeconds: 0.25,
+      durationSeconds: 0.4,
+      zIndex: 25
+    });
+    const { outputPath } = await renderPlan(plan, 'studio-overlay');
+    const before = await samplePixel(outputPath, 270, 50, 0.08);
+    const during = await samplePixel(outputPath, 270, 50, 0.45);
+    const after = await samplePixel(outputPath, 270, 50, 0.85);
+    const outside = await samplePixel(outputPath, 20, 20, 0.45);
+    expect(during[1]).toBeGreaterThan(120);
+    expect(before[2]).toBeGreaterThan(120);
+    expect(after[2]).toBeGreaterThan(120);
+    expect(outside[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('clips a timed bigscreen video to the screen rect and stops without freeze', async () => {
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'chart-1',
+      imageLocalPath: 'assets/studio/chart.mp4',
+      imageStartSeconds: 0.15,
+      imageDurationSeconds: 0.4,
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+    const project = makeProject(
+      [makeScene(composition)],
+      [
+        makeAsset('chart-1', {
+          type: 'video',
+          filename: 'chart.mp4',
+          localPath: 'assets/studio/chart.mp4',
+          mimeType: 'video/mp4'
+        })
+      ]
+    );
+    const plan = resolveRenderPlan(project);
+    const screen = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'image');
+    expect(screen).toMatchObject({
+      enabled: true,
+      mediaKind: 'video',
+      startSeconds: 0.15,
+      durationSeconds: 0.4,
+      zIndex: 10
+    });
+    const { outputPath } = await renderPlan(plan, 'studio-chart');
+    const before = await samplePixel(outputPath, 90, 50, 0.05);
+    const during = await samplePixel(outputPath, 90, 50, 0.35);
+    const after = await samplePixel(outputPath, 90, 50, 0.85);
+    const outside = await samplePixel(outputPath, 8, 8, 0.35);
+    expect(during[0]).toBeGreaterThan(180);
+    expect(during[1]).toBeGreaterThan(180);
+    expect(before[2]).toBeGreaterThan(120);
+    expect(after[2]).toBeGreaterThan(120);
+    expect(outside[2]).toBeGreaterThan(120);
   }, 120_000);
 
   it('fails closed on a missing composition asset file', async () => {

@@ -129,6 +129,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
       }
     }),
     getGenerationJob: async () => ({}) as never,
+    listAnimationTemplates: async () => [],
     ...overrides
   };
 }
@@ -136,7 +137,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
 describe('read-only MCP tool definitions', () => {
   it('registers read-only tools with expected names', () => {
     const names = READ_ONLY_TOOL_DEFINITIONS.map((entry) => entry.name);
-    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions', 'get_generation_job']);
+    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions', 'get_generation_job', 'list_animation_templates']);
     // get_generation_job mutates state (provider poll + persist), so it is the
     // one definition in this group that is NOT read-only.
     const mutating = READ_ONLY_TOOL_DEFINITIONS.filter((entry) => entry.annotations.readOnlyHint !== true).map((entry) => entry.name);

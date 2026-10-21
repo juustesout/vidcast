@@ -4,4 +4,9 @@
 /node_modules/
 /projects/
 /.next/
+/.tmp/
+/motion-canvas/node_modules/
+/motion-canvas/output/
+/motion-canvas/dist/
 *.tsbuildinfo
+

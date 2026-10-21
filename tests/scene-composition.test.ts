@@ -13,6 +13,7 @@ import {
   STUDIO_BIGSCREEN_RECT,
   STUDIO_COMPOSITION_CANVAS,
   STUDIO_LAYER_IDS,
+  STUDIO_OVERLAY_RECT,
   STUDIO_PRESENTER_PIP_OFFSET_X,
   STUDIO_PRESENTER_PIP_OFFSET_Y,
   STUDIO_PRESENTER_PIP_SCALE,
@@ -189,6 +190,41 @@ describe('studio composition preset', () => {
     const pip = createStudioComposition({ presenterMode: 'pip', pipPreset: 'news' });
     const presenter = pip.layers.find((layer) => layer.type === 'presenter');
     expect(presenter).toMatchObject({ mode: 'pip', pipPreset: 'news', rect: news });
+  });
+
+  it('inserts an overlay between presenter and desk, outside the bigscreen', () => {
+    const composition = createStudioComposition({
+      overlayLocalPath: 'assets/studio/overlay.webm',
+      overlayStartSeconds: 0.2,
+      overlayDurationSeconds: 4
+    });
+    const overlay = composition.layers.find((layer) => layer.type === 'overlay');
+    const presenter = composition.layers.find((layer) => layer.type === 'presenter');
+    const foreground = composition.layers.find((layer) => layer.type === 'foreground');
+
+    expect(overlay).toMatchObject({
+      id: STUDIO_LAYER_IDS.overlay,
+      type: 'overlay',
+      enabled: true,
+      zIndex: 25,
+      localPath: 'assets/studio/overlay.webm',
+      startSeconds: 0.2,
+      durationSeconds: 4,
+      rect: STUDIO_OVERLAY_RECT,
+      fit: 'contain'
+    });
+    expect(presenter?.zIndex).toBe(20);
+    expect(foreground?.zIndex).toBe(30);
+    expect(sortCompositionLayers(composition.layers).map((layer) => layer.type)).toEqual([
+      'background',
+      'image',
+      'presenter',
+      'overlay',
+      'foreground'
+    ]);
+    expect(overlay?.rect.x).toBeGreaterThan(STUDIO_BIGSCREEN_RECT.x + STUDIO_BIGSCREEN_RECT.width);
+    expect(overlay?.rect.x).toBeGreaterThan((presenter?.rect?.x ?? 0) + (presenter?.rect?.width ?? 0) - 1);
+    expect((overlay?.rect.x ?? 0) + (overlay?.rect.width ?? 0)).toBeLessThanOrEqual(1920);
   });
 
   it('places a scalable presenter PiP from the bottom-left with an explicit left offset', () => {
@@ -421,6 +457,62 @@ describe('scene composition validation', () => {
     expect(collectCodes(errors)).toContain('scene.composition.presenter.pip.missing');
   });
 
+  it('rejects overlay timing that is not finite and positive', () => {
+    const errors: RenderIssue[] = [];
+    const warnings: RenderIssue[] = [];
+    const project = makeProject([makeScene('scene-1', { kind: 'blank' })]);
+
+    validateSceneComposition({
+      version: 1,
+      canvas: { width: 1920, height: 1080 },
+      layers: [
+        {
+          id: 'overlay',
+          type: 'overlay',
+          enabled: true,
+          zIndex: 25,
+          localPath: 'assets/studio/overlay.webm',
+          rect: STUDIO_OVERLAY_RECT,
+          fit: 'contain',
+          startSeconds: -1,
+          durationSeconds: 0
+        }
+      ]
+    }, 'scenes.scene-1.composition', project, errors, warnings);
+
+    const codes = collectCodes(errors);
+    expect(codes).toContain('scene.composition.overlay.start.invalid');
+    expect(codes).toContain('scene.composition.overlay.duration.invalid');
+  });
+
+  it('rejects image timing that is not finite and positive', () => {
+    const errors: RenderIssue[] = [];
+    const warnings: RenderIssue[] = [];
+    const project = makeProject([makeScene('scene-1', { kind: 'blank' })]);
+
+    validateSceneComposition({
+      version: 1,
+      canvas: { width: 1920, height: 1080 },
+      layers: [
+        {
+          id: 'studio-screen',
+          type: 'image',
+          enabled: true,
+          zIndex: 10,
+          localPath: 'assets/studio/chart.mp4',
+          rect: STUDIO_BIGSCREEN_RECT,
+          fit: 'contain',
+          startSeconds: -0.5,
+          durationSeconds: 0
+        }
+      ]
+    }, 'scenes.scene-1.composition', project, errors, warnings);
+
+    const codes = collectCodes(errors);
+    expect(codes).toContain('scene.composition.image.start.invalid');
+    expect(codes).toContain('scene.composition.image.duration.invalid');
+  });
+
   it('rejects a presenter scale outside 0-1', () => {
     const errors: RenderIssue[] = [];
     const warnings: RenderIssue[] = [];
@@ -616,5 +708,83 @@ describe('scene composition render plan', () => {
     const plan = resolveRenderPlan(project);
     expect(plan.scenes[0].status).toBe('invalid');
     expect(plan.scenes[0].issues.some((issue) => issue.code === 'scene.composition.asset.path.unsafe')).toBe(true);
+  });
+
+  it('resolves overlay start and duration onto the render plan', () => {
+    const composition = createStudioComposition({
+      backgroundAssetId: 'studio_back',
+      imageAssetId: 'screen',
+      imageLocalPath: 'assets/studio/screen.png',
+      foregroundAssetId: 'studio_desk',
+      overlayAssetId: 'overlay-1',
+      overlayLocalPath: 'assets/studio/overlay.webm',
+      overlayStartSeconds: 0.25,
+      overlayDurationSeconds: 4
+    });
+    const project = makeProject(
+      [makeScene('scene-1', { kind: 'blank' }, { composition })],
+      {
+        assets: [
+          makeAsset('studio_back'),
+          makeAsset('studio_desk'),
+          makeAsset('screen', { localPath: 'assets/studio/screen.png', width: 1346, height: 761 }),
+          makeAsset('overlay-1', {
+            type: 'video',
+            filename: 'overlay.webm',
+            localPath: 'assets/studio/overlay.webm',
+            mimeType: 'video/webm'
+          })
+        ]
+      }
+    );
+    const plan = resolveRenderPlan(project);
+    const overlay = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'overlay');
+    expect(overlay).toMatchObject({
+      enabled: true,
+      assetPath: 'assets/studio/overlay.webm',
+      mediaKind: 'video',
+      startSeconds: 0.25,
+      durationSeconds: 4,
+      zIndex: 25,
+      rect: STUDIO_OVERLAY_RECT
+    });
+  });
+
+  it('resolves a timed bigscreen video onto the image layer', () => {
+    const composition = createStudioComposition({
+      backgroundAssetId: 'studio_back',
+      imageAssetId: 'chart-1',
+      imageLocalPath: 'assets/studio/chart.mp4',
+      imageStartSeconds: 0,
+      imageDurationSeconds: 5,
+      foregroundAssetId: 'studio_desk'
+    });
+    const project = makeProject(
+      [makeScene('scene-1', { kind: 'blank' }, { composition })],
+      {
+        assets: [
+          makeAsset('studio_back'),
+          makeAsset('studio_desk'),
+          makeAsset('chart-1', {
+            type: 'video',
+            filename: 'chart.mp4',
+            localPath: 'assets/studio/chart.mp4',
+            mimeType: 'video/mp4'
+          })
+        ]
+      }
+    );
+    const plan = resolveRenderPlan(project);
+    const screen = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'image');
+    expect(screen).toMatchObject({
+      enabled: true,
+      assetPath: 'assets/studio/chart.mp4',
+      mediaKind: 'video',
+      startSeconds: 0,
+      durationSeconds: 5,
+      zIndex: 10,
+      rect: STUDIO_BIGSCREEN_RECT,
+      fit: 'contain'
+    });
   });
 });

@@ -196,6 +196,8 @@ export interface RenderPlanCompositionLayer {
   assetPath?: string;
   mediaKind?: RenderPlanCompositionMediaKind;
   mode?: SceneCompositionPresenterMode;
+  startSeconds?: number;
+  durationSeconds?: number;
 }
 
 export interface RenderPlanSceneComposition {

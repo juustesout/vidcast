@@ -6,6 +6,7 @@ import type {
   SceneCompositionLayer,
   SceneCompositionLayerType,
   SceneCompositionMediaLayer,
+  SceneCompositionOverlayLayer,
   SceneCompositionPipPresetName,
   SceneCompositionPresenterLayer,
   SceneCompositionPresenterMode,
@@ -16,7 +17,7 @@ import type {
 import { SCENE_COMPOSITION_SCHEMA_VERSION } from '@/lib/types/scene-composition';
 import { STUDIO_PIP_PRESETS } from '@/lib/render/studio-compositions';
 
-export const SCENE_COMPOSITION_LAYER_TYPES: SceneCompositionLayerType[] = ['background', 'image', 'presenter', 'foreground'];
+export const SCENE_COMPOSITION_LAYER_TYPES: SceneCompositionLayerType[] = ['background', 'image', 'presenter', 'overlay', 'foreground'];
 export const SCENE_COMPOSITION_FITS: SceneCompositionFit[] = ['contain', 'cover'];
 export const SCENE_COMPOSITION_PRESENTER_MODES: SceneCompositionPresenterMode[] = ['full_canvas', 'pip'];
 export const SCENE_COMPOSITION_PIP_PRESETS: SceneCompositionPipPresetName[] = ['intro', 'news'];
@@ -35,13 +36,22 @@ export const STUDIO_LAYER_IDS = {
   background: 'studio-back',
   image: 'studio-screen',
   presenter: 'studio-presenter',
+  overlay: 'studio-overlay',
   foreground: 'studio-desk'
 } as const;
+
+export const STUDIO_OVERLAY_RECT: SceneCompositionRect = {
+  x: 1648,
+  y: 200,
+  width: 260,
+  height: 390
+};
 
 const DEFAULT_Z_INDEX: Record<SceneCompositionLayerType, number> = {
   background: 0,
   image: 10,
   presenter: 20,
+  overlay: 25,
   foreground: 30
 };
 
@@ -124,6 +134,14 @@ export function createStudioComposition(options: {
   presenterScale?: number;
   presenterOffsetX?: number;
   presenterOffsetY?: number;
+  overlayAssetId?: string;
+  overlayLocalPath?: string;
+  overlayRect?: SceneCompositionRect;
+  overlayStartSeconds?: number;
+  overlayDurationSeconds?: number;
+  overlayEnabled?: boolean;
+  imageStartSeconds?: number;
+  imageDurationSeconds?: number;
   deskEnabled?: boolean;
   bigscreenEnabled?: boolean;
 } = {}): SceneCompositionSpec {
@@ -155,7 +173,9 @@ export function createStudioComposition(options: {
     assetId: options.imageAssetId,
     localPath: options.imageLocalPath,
     rect: { ...STUDIO_BIGSCREEN_RECT },
-    fit: 'contain'
+    fit: 'contain',
+    ...(options.imageStartSeconds !== undefined ? { startSeconds: options.imageStartSeconds } : {}),
+    ...(options.imageDurationSeconds !== undefined ? { durationSeconds: options.imageDurationSeconds } : {})
   };
 
   const presenter: SceneCompositionPresenterLayer = presenterMode === 'pip'
@@ -196,6 +216,19 @@ export function createStudioComposition(options: {
         fit: 'contain'
       };
 
+  const overlay: SceneCompositionOverlayLayer = {
+    id: STUDIO_LAYER_IDS.overlay,
+    type: 'overlay',
+    enabled: options.overlayEnabled ?? Boolean(options.overlayAssetId || options.overlayLocalPath),
+    zIndex: DEFAULT_Z_INDEX.overlay,
+    assetId: options.overlayAssetId,
+    localPath: options.overlayLocalPath,
+    rect: options.overlayRect ?? { ...STUDIO_OVERLAY_RECT },
+    fit: 'contain',
+    ...(options.overlayStartSeconds !== undefined ? { startSeconds: options.overlayStartSeconds } : {}),
+    ...(options.overlayDurationSeconds !== undefined ? { durationSeconds: options.overlayDurationSeconds } : {})
+  };
+
   const foreground: SceneCompositionMediaLayer = {
     id: STUDIO_LAYER_IDS.foreground,
     type: 'foreground',
@@ -211,7 +244,7 @@ export function createStudioComposition(options: {
     version: SCENE_COMPOSITION_SCHEMA_VERSION,
     preset: 'studio',
     canvas,
-    layers: [background, image, presenter, foreground]
+    layers: overlay.enabled ? [background, image, presenter, overlay, foreground] : [background, image, presenter, foreground]
   };
 }
 
@@ -245,6 +278,8 @@ function normalizeMediaLayer(
   const id = typeof value.id === 'string' && value.id.trim() ? value.id.trim() : `${type}-${index + 1}`;
   const assetId = typeof value.assetId === 'string' && value.assetId.trim() ? value.assetId.trim() : undefined;
   const localPath = typeof value.localPath === 'string' && value.localPath.trim() ? value.localPath.trim() : undefined;
+  const startSeconds = normalizeNonNegativeNumber(value.startSeconds);
+  const durationSeconds = normalizePositiveNumber(value.durationSeconds);
   return {
     id,
     type,
@@ -253,7 +288,9 @@ function normalizeMediaLayer(
     assetId,
     localPath,
     rect: normalizeRect(value.rect) ?? { x: 0, y: 0, width: 0, height: 0 },
-    fit: isSceneCompositionFit(value.fit) ? value.fit : type === 'image' ? 'contain' : 'cover'
+    fit: isSceneCompositionFit(value.fit) ? value.fit : type === 'image' ? 'contain' : 'cover',
+    ...(startSeconds !== undefined ? { startSeconds } : {}),
+    ...(durationSeconds !== undefined ? { durationSeconds } : {})
   };
 }
 
@@ -263,6 +300,26 @@ function normalizePositiveNumber(value: unknown): number | undefined {
 
 function normalizeNonNegativeNumber(value: unknown): number | undefined {
   return isFiniteNumber(value) && value >= 0 ? value : undefined;
+}
+
+function normalizeOverlayLayer(value: Record<string, unknown>, index: number): SceneCompositionOverlayLayer {
+  const id = typeof value.id === 'string' && value.id.trim() ? value.id.trim() : `overlay-${index + 1}`;
+  const assetId = typeof value.assetId === 'string' && value.assetId.trim() ? value.assetId.trim() : undefined;
+  const localPath = typeof value.localPath === 'string' && value.localPath.trim() ? value.localPath.trim() : undefined;
+  const startSeconds = normalizeNonNegativeNumber(value.startSeconds);
+  const durationSeconds = normalizePositiveNumber(value.durationSeconds);
+  return {
+    id,
+    type: 'overlay',
+    enabled: value.enabled !== false,
+    zIndex: isFiniteNumber(value.zIndex) ? value.zIndex : DEFAULT_Z_INDEX.overlay,
+    assetId,
+    localPath,
+    rect: normalizeRect(value.rect) ?? { ...STUDIO_OVERLAY_RECT },
+    fit: isSceneCompositionFit(value.fit) ? value.fit : 'contain',
+    ...(startSeconds !== undefined ? { startSeconds } : {}),
+    ...(durationSeconds !== undefined ? { durationSeconds } : {})
+  };
 }
 
 function normalizePresenterLayer(value: Record<string, unknown>, index: number, canvas?: SceneCompositionCanvas): SceneCompositionPresenterLayer {
@@ -317,6 +374,10 @@ export function normalizeSceneComposition(value: unknown): SceneCompositionSpec 
     }
     if (raw.type === 'presenter') {
       layers.push(normalizePresenterLayer(raw, index, canvas));
+      return;
+    }
+    if (raw.type === 'overlay') {
+      layers.push(normalizeOverlayLayer(raw, index));
       return;
     }
     if (raw.type === 'background' || raw.type === 'image' || raw.type === 'foreground') {
@@ -489,7 +550,7 @@ export function validateSceneComposition(
       return;
     }
 
-    if (raw.type === 'background' || raw.type === 'image' || raw.type === 'foreground') {
+    if (raw.type === 'background' || raw.type === 'image' || raw.type === 'foreground' || raw.type === 'overlay') {
       if (raw.rect === undefined) {
         pushIssue(errors, 'error', 'scene.composition.rect.invalid', `${layerPath}.rect`, 'Media layers require an explicit rect.');
       } else {
@@ -497,6 +558,17 @@ export function validateSceneComposition(
       }
       if (raw.fit !== undefined && raw.fit !== null && !isSceneCompositionFit(raw.fit)) {
         pushIssue(errors, 'error', 'scene.composition.fit.invalid', `${layerPath}.fit`, 'Layer fit must be contain or cover.');
+      }
+
+      if (raw.type === 'overlay' || raw.type === 'image') {
+        const startCode = raw.type === 'overlay' ? 'scene.composition.overlay.start.invalid' : 'scene.composition.image.start.invalid';
+        const durationCode = raw.type === 'overlay' ? 'scene.composition.overlay.duration.invalid' : 'scene.composition.image.duration.invalid';
+        if (raw.startSeconds !== undefined && raw.startSeconds !== null && (!isFiniteNumber(raw.startSeconds) || raw.startSeconds < 0)) {
+          pushIssue(errors, 'error', startCode, `${layerPath}.startSeconds`, `${raw.type === 'overlay' ? 'Overlay' : 'Image'} startSeconds must be a finite number greater than or equal to 0.`);
+        }
+        if (raw.durationSeconds !== undefined && raw.durationSeconds !== null && (!isFiniteNumber(raw.durationSeconds) || raw.durationSeconds <= 0)) {
+          pushIssue(errors, 'error', durationCode, `${layerPath}.durationSeconds`, `${raw.type === 'overlay' ? 'Overlay' : 'Image'} durationSeconds must be a finite number greater than 0.`);
+        }
       }
 
       const localPath = typeof raw.localPath === 'string' ? raw.localPath.trim() : '';

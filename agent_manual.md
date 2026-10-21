@@ -24,6 +24,7 @@ the finished MP4. Presenter generation is part of that production run.
 | Reference images | Yes | `create_reference` (base64 JSON) |
 | Music select/generate/clear | Yes | `manage_project_music` |
 | Per-scene video submit/poll/cancel | Yes | `generate_video`, `get_generation_job`, `cancel_video` |
+| Motion Canvas template list/render/attach | Yes | `list_animation_templates`, `render_animation_template`, `attach_animation` |
 | Full production incl. render and final compose | Yes | `run_production` |
 | Presenter authoring | Yes | `update_project` with a complete `presenter` object |
 | Presenter generation and polling | Yes, only inside a production run | `run_production` with `providers.presenter` |
@@ -129,7 +130,7 @@ text.
 
 ## 4. Tool catalog
 
-There are 19 tools: 7 read-only, 9 authoring, 3 production.
+There are 23 tools: 8 read-only, 12 authoring, 3 production.
 
 ### Read-only
 
@@ -142,6 +143,7 @@ There are 19 tools: 7 read-only, 9 authoring, 3 production.
 | `get_production_plan` | `{ projectId }` | `{ projectId, report }` with action statuses and dependencies |
 | `get_project_compositions` | `{ projectId, compositionId? }` | `{ projectId, available, latest, compositions }` |
 | `get_generation_job` | `{ projectId, attemptId }` | Current video attempt state |
+| `list_animation_templates` | `{}` | `{ templates }` with id, destination, output, allowedParamKeys, paramsSchema, defaults |
 
 `get_project_compositions` entries carry `compositionId`, `createdAt`,
 `duration`, `width`, `height`, `fps`, `sceneCount`, `filesize`, and
@@ -167,6 +169,8 @@ resubmit a live provider job.
 | `import_studio_assets` | `{ projectId, fileNames }` |
 | `generate_video` | `{ projectId, sceneId, regenerate?, provider?, model?, mode? }` |
 | `cancel_video` | `{ projectId, sceneId }` |
+| `render_animation_template` | `{ projectId, templateId, params? }` |
+| `attach_animation` | `{ projectId, sceneId, assetId, destination, startSeconds?, durationSeconds?, scale?, position?, rect? }` |
 
 `manage_project_music` accepts `action: "generate" | "regenerate" | "select" |
 "clear"`, plus `prompt`, `musicLengthMs` (3000-600000), `instrumental`, `model`,
@@ -197,6 +201,21 @@ a URL, log, or analytics event. It is returned only once.
 `generate_video` is the manual single-scene path. Submit once, then poll with
 `get_generation_job`. A scene with an active job returns `CONFLICT`, so a second
 paid submit cannot start.
+
+`list_animation_templates` returns the server-owned Motion Canvas catalog.
+Known ids are `northwind_arr_chart` (opaque 1920x1080 H.264 bigscreen) and
+`nix_overlay` (transparent 520x780 VP9/WebM overlay). Do not invent ids.
+
+`render_animation_template` renders one catalog template into a project asset
+through the local headless Motion Canvas pipeline. `params` is optional
+structured JSON merged with catalog defaults. Unknown keys, generated code,
+and unsafe paths are rejected. A failed render does not attach anything.
+
+`attach_animation` writes that asset onto `scene.composition`.
+`destination=bigscreen` updates `studio-screen` (`type: image`, z=10).
+`destination=overlay` updates `studio-overlay` (`type: overlay`, z=25,
+rect default `{x:1648,y:200,width:260,height:390}`). Presenter PiP and desk
+stay unchanged. Timed playback uses `startSeconds` / `durationSeconds`.
 
 ### Production
 
@@ -516,7 +535,23 @@ get_generation_job              // repeat the same attemptId until terminal
 cancel_video                    // only when cancellation is intended
 ```
 
-### D. Download the final file
+### D. Motion Canvas chart + Nix overlay
+
+```text
+list_animation_templates
+render_animation_template { templateId: "northwind_arr_chart" }
+attach_animation { destination: "bigscreen", startSeconds: 0, durationSeconds: 5 }
+render_animation_template { templateId: "nix_overlay" }
+attach_animation { destination: "overlay", startSeconds: 0.2, durationSeconds: 4 }
+get_scene
+run_production { mode: "mock" }
+get_project_compositions
+```
+
+Do not eval TypeScript, do not call a shell, and do not invent template ids.
+Use only the assetId/localPath returned by `render_animation_template`.
+
+### E. Download the final file
 
 ```bash
 # Use the token the app and MCP share.

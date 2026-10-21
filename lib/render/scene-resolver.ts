@@ -391,6 +391,12 @@ function resolveSceneComposition(project: Project, scene: Scene): { composition?
       issues.push(createSceneIssue('scene.composition.asset.missing', `Enabled ${layer.type} layer has no assetId or localPath.`, 'warning'));
     }
     const mediaKind = resolved.assetPath && /\.(mp4|webm|mov|mkv)$/i.test(resolved.assetPath) ? 'video' : 'image';
+    const timed = layer.type === 'overlay' || layer.type === 'image'
+      ? {
+          startSeconds: layer.startSeconds,
+          durationSeconds: layer.durationSeconds
+        }
+      : {};
     layers.push({
       id: layer.id,
       type: layer.type,
@@ -400,7 +406,8 @@ function resolveSceneComposition(project: Project, scene: Scene): { composition?
       fit: layer.fit,
       assetId: resolved.assetId,
       assetPath: resolved.assetPath,
-      mediaKind: resolved.assetPath ? mediaKind : undefined
+      mediaKind: resolved.assetPath ? mediaKind : undefined,
+      ...timed
     });
   }
 

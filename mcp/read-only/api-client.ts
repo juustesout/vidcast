@@ -1,3 +1,4 @@
+import type { AnimationTemplateSummary } from '@/lib/animation/types';
 import type { Project } from '@/lib/types/render';
 import type { ProjectSummary } from '@/lib/storage/project-store';
 import type { ProjectValidationReport } from '@/lib/validation/project-validation-report';
@@ -26,6 +27,10 @@ interface ApiErrorPayload {
   code?: string;
 }
 
+interface AnimationTemplatesPayload {
+  templates?: AnimationTemplateSummary[];
+}
+
 interface GenerationJobPayload {
   sceneId?: string;
   generationAttemptId?: string;
@@ -46,6 +51,7 @@ export interface AppApiClient {
   getValidationReport(projectId: string): Promise<ProjectValidationReport>;
   getProductionPlan(projectId: string): Promise<ProductionPlanReport>;
   getGenerationJob(projectId: string, attemptId: string): Promise<GetGenerationJobResponse>;
+  listAnimationTemplates(): Promise<AnimationTemplateSummary[]>;
 }
 
 export interface HttpAppApiClientOptions {
@@ -193,5 +199,15 @@ export class HttpAppApiClient implements AppApiClient {
       errorMessage: payload.errorMessage,
       lastPolledAt: payload.lastPolledAt
     };
+  }
+
+  async listAnimationTemplates(): Promise<AnimationTemplateSummary[]> {
+    const payload = (await this.request('/api/animation-templates')) as AnimationTemplatesPayload;
+    if (!Array.isArray(payload.templates)) {
+      throw new ReadOnlyMcpToolError('API_ERROR', 'Invalid animation templates response payload.', {
+        endpoint: '/api/animation-templates'
+      });
+    }
+    return payload.templates;
   }
 }

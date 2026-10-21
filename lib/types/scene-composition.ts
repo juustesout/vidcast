@@ -2,7 +2,7 @@ export const SCENE_COMPOSITION_SCHEMA_VERSION = 1;
 
 export type SceneCompositionSchemaVersion = typeof SCENE_COMPOSITION_SCHEMA_VERSION;
 
-export type SceneCompositionLayerType = 'background' | 'image' | 'presenter' | 'foreground';
+export type SceneCompositionLayerType = 'background' | 'image' | 'presenter' | 'overlay' | 'foreground';
 
 export type SceneCompositionFit = 'contain' | 'cover';
 
@@ -37,6 +37,8 @@ export interface SceneCompositionMediaLayer extends SceneCompositionLayerBase {
   localPath?: string;
   rect: SceneCompositionRect;
   fit: SceneCompositionFit;
+  startSeconds?: number;
+  durationSeconds?: number;
 }
 
 export interface SceneCompositionPresenterLayer extends SceneCompositionLayerBase {
@@ -50,7 +52,20 @@ export interface SceneCompositionPresenterLayer extends SceneCompositionLayerBas
   fit?: SceneCompositionFit;
 }
 
-export type SceneCompositionLayer = SceneCompositionMediaLayer | SceneCompositionPresenterLayer;
+export interface SceneCompositionOverlayLayer extends SceneCompositionLayerBase {
+  type: 'overlay';
+  assetId?: string;
+  localPath?: string;
+  rect: SceneCompositionRect;
+  fit: SceneCompositionFit;
+  startSeconds?: number;
+  durationSeconds?: number;
+}
+
+export type SceneCompositionLayer =
+  | SceneCompositionMediaLayer
+  | SceneCompositionPresenterLayer
+  | SceneCompositionOverlayLayer;
 
 export interface SceneCompositionSpec {
   version: SceneCompositionSchemaVersion;
