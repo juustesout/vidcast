@@ -73,7 +73,16 @@ function createProject(): Project {
   };
 }
 
-function createInMemoryDependencies(project: Project, behavior?: { providerFails?: boolean; durationSeconds?: number; providerError?: Error }) {
+const SAMPLE_ALIGNMENT = {
+  characters: {
+    characters: ['H', 'i'],
+    characterStartTimesSeconds: [0, 0.1],
+    characterEndTimesSeconds: [0.1, 0.3]
+  },
+  words: [{ word: 'Hi', startSeconds: 0, endSeconds: 0.3 }]
+};
+
+function createInMemoryDependencies(project: Project, behavior?: { providerFails?: boolean; durationSeconds?: number; providerError?: Error; alignment?: typeof SAMPLE_ALIGNMENT }) {
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
 
@@ -150,7 +159,8 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
             format: 'wav' as const,
             data: buildSilentWav(durationSeconds * 1000),
             duration: durationSeconds,
-            providerRequestId: 'req-1'
+            providerRequestId: 'req-1',
+            alignment: behavior?.alignment
           };
         }
       };
@@ -241,5 +251,24 @@ describe('narration generation service', () => {
     expect(scene.narration?.duration).toBe(3.1);
     expect(scene.duration).toBe(2);
     expect(deps.state.project.assets.length).toBe(2);
+  });
+
+  it('persists provider alignment with the generated audio and does not invent timings when missing', async () => {
+    const withAlignment = createInMemoryDependencies(createProject(), { alignment: SAMPLE_ALIGNMENT });
+    await generateSceneNarration(createProject().id, 'scene-1', { regenerate: true }, {
+      store: withAlignment.store,
+      media: withAlignment.media,
+      registry: withAlignment.registry as never
+    });
+    expect(withAlignment.state.project.scenes[0].narration?.alignment?.words).toEqual(SAMPLE_ALIGNMENT.words);
+    expect(withAlignment.state.project.scenes[0].narration?.attempts?.at(-1)?.alignment?.words).toEqual(SAMPLE_ALIGNMENT.words);
+
+    const withoutAlignment = createInMemoryDependencies(createProject());
+    await generateSceneNarration(createProject().id, 'scene-1', { regenerate: true }, {
+      store: withoutAlignment.store,
+      media: withoutAlignment.media,
+      registry: withoutAlignment.registry as never
+    });
+    expect(withoutAlignment.state.project.scenes[0].narration?.alignment).toBeUndefined();
   });
 });

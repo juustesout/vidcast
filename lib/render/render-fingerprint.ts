@@ -30,7 +30,11 @@ export function createSceneRenderFingerprint(plan: RenderPlan, scene: RenderPlan
       transition: scene.transition,
       overlay: scene.overlay,
       logo: scene.logo,
-      composition: scene.composition
+      composition: scene.composition,
+      karaoke: {
+        subtitlesEnabled: plan.subtitlesEnabled !== false,
+        words: scene.narration?.alignment?.words ?? []
+      }
     },
     renderer: 'ffmpeg'
   });

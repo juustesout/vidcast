@@ -13,6 +13,7 @@ import { createSceneRenderFingerprint } from './render-fingerprint';
 import { sceneDurationMatches } from './scene-timing';
 import { getSceneRenderTimeoutMs } from './render-timeouts';
 import { buildSceneOverlayFilter } from './text-overlay';
+import { buildSceneKaraokeFilter } from './karaoke';
 import { buildLogoOverlayFilter, resolveLogoGeometry } from './logo-overlay';
 import { buildStudioOverlayFilter, createStudioOverlaySvg } from './studio-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
@@ -721,16 +722,24 @@ export class LocalFFmpegRenderer implements Renderer {
             ? plan.studio.screen.x + plan.studio.screen.width / 2
             : undefined
       });
+      const karaokeFilter = await buildSceneKaraokeFilter(scene, {
+        width: options.sceneWidth,
+        height: options.sceneHeight,
+        duration: scene.duration,
+        tempDir: options.tempDir,
+        subtitlesEnabled: plan.subtitlesEnabled
+      });
+      const combinedOverlayFilter = [overlayFilter, karaokeFilter].filter(Boolean).join(',') || undefined;
 
       let args: string[];
       if (scene.composition) {
-        args = await buildCompositionSceneArgs(plan, scene, options, this.runtime, overlayFilter, logoPath);
+        args = await buildCompositionSceneArgs(plan, scene, options, this.runtime, combinedOverlayFilter, logoPath);
       } else {
         const sourcePath = await resolveSceneSourcePath(plan, scene, options);
         const studioPath = await resolveStudioOverlayPath(plan, options);
         args = sourceIsVideo(scene)
-          ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, overlayFilter, logoPath, studioPath, plan.studio)
-          : buildStillArgs(scene, options, sourcePath, overlayFilter, logoPath, studioPath, plan.studio);
+          ? await buildVideoPipeline(scene, options, sourcePath, this.runtime, combinedOverlayFilter, logoPath, studioPath, plan.studio)
+          : buildStillArgs(scene, options, sourcePath, combinedOverlayFilter, logoPath, studioPath, plan.studio);
       }
 
       const command = this.runtime.ffmpegPath;

@@ -10,9 +10,9 @@ import { ElevenLabsTextToSpeechProvider } from '@/lib/ai/text-to-speech/elevenla
 // of spending real narration credits.
 
 function audioResponse(): Response {
-  return new Response(new Uint8Array([0x49, 0x44, 0x33, 0x04]), {
+  return new Response(JSON.stringify({ audio_base64: Buffer.from([0x49, 0x44, 0x33, 0x04]).toString('base64') }), {
     status: 200,
-    headers: { 'content-type': 'audio/mpeg' }
+    headers: { 'content-type': 'application/json' }
   });
 }
 

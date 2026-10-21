@@ -354,6 +354,7 @@ export interface RenderPlan {
   issues: RenderIssue[];
   seed?: number;
   audio?: AudioMixSettings;
+  subtitlesEnabled?: boolean;
 }
 
 export interface VideoPlan extends RenderPlan {

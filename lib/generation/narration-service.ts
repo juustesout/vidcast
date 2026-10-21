@@ -348,6 +348,7 @@ export async function generateSceneNarration(
           format: outputFormat,
           audioAssetId: generatedAsset.id,
           duration: generatedAsset.duration,
+          alignment: synthesized.alignment,
           status: 'generated',
           lastAttemptId: attemptId,
           error: undefined,
@@ -359,7 +360,8 @@ export async function generateSceneNarration(
             providerRequestId: synthesized.providerRequestId,
             duration: generatedAsset.duration,
             mimeType: generatedAsset.mimeType,
-            audioAssetId: generatedAsset.id
+            audioAssetId: generatedAsset.id,
+            alignment: synthesized.alignment
           } : attempt)
         }
       }));

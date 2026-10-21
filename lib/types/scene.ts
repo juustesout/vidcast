@@ -88,6 +88,23 @@ export interface NarrationSegment {
   estimatedDurationSeconds: number;
 }
 
+export interface NarrationCharacterAlignment {
+  characters: string[];
+  characterStartTimesSeconds: number[];
+  characterEndTimesSeconds: number[];
+}
+
+export interface NarrationWordTiming {
+  word: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface NarrationAlignment {
+  characters: NarrationCharacterAlignment;
+  words: NarrationWordTiming[];
+}
+
 export interface NarrationSpec {
   // Production copy for this scene only.
   // Story/beats script source lives in Project.explainer.story.
@@ -100,6 +117,7 @@ export interface NarrationSpec {
   lastAttemptId?: string;
   error?: string;
   duration?: number;
+  alignment?: NarrationAlignment;
   attempts?: NarrationGenerationAttempt[];
 }
 
@@ -114,6 +132,7 @@ export interface NarrationGenerationAttempt {
   mimeType?: string;
   duration?: number;
   audioAssetId?: string;
+  alignment?: NarrationAlignment;
   createdAt: string;
   completedAt?: string;
   error?: string;

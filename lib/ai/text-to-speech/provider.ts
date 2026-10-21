@@ -1,3 +1,5 @@
+import type { NarrationAlignment, NarrationCharacterAlignment } from '@/lib/types/scene';
+
 export type TextToSpeechFormat = 'mp3' | 'wav' | 'm4a';
 
 export interface TextToSpeechRequest {
@@ -22,6 +24,8 @@ export interface TextToSpeechResult {
   data: Buffer;
   duration?: number;
   providerRequestId?: string;
+  alignment?: NarrationAlignment;
+  characterAlignment?: NarrationCharacterAlignment;
   metadata?: Record<string, unknown>;
 }
 

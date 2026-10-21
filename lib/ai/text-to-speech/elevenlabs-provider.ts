@@ -1,5 +1,6 @@
 import { mediaMetadataReader } from '@/lib/media/metadata-reader';
 import { resolveProviderConcurrencyLimit, withKeyedLimit } from '@/lib/concurrency/keyed-limiter';
+import { buildPersistedNarrationAlignment, parseCharacterAlignment } from './alignment';
 import { TextToSpeechProviderError, type TextToSpeechFormat, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -145,12 +146,12 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       response = await withKeyedLimit(`tts:${this.providerId}`, this.concurrencyLimit, async () => {
         const { signal, cleanup } = createRequestSignal(options?.signal, this.timeoutMs);
         try {
-          return await fetch(`${this.baseUrl}/text-to-speech/${encodeURIComponent(request.voiceId)}`, {
+          return await fetch(`${this.baseUrl}/text-to-speech/${encodeURIComponent(request.voiceId)}/with-timestamps?output_format=${encodeURIComponent(resolved.outputFormat)}`, {
             method: 'POST',
             headers: {
               'xi-api-key': apiKey,
               'Content-Type': 'application/json',
-              Accept: resolved.mimeType
+              Accept: 'application/json'
             },
             body: JSON.stringify({
               text: request.text,
@@ -178,23 +179,55 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       throw classifyHttpError(response.status, parseErrorMessage(payload));
     }
 
-    const mimeType = response.headers.get('content-type') || resolved.mimeType;
     const providerRequestId = response.headers.get('request-id') || response.headers.get('x-request-id') || undefined;
-    const data = Buffer.from(await response.arrayBuffer());
-    const metadata = await mediaMetadataReader.read(data, `narration.${resolved.format}`, mimeType, 'audio');
+    const payload = (await response.json().catch(() => null)) as unknown;
+    const parsed = parseTimestampedSpeechPayload(payload);
+    if (!parsed) {
+      throw new TextToSpeechProviderError('ElevenLabs timestamped speech response was missing audio.', 502, 'PROVIDER_FAILED');
+    }
+
+    const mimeType = resolved.mimeType;
+    const metadata = await mediaMetadataReader.read(parsed.data, `narration.${resolved.format}`, mimeType, 'audio');
+    const alignment = buildPersistedNarrationAlignment(parsed.alignment);
 
     return {
       provider: this.providerId,
       model: request.model || this.model,
       mimeType,
       format: resolved.format,
-      data,
+      data: parsed.data,
       duration: metadata.duration,
       providerRequestId,
+      alignment,
+      characterAlignment: parseCharacterAlignment(parsed.alignment),
       metadata: {
         outputFormat: resolved.outputFormat,
-        requestedFormat: request.format
+        requestedFormat: request.format,
+        alignmentPresent: Boolean(alignment)
       }
     };
   }
+}
+
+function parseTimestampedSpeechPayload(payload: unknown): { data: Buffer; alignment?: unknown } | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+
+  const body = payload as { audio_base64?: unknown; audio?: unknown; alignment?: unknown; normalized_alignment?: unknown };
+  const encoded = typeof body.audio_base64 === 'string'
+    ? body.audio_base64
+    : typeof body.audio === 'string'
+      ? body.audio
+      : undefined;
+  if (!encoded) {
+    return undefined;
+  }
+
+  const data = Buffer.from(encoded, 'base64');
+  if (data.byteLength === 0) {
+    return undefined;
+  }
+
+  return { data, alignment: body.alignment ?? body.normalized_alignment };
 }

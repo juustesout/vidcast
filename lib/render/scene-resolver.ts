@@ -500,7 +500,8 @@ export function resolveRenderPlan(project: Project): RenderPlan {
     narration: project.narration,
     issues,
     seed: project.renderSettings.seed,
-    audio: normalizeAudioMix(project.renderSettings.audio)
+    audio: normalizeAudioMix(project.renderSettings.audio),
+    subtitlesEnabled: project.renderSettings.subtitlesEnabled
   };
 }
 

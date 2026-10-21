@@ -1,3 +1,4 @@
+import { buildPersistedNarrationAlignment } from '@/lib/ai/text-to-speech/alignment';
 import { DEFAULT_RENDER_SETTINGS } from '@/lib/constants';
 import { normalizeExplainer } from '@/lib/projects/explainer-normalization';
 import { normalizePresenterClips, normalizeProjectPresenter } from '@/lib/presenter/config';
@@ -306,6 +307,7 @@ function normalizeNarration(narration: string | NarrationSpec | undefined): Narr
       mimeType: attempt.mimeType,
       duration: attempt.duration,
       audioAssetId: attempt.audioAssetId,
+      alignment: buildPersistedNarrationAlignment(attempt.alignment),
       createdAt: attempt.createdAt ?? nowIso(),
       completedAt: attempt.completedAt,
       error: attempt.error
@@ -328,6 +330,7 @@ function normalizeNarration(narration: string | NarrationSpec | undefined): Narr
     lastAttemptId: narration.lastAttemptId,
     error: narration.error,
     duration: narration.duration,
+    alignment: buildPersistedNarrationAlignment(narration.alignment),
     attempts
   };
 }

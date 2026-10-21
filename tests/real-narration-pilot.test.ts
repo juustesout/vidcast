@@ -128,9 +128,9 @@ describe('real narration pilot service path', () => {
   it('issues exactly one real request and persists validated audio when enabled', async () => {
     enablePilot();
     const fetchMock = vi.fn(async () => {
-      return new Response(new Uint8Array(PILOT_MP3), {
+      return new Response(JSON.stringify({ audio_base64: PILOT_MP3.toString('base64') }), {
         status: 200,
-        headers: { 'content-type': 'audio/mpeg', 'x-request-id': 'req-narration-pilot' }
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req-narration-pilot' }
       });
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -162,7 +162,7 @@ describe('real narration pilot service path', () => {
     enablePilot();
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(new Uint8Array(PILOT_MP3), { status: 200, headers: { 'content-type': 'audio/mpeg' } }))
+      vi.fn(async () => new Response(JSON.stringify({ audio_base64: PILOT_MP3.toString('base64') }), { status: 200, headers: { 'content-type': 'application/json' } }))
     );
 
     const { projectId, sceneId } = await createNarrationProject();
