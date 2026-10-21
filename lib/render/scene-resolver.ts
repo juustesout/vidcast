@@ -8,6 +8,7 @@ import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mergeGraphicStyles } from './graphic-style';
 import { resolveStudioOverlay } from './studio-overlay';
 import { isSafeAssetPath, sortCompositionLayers, STUDIO_COMPOSITION_CANVAS } from './scene-composition';
+import { applyStudioPresetAssets } from './studio-asset-resolver';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -330,12 +331,13 @@ function resolveScenePresenterClip(project: Project, scene: Scene): { assetId?: 
 }
 
 function resolveSceneComposition(project: Project, scene: Scene): { composition?: RenderPlanSceneComposition; issues: RenderPlanSceneStateIssue[] } {
-  if (!scene.composition) {
+  const composition = applyStudioPresetAssets(scene.composition, project.assets) ?? scene.composition;
+  if (!composition) {
     return { issues: [] };
   }
 
   const issues: RenderPlanSceneStateIssue[] = [];
-  const canvas = scene.composition.canvas ?? (scene.composition.preset === 'studio' ? STUDIO_COMPOSITION_CANVAS : {
+  const canvas = composition.canvas ?? (composition.preset === 'studio' ? STUDIO_COMPOSITION_CANVAS : {
     width: project.renderSettings.width,
     height: project.renderSettings.height
   });
@@ -344,7 +346,7 @@ function resolveSceneComposition(project: Project, scene: Scene): { composition?
   let presenterClipDuration: number | undefined;
   let presenterStartOffsetSeconds: number | undefined;
 
-  for (const layer of sortCompositionLayers(scene.composition.layers)) {
+  for (const layer of sortCompositionLayers(composition.layers)) {
     if (layer.type === 'presenter') {
       const clip = layer.enabled !== false ? resolveScenePresenterClip(project, scene) : { startOffsetSeconds: 0, issues: [] as RenderPlanSceneStateIssue[] };
       issues.push(...clip.issues);
@@ -413,8 +415,8 @@ function resolveSceneComposition(project: Project, scene: Scene): { composition?
 
   return {
     composition: {
-      version: scene.composition.version,
-      preset: scene.composition.preset,
+      version: composition.version,
+      preset: composition.preset,
       canvas,
       layers,
       presenterAssetId,

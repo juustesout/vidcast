@@ -4,6 +4,7 @@ import { isLogoOverlayPosition } from '@/lib/render/logo-overlay';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
 import { STUDIO_SCREEN_LIMITS } from '@/lib/render/studio-overlay';
 import { validateSceneComposition } from '@/lib/render/scene-composition';
+import { applyStudioPresetAssets, resolveStudioAssets } from '@/lib/render/studio-asset-resolver';
 import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming } from '@/lib/render/scene-timing';
 import type { ExplainerSpec } from '@/lib/types/explainer';
 import type { Project } from '@/lib/types/render';
@@ -485,7 +486,13 @@ export function validateProject(project: Project): RenderValidationResult {
     }
 
     if (scene.composition !== undefined) {
-      validateSceneComposition(scene.composition, `scenes.${scene.id}.composition`, project, errors, warnings);
+      validateSceneComposition(
+        applyStudioPresetAssets(scene.composition, project.assets) ?? scene.composition,
+        `scenes.${scene.id}.composition`,
+        project,
+        errors,
+        warnings
+      );
     }
 
     if (scene.visual?.kind === 'graphic') {
@@ -622,6 +629,27 @@ export function validateProject(project: Project): RenderValidationResult {
   }
   validateGraphicStyle(project.renderSettings.graphicStyle, 'renderSettings.graphicStyle', errors, 'project.graphicStyle');
   validateStudioOverlay(project.renderSettings.studio, 'renderSettings.studio', errors);
+
+  const studioAssets = resolveStudioAssets(project.assets);
+  const usesStudioPreset = project.scenes.some((scene) => scene.composition?.preset === 'studio');
+  if (usesStudioPreset && studioAssets.intro) {
+    pushIssue(
+      warnings,
+      'warning',
+      'studio.asset.intro.unused',
+      `assets.${studioAssets.intro.id}`,
+      'Imported studio_intro.png is stored but production has no intro segment path; it is not placed on studio scenes.'
+    );
+  }
+  if (usesStudioPreset && studioAssets.outtro) {
+    pushIssue(
+      warnings,
+      'warning',
+      'studio.asset.outtro.unused',
+      `assets.${studioAssets.outtro.id}`,
+      'Imported studio_outtro.png is stored but production has no outro segment path; it is not placed on studio scenes.'
+    );
+  }
 
   validatePresenter(project, errors, warnings);
 

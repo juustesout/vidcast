@@ -4,6 +4,7 @@ import { normalizePresenterClips, normalizeProjectPresenter } from '@/lib/presen
 import { normalizeAudioMix } from '@/lib/render/audio-mix';
 import { isRenderFit } from '@/lib/render/fit-policy';
 import { normalizeSceneComposition } from '@/lib/render/scene-composition';
+import { applyStudioPresetAssets } from '@/lib/render/studio-asset-resolver';
 import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
@@ -461,6 +462,11 @@ export function normalizeProject(project: Project): Project {
       studio: normalizeStudioOverlay(project.renderSettings?.studio)
     }
   };
+
+  normalizedProject.scenes = normalizedProject.scenes.map((scene) => ({
+    ...scene,
+    composition: applyStudioPresetAssets(scene.composition, normalizedProject.assets)
+  }));
 
   normalizedProject.explainer = normalizeExplainer(normalizedProject);
 

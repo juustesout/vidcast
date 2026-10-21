@@ -9,6 +9,7 @@ import { evaluatePresenterPaidCostPrecondition } from '@/lib/presenter/pricing';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus } from '@/lib/render/render-status';
 import { sceneBakesPresenter } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
+import { applyStudioPresetAssets } from '@/lib/render/studio-asset-resolver';
 import type { Project } from '@/lib/types/render';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
 import type { StockSelection } from '@/lib/types/stock';
@@ -596,7 +597,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       }
     }
 
-    if (renderExecute && sceneBakesPresenter(scene.composition)) {
+    if (renderExecute && sceneBakesPresenter(applyStudioPresetAssets(scene.composition, project.assets) ?? scene.composition)) {
       const presenterSubmit = actions.find((action) => action.sceneId === scene.id && action.type === 'presenter_submit');
       const presenterPoll = actions.find((action) => action.sceneId === scene.id && action.type === 'presenter_poll');
       const presenterPending = Boolean(

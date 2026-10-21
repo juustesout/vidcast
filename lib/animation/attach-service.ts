@@ -5,6 +5,8 @@ import {
   STUDIO_LAYER_IDS,
   STUDIO_OVERLAY_RECT
 } from '@/lib/render/scene-composition';
+import { applyStudioPresetAssets } from '@/lib/render/studio-asset-resolver';
+import type { Asset } from '@/lib/types/asset';
 import { projectStore } from '@/lib/storage/project-store';
 import type { SceneCompositionLayer, SceneCompositionMediaLayer, SceneCompositionOverlayLayer, SceneCompositionRect, SceneCompositionSpec } from '@/lib/types/scene-composition';
 import type { Scene } from '@/lib/types/scene';
@@ -53,19 +55,15 @@ function replaceOrInsertLayer(layers: SceneCompositionLayer[], next: SceneCompos
   return [...layers, next];
 }
 
-function studioBaseFromScene(scene: Scene): SceneCompositionSpec {
+function studioBaseFromScene(scene: Scene, assets: readonly Asset[]): SceneCompositionSpec {
   const existing = scene.composition;
-  if (existing?.preset === 'studio') {
-    return {
-      ...existing,
-      layers: existing.layers.slice()
-    };
-  }
-
-  return createStudioComposition({
-    imageLocalPath: undefined,
-    overlayEnabled: false
-  });
+  const base = existing?.preset === 'studio'
+    ? { ...existing, layers: existing.layers.slice() }
+    : createStudioComposition({
+        imageLocalPath: undefined,
+        overlayEnabled: false
+      });
+  return applyStudioPresetAssets(base, assets) ?? base;
 }
 
 export async function attachAnimationToScene(raw: unknown): Promise<AnimationAttachResult> {
@@ -117,7 +115,7 @@ export async function attachAnimationToScene(raw: unknown): Promise<AnimationAtt
       });
     }
 
-    const composition = studioBaseFromScene(currentScene);
+    const composition = studioBaseFromScene(currentScene, current.assets);
     if (input.destination === 'overlay') {
       const overlay: SceneCompositionOverlayLayer = {
         id: STUDIO_LAYER_IDS.overlay,

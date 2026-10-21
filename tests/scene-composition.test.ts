@@ -373,26 +373,18 @@ describe('scene composition validation', () => {
     const project = makeProject([
       makeScene('scene-1', { kind: 'blank' }, {
         composition: createStudioComposition({
-          backgroundLocalPath: undefined,
-          backgroundAssetId: undefined,
-          imageAssetId: 'screen',
-          imageLocalPath: 'assets/studio/screen.png',
-          foregroundLocalPath: undefined,
-          foregroundAssetId: undefined,
-          deskEnabled: false
+          backgroundAssetId: 'studio_back',
+          imageAssetId: undefined,
+          imageLocalPath: undefined,
+          foregroundAssetId: 'studio_desk',
+          deskEnabled: true
         })
       })
     ]);
-    const background = project.scenes[0].composition?.layers.find((layer) => layer.type === 'background');
-    expect(background).toMatchObject({ enabled: true, localPath: 'assets/studio/studio_back.png' });
-
-    const emptyBackground = {
-      ...project.scenes[0].composition!,
-      layers: project.scenes[0].composition!.layers.map((layer) => (
-        layer.type === 'background' ? { ...layer, localPath: undefined, assetId: undefined } : layer
-      ))
-    };
-    project.scenes[0].composition = emptyBackground;
+    const image = project.scenes[0].composition?.layers.find((layer) => layer.type === 'image');
+    expect(image).toMatchObject({ enabled: true });
+    expect(image && 'localPath' in image ? image.localPath : undefined).toBeUndefined();
+    expect(image && 'assetId' in image ? image.assetId : undefined).toBeUndefined();
 
     const result = validateProject(project);
     expect(result.warnings.some((issue) => issue.code === 'scene.composition.asset.missing')).toBe(true);
