@@ -230,7 +230,7 @@ export interface GraphicVisual {
 
 export type HtmlStillBackground = 'opaque' | 'transparent';
 
-export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'headline_card' | 'comparison_card' | 'stat-card';
+export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'headline_card' | 'comparison_card' | 'stat-card';
 
 export type HtmlStillTrendDirection = 'up' | 'down' | 'flat';
 
@@ -274,7 +274,43 @@ export interface HtmlComparisonTemplateData {
   textColor?: string;
 }
 
-export type HtmlStillTemplateData = HtmlHeadlineTemplateData | HtmlStatCardTemplateData | HtmlComparisonTemplateData;
+export type HtmlChartKind = 'bar' | 'line';
+
+export interface HtmlChartPoint {
+  label: string;
+  value: number;
+}
+
+export interface HtmlChartTemplateData {
+  title: string;
+  kind: HtmlChartKind;
+  points: HtmlChartPoint[];
+  unit?: string;
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export interface HtmlTimelineEvent {
+  label: string;
+  detail: string;
+  date?: string;
+}
+
+export interface HtmlTimelineTemplateData {
+  title: string;
+  events: HtmlTimelineEvent[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export type HtmlStillTemplateData =
+  | HtmlHeadlineTemplateData
+  | HtmlStatCardTemplateData
+  | HtmlComparisonTemplateData
+  | HtmlChartTemplateData
+  | HtmlTimelineTemplateData;
 
 export interface HtmlVisual {
   kind: 'html';

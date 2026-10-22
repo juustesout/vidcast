@@ -879,6 +879,156 @@ describe('composition scene renderer', () => {
     expect(corner[2]).toBeGreaterThan(120);
   }, 120_000);
 
+  it('places a generated chart template on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('chart', {
+      title: 'ARR',
+      kind: 'bar',
+      unit: 'M',
+      background: '#ff5a5f',
+      points: [
+        { label: 'Q1', value: 12 },
+        { label: 'Q2', value: 18 }
+      ]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-chart.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-chart',
+      imageLocalPath: 'assets/html-chart.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'chart',
+          templateData: { title: 'ARR', kind: 'bar', unit: 'M', background: '#ff5a5f', points: [{ label: 'Q1', value: 12 }, { label: 'Q2', value: 18 }] },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-chart'
+        }
+      })],
+      [
+        makeAsset('html-chart', {
+          filename: 'html-chart.png',
+          localPath: 'assets/html-chart.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-chart-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places a generated timeline template on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('timeline', {
+      title: 'Roadmap',
+      background: '#ff5a5f',
+      events: [
+        { date: 'Jan', label: 'Kickoff', detail: 'Scope locked' },
+        { label: 'Beta', detail: 'First customer' }
+      ]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-timeline.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-timeline',
+      imageLocalPath: 'assets/html-timeline.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'timeline',
+          templateData: { title: 'Roadmap', background: '#ff5a5f', events: [{ date: 'Jan', label: 'Kickoff', detail: 'Scope locked' }, { label: 'Beta', detail: 'First customer' }] },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-timeline'
+        }
+      })],
+      [
+        makeAsset('html-timeline', {
+          filename: 'html-timeline.png',
+          localPath: 'assets/html-timeline.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-timeline-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
   it('fails closed on a missing composition asset file', async () => {
     const composition = createStudioComposition({
       canvas: { width: WIDTH, height: HEIGHT },

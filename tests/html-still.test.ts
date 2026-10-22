@@ -199,6 +199,116 @@ describe('HTML still templates', () => {
     })).toThrow(/same number of features/);
     expect(() => parseHtmlStillTemplateData('headline', { title: 'x', imageAssetId: 'https://example.com/x.png' })).toThrow(/asset id/);
   });
+
+  it('builds a bar chart from typed numeric points', () => {
+    const card = resolveHtmlStillTemplate('chart', {
+      title: 'ARR',
+      kind: 'bar',
+      unit: 'M',
+      points: [
+        { label: 'Q1', value: 12 },
+        { label: 'Q2', value: 18 },
+        { label: 'Q3', value: 9 }
+      ]
+    });
+    expect(card.markup).toContain('ARR');
+    expect(card.markup).toContain('<svg');
+    expect(card.markup).toContain('<rect');
+    expect(card.markup).toContain('Q1');
+    expect(card.markup).toContain('12');
+    expect(card.markup).not.toContain('<script');
+    const document = wrapHtmlStillDocument({
+      markup: card.markup,
+      css: card.css,
+      width: 1920,
+      height: 1080,
+      background: 'opaque',
+      pageBackground: card.background
+    });
+    expect(document).toContain('<svg');
+    expect(document).not.toMatch(/https?:\/\//i);
+  });
+
+  it('builds a line chart and keeps equal or negative values readable', () => {
+    const equal = resolveHtmlStillTemplate('chart', {
+      title: 'Flat',
+      kind: 'line',
+      points: [
+        { label: 'A', value: 10 },
+        { label: 'B', value: 10 }
+      ]
+    });
+    expect(equal.markup).toContain('<polyline');
+    expect(equal.markup).toContain('10');
+    const mixed = resolveHtmlStillTemplate('chart', {
+      title: 'Delta',
+      kind: 'bar',
+      points: [
+        { label: 'Loss', value: -4 },
+        { label: 'Zero', value: 0 },
+        { label: 'Gain', value: 6 }
+      ]
+    });
+    expect(mixed.markup).toContain('-4');
+    expect(mixed.markup).toContain('Gain');
+  });
+
+  it('builds a vertical timeline and omits missing dates', () => {
+    const card = resolveHtmlStillTemplate('timeline', {
+      title: 'Roadmap',
+      events: [
+        { date: 'Jan', label: 'Kickoff', detail: 'Scope locked' },
+        { label: 'Beta', detail: 'First customer' }
+      ]
+    });
+    expect(card.markup).toContain('Roadmap');
+    expect(card.markup).toContain('Kickoff');
+    expect(card.markup).toContain('Scope locked');
+    expect(card.markup).toContain('date-empty');
+    expect(card.markup).toContain('Beta');
+  });
+
+  it('is deterministic for chart and timeline data', () => {
+    const chart = { title: 'ARR', kind: 'bar' as const, points: [{ label: 'Q1', value: 12 }] };
+    const timeline = { title: 'Roadmap', events: [{ label: 'Kickoff', detail: 'Go' }] };
+    expect(resolveHtmlStillTemplate('chart', chart)).toEqual(resolveHtmlStillTemplate('chart', { ...chart, points: [...chart.points] }));
+    expect(resolveHtmlStillTemplate('timeline', timeline)).toEqual(resolveHtmlStillTemplate('timeline', { ...timeline, events: [...timeline.events] }));
+  });
+
+  it('escapes untrusted chart and timeline text', () => {
+    const chart = resolveHtmlStillTemplate('chart', {
+      title: '<b>ARR</b>',
+      kind: 'bar',
+      points: [{ label: 'Q1 & Q2', value: 3 }]
+    });
+    expect(chart.markup).toContain('&lt;b&gt;ARR&lt;/b&gt;');
+    expect(chart.markup).toContain('Q1 &amp; Q2');
+    expect(chart.markup).not.toContain('<b>ARR</b>');
+    const timeline = resolveHtmlStillTemplate('timeline', {
+      title: 'Plan',
+      events: [{ date: 'Jan', label: '<img>', detail: 'A & B' }]
+    });
+    expect(timeline.markup).toContain('&lt;img&gt;');
+    expect(timeline.markup).toContain('A &amp; B');
+  });
+
+  it('rejects empty, oversized, and non-numeric chart or timeline data', () => {
+    expect(() => parseHtmlStillTemplateData('chart', { title: 'ARR', kind: 'pie', points: [{ label: 'Q1', value: 1 }] })).toThrow(/bar or line/);
+    expect(() => parseHtmlStillTemplateData('chart', { title: 'ARR', kind: 'bar', points: [] })).toThrow(/1-8 points/);
+    expect(() => parseHtmlStillTemplateData('chart', { title: 'ARR', kind: 'bar', points: [{ label: 'Q1', value: '12' }] })).toThrow(/finite number/);
+    expect(() => parseHtmlStillTemplateData('chart', { title: 'ARR', kind: 'bar', points: [{ label: 'Q1', value: Number.NaN }] })).toThrow(/finite number/);
+    expect(() => parseHtmlStillTemplateData('chart', {
+      title: 'ARR',
+      kind: 'bar',
+      points: Array.from({ length: 9 }, (_, index) => ({ label: `P${index}`, value: index }))
+    })).toThrow(/1-8 points/);
+    expect(() => parseHtmlStillTemplateData('timeline', { title: 'Roadmap', events: [] })).toThrow(/1-6 events/);
+    expect(() => parseHtmlStillTemplateData('timeline', { title: 'Roadmap', events: [{ label: 'Only' }] })).toThrow(/detail is required/);
+    expect(() => parseHtmlStillTemplateData('timeline', {
+      title: 'Roadmap',
+      events: Array.from({ length: 7 }, (_, index) => ({ label: `E${index}`, detail: 'x' }))
+    })).toThrow(/1-6 events/);
+  });
 });
 
 describe('HTML still fingerprint', () => {
@@ -276,6 +386,28 @@ describe('HTML still project validation and resolver', () => {
       templateData: { subtitle: 'No title' }
     })));
     expect(missing.errors.some((issue) => issue.code === 'html.template.data.invalid')).toBe(true);
+
+    const emptyChart = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'chart',
+      templateData: { title: 'ARR', kind: 'bar', points: [] }
+    })));
+    expect(emptyChart.errors.some((issue) => issue.code === 'html.template.data.invalid')).toBe(true);
+  });
+
+  it('accepts typed chart and timeline scenes', () => {
+    const chart = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'chart',
+      templateData: { title: 'ARR', kind: 'bar', points: [{ label: 'Q1', value: 12 }] }
+    })));
+    expect(chart.errors).toEqual([]);
+    const timeline = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'timeline',
+      templateData: { title: 'Roadmap', events: [{ label: 'Kickoff', detail: 'Go' }] }
+    })));
+    expect(timeline.errors).toEqual([]);
   });
 
   it('keeps a custom HTML still without a template valid', () => {

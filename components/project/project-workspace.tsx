@@ -91,7 +91,7 @@ interface StockSearchState {
 }
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
-const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison'];
+const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline'];
 
 function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<string, unknown> = {}): Record<string, unknown> {
   const title = typeof previous.title === 'string' ? previous.title : 'Headline';
@@ -111,6 +111,33 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
         { name: 'Before', features: [{ label: 'Metric', value: 'Low' }] },
         { name: 'After', features: [{ label: 'Metric', value: 'High' }] }
       ]
+    };
+  }
+  if (template === 'chart') {
+    return {
+      title: title === 'Headline' ? 'Quarterly ARR' : title,
+      kind: previous.kind === 'line' ? 'line' : 'bar',
+      unit: typeof previous.unit === 'string' ? previous.unit : 'M',
+      points: Array.isArray(previous.points) && previous.points.length > 0
+        ? previous.points
+        : [
+            { label: 'Q1', value: 12 },
+            { label: 'Q2', value: 18 },
+            { label: 'Q3', value: 15 },
+            { label: 'Q4', value: 24 }
+          ]
+    };
+  }
+  if (template === 'timeline') {
+    return {
+      title: title === 'Headline' ? 'Roadmap' : title,
+      events: Array.isArray(previous.events) && previous.events.length > 0
+        ? previous.events
+        : [
+            { date: 'Jan', label: 'Kickoff', detail: 'Scope locked' },
+            { date: 'Mar', label: 'Beta', detail: 'First customer' },
+            { date: 'Jun', label: 'GA', detail: 'Public launch' }
+          ]
     };
   }
   return {
@@ -2627,6 +2654,156 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                 visual: {
                                   ...scene.visual,
                                   templateData: { ...(scene.visual.templateData ?? {}), items }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'chart' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <SelectField
+                          label="Kind"
+                          value={selectedScene.visual.templateData?.kind === 'line' ? 'line' : 'bar'}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), kind: value }
+                                }
+                              };
+                            })
+                          }
+                          options={['bar', 'line']}
+                        />
+                        <Field
+                          label="Unit"
+                          value={typeof selectedScene.visual.templateData?.unit === 'string' ? selectedScene.visual.templateData.unit : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), unit: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Points (label | value)"
+                          value={Array.isArray(selectedScene.visual.templateData?.points)
+                            ? (selectedScene.visual.templateData.points as Array<{ label?: string; value?: number }>)
+                              .map((point) => `${point.label ?? ''} | ${point.value ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const points = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const [labelPart, valuePart = ''] = line.split('|').map((part) => part.trim());
+                                  const numeric = Number(valuePart);
+                                  return { label: labelPart ?? '', value: Number.isFinite(numeric) ? numeric : 0 };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), points }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'timeline' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Events (date | label | detail)"
+                          value={Array.isArray(selectedScene.visual.templateData?.events)
+                            ? (selectedScene.visual.templateData.events as Array<{ date?: string; label?: string; detail?: string }>)
+                              .map((event) => `${event.date ?? ''} | ${event.label ?? ''} | ${event.detail ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const events = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  if (parts.length === 1) {
+                                    return { label: parts[0] ?? '', detail: '' };
+                                  }
+                                  if (parts.length === 2) {
+                                    return { label: parts[0] ?? '', detail: parts[1] ?? '' };
+                                  }
+                                  return { date: parts[0] || undefined, label: parts[1] ?? '', detail: parts.slice(2).join(' | ') };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), events }
                                 }
                               };
                             })
