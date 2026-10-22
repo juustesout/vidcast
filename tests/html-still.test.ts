@@ -7,7 +7,7 @@ import { renderHtmlStillPng } from '@/lib/render/html-still/chromium-still';
 import { HtmlStillError } from '@/lib/render/html-still/errors';
 import { assertSafeCss, assertSafeHtmlFragment, wrapHtmlStillDocument } from '@/lib/render/html-still/sanitize';
 import * as htmlStillService from '@/lib/render/html-still/service';
-import { resolveHtmlStillTemplate } from '@/lib/render/html-still/templates';
+import { canonicalizeHtmlStillTemplateId, parseHtmlStillTemplateData, resolveHtmlStillTemplate } from '@/lib/render/html-still/templates';
 import { createStudioComposition, STUDIO_BIGSCREEN_RECT, STUDIO_LAYER_IDS } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { clearThrottleStateForTests } from '@/lib/security/access-control';
@@ -108,17 +108,59 @@ describe('HTML still sanitize', () => {
 
 describe('HTML still templates', () => {
   it('builds a 1920x1080 headline card from local data', () => {
-    const card = resolveHtmlStillTemplate('headline_card', {
+    const card = resolveHtmlStillTemplate('headline', {
       kicker: 'Live',
+      title: 'Northwind ARR',
+      subtitle: 'Q5 recap',
+      source: 'Earnings call'
+    });
+    expect(card.markup).toContain('Northwind ARR');
+    expect(card.markup).toContain('Q5 recap');
+    expect(card.markup).toContain('Earnings call');
+    expect(card.markup).not.toContain('<script');
+    expect(card.css).toContain('font-size:92px');
+  });
+
+  it('accepts the P120 headline_card alias', () => {
+    expect(canonicalizeHtmlStillTemplateId('headline_card')).toBe('headline');
+    const card = resolveHtmlStillTemplate('headline_card', {
       title: 'Northwind ARR',
       subtitle: 'Q5 recap'
     });
     expect(card.markup).toContain('Northwind ARR');
-    expect(card.markup).toContain('Q5 recap');
-    expect(card.markup).not.toContain('<script');
   });
 
-  it('builds a comparison card from local rows', () => {
+  it('builds a stat card from typed data', () => {
+    const card = resolveHtmlStillTemplate('stat_card', {
+      label: 'NPS',
+      value: '72',
+      detail: 'Trailing 90 days',
+      trend: 'up',
+      delta: '+8'
+    });
+    expect(card.markup).toContain('NPS');
+    expect(card.markup).toContain('72');
+    expect(card.markup).toContain('Trailing 90 days');
+    expect(card.markup).toContain('+8');
+    expect(card.markup).toContain('trend-up');
+  });
+
+  it('builds a comparison card from named items', () => {
+    const card = resolveHtmlStillTemplate('comparison', {
+      title: 'Before / After',
+      items: [
+        { name: 'Before', features: [{ label: 'ARR', value: '24' }] },
+        { name: 'After', features: [{ label: 'ARR', value: '88' }] }
+      ]
+    });
+    expect(card.markup).toContain('ARR');
+    expect(card.markup).toContain('24');
+    expect(card.markup).toContain('88');
+    expect(card.markup).toContain('Before');
+    expect(card.markup).toContain('After');
+  });
+
+  it('accepts the P120 comparison_card rows alias', () => {
     const card = resolveHtmlStillTemplate('comparison_card', {
       title: 'Before / After',
       rows: [{ label: 'ARR', left: '24', right: '88' }]
@@ -126,6 +168,36 @@ describe('HTML still templates', () => {
     expect(card.markup).toContain('ARR');
     expect(card.markup).toContain('24');
     expect(card.markup).toContain('88');
+  });
+
+  it('is deterministic for the same template data', () => {
+    const data = { title: 'Live', subtitle: 'Q5', source: 'IR' };
+    expect(resolveHtmlStillTemplate('headline', data)).toEqual(resolveHtmlStillTemplate('headline', { ...data }));
+  });
+
+  it('escapes untrusted template text', () => {
+    const card = resolveHtmlStillTemplate('headline', {
+      title: '<script>alert(1)</script>',
+      subtitle: 'A & B'
+    });
+    expect(card.markup).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(card.markup).toContain('A &amp; B');
+    expect(card.markup).not.toContain('<script>alert(1)</script>');
+  });
+
+  it('rejects unknown templates, missing fields, and invalid comparison data', () => {
+    expect(() => resolveHtmlStillTemplate('unknown' as never, { title: 'x' })).toThrow(HtmlStillError);
+    expect(() => parseHtmlStillTemplateData('headline', {})).toThrow(/title is required/);
+    expect(() => parseHtmlStillTemplateData('stat_card', { label: 'NPS' })).toThrow(/value is required/);
+    expect(() => parseHtmlStillTemplateData('comparison', { title: 'X', items: [{ name: 'Only', features: [{ label: 'A', value: '1' }] }] })).toThrow(/2-4 items/);
+    expect(() => parseHtmlStillTemplateData('comparison', {
+      title: 'X',
+      items: [
+        { name: 'A', features: [{ label: 'One', value: '1' }] },
+        { name: 'B', features: [{ label: 'One', value: '1' }, { label: 'Two', value: '2' }] }
+      ]
+    })).toThrow(/same number of features/);
+    expect(() => parseHtmlStillTemplateData('headline', { title: 'x', imageAssetId: 'https://example.com/x.png' })).toThrow(/asset id/);
   });
 });
 
@@ -147,7 +219,8 @@ describe('HTML still Chromium PNG', () => {
       width: 1920,
       height: 1080,
       background: 'opaque',
-      pageBackground: '#0056a7'
+      pageBackground: '#0056a7',
+      timeoutMs: 45_000
     });
     expect(still.png.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(true);
     const info = await sharp(still.png).metadata();
@@ -191,6 +264,28 @@ describe('HTML still project validation and resolver', () => {
     const project = makeProject(makeHtmlScene({ kind: 'html' }));
     const result = validateProject(project);
     expect(result.errors.some((issue) => issue.code === 'scene.visual.html.source.required')).toBe(true);
+  });
+
+  it('rejects unknown templates and missing typed fields', () => {
+    const unknown = validateProject(makeProject(makeHtmlScene({ kind: 'html', template: 'billboard' as never })));
+    expect(unknown.errors.some((issue) => issue.code === 'scene.visual.html.template.unknown')).toBe(true);
+
+    const missing = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'headline',
+      templateData: { subtitle: 'No title' }
+    })));
+    expect(missing.errors.some((issue) => issue.code === 'html.template.data.invalid')).toBe(true);
+  });
+
+  it('keeps a custom HTML still without a template valid', () => {
+    const project = makeProject(makeHtmlScene({
+      kind: 'html',
+      html: '<div>Custom still</div>',
+      css: '.card{color:#fff}'
+    }));
+    const result = validateProject(project);
+    expect(result.errors.some((issue) => issue.path.includes('visual'))).toBe(false);
   });
 
   it('marks html without a PNG as planned and with a PNG as renderable', () => {

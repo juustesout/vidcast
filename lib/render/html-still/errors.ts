@@ -1,6 +1,8 @@
 export type HtmlStillErrorCode =
   | 'html.invalid'
   | 'html.tooLarge'
+  | 'html.template.unknown'
+  | 'html.template.data.invalid'
   | 'html.chromium.missing'
   | 'html.render.failed'
   | 'html.render.timeout'

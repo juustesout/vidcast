@@ -1,5 +1,6 @@
 import { buildPersistedNarrationAlignment } from '@/lib/ai/text-to-speech/alignment';
 import { DEFAULT_RENDER_SETTINGS } from '@/lib/constants';
+import { isHtmlStillTemplateId } from '@/lib/render/html-still/templates';
 import { normalizeExplainer } from '@/lib/projects/explainer-normalization';
 import { normalizePresenterClips, normalizeProjectPresenter } from '@/lib/presenter/config';
 import { normalizeAudioMix } from '@/lib/render/audio-mix';
@@ -178,9 +179,7 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
   }
 
   if (legacyVisual?.kind === 'html' || scene.type === 'html') {
-    const template = legacyVisual?.template === 'headline_card' || legacyVisual?.template === 'comparison_card'
-      ? legacyVisual.template
-      : undefined;
+    const template = isHtmlStillTemplateId(legacyVisual?.template) ? legacyVisual.template : undefined;
     const background = legacyVisual?.background === 'transparent' ? 'transparent' : legacyVisual?.background === 'opaque' ? 'opaque' : undefined;
     return {
       kind: 'html',

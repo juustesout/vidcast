@@ -230,7 +230,51 @@ export interface GraphicVisual {
 
 export type HtmlStillBackground = 'opaque' | 'transparent';
 
-export type HtmlStillTemplateType = 'headline_card' | 'comparison_card';
+export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'headline_card' | 'comparison_card' | 'stat-card';
+
+export type HtmlStillTrendDirection = 'up' | 'down' | 'flat';
+
+export interface HtmlHeadlineTemplateData {
+  title: string;
+  subtitle?: string;
+  source?: string;
+  kicker?: string;
+  imageAssetId?: string;
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export interface HtmlStatCardTemplateData {
+  label: string;
+  value: string;
+  detail?: string;
+  trend?: HtmlStillTrendDirection;
+  delta?: string;
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export interface HtmlComparisonFeature {
+  label: string;
+  value: string;
+}
+
+export interface HtmlComparisonItem {
+  name: string;
+  features: HtmlComparisonFeature[];
+}
+
+export interface HtmlComparisonTemplateData {
+  title: string;
+  items: HtmlComparisonItem[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export type HtmlStillTemplateData = HtmlHeadlineTemplateData | HtmlStatCardTemplateData | HtmlComparisonTemplateData;
 
 export interface HtmlVisual {
   kind: 'html';

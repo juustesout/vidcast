@@ -91,7 +91,35 @@ interface StockSearchState {
 }
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
-const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline_card', 'comparison_card'];
+const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison'];
+
+function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<string, unknown> = {}): Record<string, unknown> {
+  const title = typeof previous.title === 'string' ? previous.title : 'Headline';
+  if (template === 'stat_card' || template === 'stat-card') {
+    return {
+      label: typeof previous.label === 'string' ? previous.label : 'Metric',
+      value: typeof previous.value === 'string' ? previous.value : '42%',
+      detail: typeof previous.detail === 'string' ? previous.detail : '',
+      trend: previous.trend === 'up' || previous.trend === 'down' || previous.trend === 'flat' ? previous.trend : 'up',
+      delta: typeof previous.delta === 'string' ? previous.delta : ''
+    };
+  }
+  if (template === 'comparison' || template === 'comparison_card') {
+    return {
+      title: title === 'Headline' ? 'Comparison' : title,
+      items: [
+        { name: 'Before', features: [{ label: 'Metric', value: 'Low' }] },
+        { name: 'After', features: [{ label: 'Metric', value: 'High' }] }
+      ]
+    };
+  }
+  return {
+    title,
+    subtitle: typeof previous.subtitle === 'string' ? previous.subtitle : '',
+    source: typeof previous.source === 'string' ? previous.source : '',
+    kicker: typeof previous.kicker === 'string' ? previous.kicker : ''
+  };
+}
 
 function cloneProject(projectValue: Project): Project {
   return JSON.parse(JSON.stringify(projectValue)) as Project;
@@ -171,7 +199,7 @@ function ensureVisualForMode(scene: Scene, mode: VisualMode): VisualSpec {
     case 'graphic':
       return { kind: 'graphic', template: 'simple_diagram', templateData: {} };
     case 'html':
-      return { kind: 'html', template: 'headline_card', templateData: { title: 'Headline', subtitle: '' }, width: 1920, height: 1080, background: 'opaque' };
+      return { kind: 'html', template: 'headline', templateData: { title: 'Headline', subtitle: '', source: '' }, width: 1920, height: 1080, background: 'opaque' };
     case 'text':
       return { kind: 'text', text: scene.overlay?.text ?? scene.narration?.text ?? '' };
     case 'blank':
@@ -2345,61 +2373,36 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                     <p className="text-xs uppercase tracking-[0.2em] text-slate-500">HTML still</p>
                     <SelectField
                       label="Template"
-                      value={selectedScene.visual.template ?? 'headline_card'}
+                      value={selectedScene.visual.template === 'headline_card'
+                        ? 'headline'
+                        : selectedScene.visual.template === 'comparison_card'
+                          ? 'comparison'
+                          : selectedScene.visual.template === 'stat-card'
+                            ? 'stat_card'
+                            : selectedScene.visual.template ?? 'headline'}
                       onChange={(value) =>
                         updateScene(selectedScene.id, (scene) => {
                           if (!scene.visual || scene.visual.kind !== 'html') {
                             return scene;
                           }
                           const template = value as HtmlStillTemplateType;
-                          const nextData = template === 'comparison_card'
-                            ? {
-                                title: typeof scene.visual.templateData?.title === 'string' ? scene.visual.templateData.title : 'Comparison',
-                                leftLabel: 'Before',
-                                rightLabel: 'After',
-                                rows: [
-                                  { label: 'Metric', left: 'Low', right: 'High' }
-                                ]
-                              }
-                            : {
-                                title: typeof scene.visual.templateData?.title === 'string' ? scene.visual.templateData.title : 'Headline',
-                                subtitle: typeof scene.visual.templateData?.subtitle === 'string' ? scene.visual.templateData.subtitle : ''
-                              };
                           return {
                             ...scene,
                             visual: {
                               ...scene.visual,
                               template,
-                              templateData: nextData
+                              templateData: htmlTemplateDataFor(template, scene.visual.templateData ?? {})
                             }
                           };
                         })
                       }
                       options={HTML_STILL_TEMPLATES}
                     />
-                    <Field
-                      label="Title"
-                      value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
-                      onChange={(value) =>
-                        updateScene(selectedScene.id, (scene) => {
-                          if (!scene.visual || scene.visual.kind !== 'html') {
-                            return scene;
-                          }
-                          return {
-                            ...scene,
-                            visual: {
-                              ...scene.visual,
-                              templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
-                            }
-                          };
-                        })
-                      }
-                    />
-                    {(selectedScene.visual.template ?? 'headline_card') === 'headline_card' ? (
+                    {((selectedScene.visual.template ?? 'headline') === 'headline' || selectedScene.visual.template === 'headline_card') ? (
                       <>
                         <Field
-                          label="Kicker"
-                          value={typeof selectedScene.visual.templateData?.kicker === 'string' ? selectedScene.visual.templateData.kicker : ''}
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
                           onChange={(value) =>
                             updateScene(selectedScene.id, (scene) => {
                               if (!scene.visual || scene.visual.kind !== 'html') {
@@ -2409,7 +2412,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                 ...scene,
                                 visual: {
                                   ...scene.visual,
-                                  templateData: { ...(scene.visual.templateData ?? {}), kicker: String(value) }
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
                                 }
                               };
                             })
@@ -2433,41 +2436,204 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                             })
                           }
                         />
-                      </>
-                    ) : (
-                      <Field
-                        label="Rows (label | left | right)"
-                        value={Array.isArray(selectedScene.visual.templateData?.rows)
-                          ? (selectedScene.visual.templateData.rows as Array<{ label?: string; left?: string; right?: string }>)
-                            .map((row) => `${row.label ?? ''} | ${row.left ?? ''} | ${row.right ?? ''}`)
-                            .join('\n')
-                          : ''}
-                        asTextArea
-                        onChange={(value) =>
-                          updateScene(selectedScene.id, (scene) => {
-                            if (!scene.visual || scene.visual.kind !== 'html') {
-                              return scene;
-                            }
-                            const rows = String(value)
-                              .split('\n')
-                              .map((line) => line.split('|').map((part) => part.trim()))
-                              .filter((parts) => parts.some((part) => part.length > 0))
-                              .map((parts) => ({
-                                label: parts[0] ?? '',
-                                left: parts[1] ?? '',
-                                right: parts[2] ?? ''
-                              }));
-                            return {
-                              ...scene,
-                              visual: {
-                                ...scene.visual,
-                                templateData: { ...(scene.visual.templateData ?? {}), rows }
+                        <Field
+                          label="Source"
+                          value={typeof selectedScene.visual.templateData?.source === 'string' ? selectedScene.visual.templateData.source : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
                               }
-                            };
-                          })
-                        }
-                      />
-                    )}
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), source: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Kicker"
+                          value={typeof selectedScene.visual.templateData?.kicker === 'string' ? selectedScene.visual.templateData.kicker : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), kicker: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {(selectedScene.visual.template === 'stat_card' || selectedScene.visual.template === 'stat-card') ? (
+                      <>
+                        <Field
+                          label="Label"
+                          value={typeof selectedScene.visual.templateData?.label === 'string' ? selectedScene.visual.templateData.label : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), label: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Value"
+                          value={typeof selectedScene.visual.templateData?.value === 'string' ? selectedScene.visual.templateData.value : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), value: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Detail"
+                          value={typeof selectedScene.visual.templateData?.detail === 'string' ? selectedScene.visual.templateData.detail : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), detail: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <SelectField
+                          label="Trend"
+                          value={typeof selectedScene.visual.templateData?.trend === 'string' ? selectedScene.visual.templateData.trend : 'up'}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), trend: value }
+                                }
+                              };
+                            })
+                          }
+                          options={['up', 'down', 'flat']}
+                        />
+                        <Field
+                          label="Delta"
+                          value={typeof selectedScene.visual.templateData?.delta === 'string' ? selectedScene.visual.templateData.delta : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), delta: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {(selectedScene.visual.template === 'comparison' || selectedScene.visual.template === 'comparison_card') ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Items (name | feature:value; feature:value)"
+                          value={Array.isArray(selectedScene.visual.templateData?.items)
+                            ? (selectedScene.visual.templateData.items as Array<{ name?: string; features?: Array<{ label?: string; value?: string }> }>)
+                              .map((item) => `${item.name ?? ''} | ${(item.features ?? []).map((feature) => `${feature.label ?? ''}:${feature.value ?? ''}`).join('; ')}`)
+                              .join('\n')
+                            : Array.isArray(selectedScene.visual.templateData?.rows)
+                              ? (selectedScene.visual.templateData.rows as Array<{ label?: string; left?: string; right?: string }>)
+                                .map((row) => `${row.label ?? ''} | ${row.left ?? ''} | ${row.right ?? ''}`)
+                                .join('\n')
+                              : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const items = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const [namePart, featurePart = ''] = line.split('|').map((part) => part.trim());
+                                  const features = featurePart
+                                    .split(';')
+                                    .map((entry) => entry.trim())
+                                    .filter(Boolean)
+                                    .map((entry) => {
+                                      const [label, ...rest] = entry.split(':');
+                                      return { label: (label ?? '').trim(), value: rest.join(':').trim() };
+                                    });
+                                  return { name: namePart ?? '', features };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), items }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
                     <SelectField
                       label="Background"
                       value={selectedScene.visual.background ?? 'opaque'}

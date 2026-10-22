@@ -1,4 +1,6 @@
 import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, LOGO_OVERLAY_LIMITS, LOGO_OVERLAY_POSITIONS, MAX_SCENE_DURATION_SECONDS, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
+import { HtmlStillError } from '@/lib/render/html-still/errors';
+import { canonicalizeHtmlStillTemplateId, parseHtmlStillTemplateData } from '@/lib/render/html-still/templates';
 import { isValidGraphicColor } from '@/lib/render/graphic-style';
 import { isLogoOverlayPosition } from '@/lib/render/logo-overlay';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
@@ -456,10 +458,20 @@ export function validateProject(project: Project): RenderValidationResult {
     }
 
     if (visual.kind === 'html') {
-      const hasTemplate = visual.template === 'headline_card' || visual.template === 'comparison_card';
+      const hasTemplate = canonicalizeHtmlStillTemplateId(visual.template);
       const hasMarkup = typeof visual.html === 'string' && visual.html.trim().length > 0;
-      if (!hasTemplate && !hasMarkup) {
+      if (visual.template && !hasTemplate) {
+        pushIssue(errors, 'error', 'scene.visual.html.template.unknown', `scenes.${sceneId}.visual.template`, `Unknown HTML still template: ${visual.template}.`);
+      } else if (!hasTemplate && !hasMarkup) {
         pushIssue(errors, 'error', 'scene.visual.html.source.required', `scenes.${sceneId}.visual.html`, 'HTML still requires a template or HTML markup.');
+      } else if (hasTemplate) {
+        try {
+          parseHtmlStillTemplateData(hasTemplate, visual.templateData ?? {});
+        } catch (error) {
+          const message = error instanceof HtmlStillError ? error.message : 'HTML still template data is invalid.';
+          const code = error instanceof HtmlStillError ? error.code : 'html.template.data.invalid';
+          pushIssue(errors, 'error', code, `scenes.${sceneId}.visual.templateData`, message);
+        }
       }
       if (visual.background !== undefined && visual.background !== 'opaque' && visual.background !== 'transparent') {
         pushIssue(errors, 'error', 'scene.visual.html.background.invalid', `scenes.${sceneId}.visual.background`, 'HTML still background must be opaque or transparent.');

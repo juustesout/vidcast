@@ -14,6 +14,7 @@ import {
   resolveSafeProjectAssetPath
 } from '@/lib/render/scene-composition-compositor';
 import { renderHtmlStillPng } from '@/lib/render/html-still/chromium-still';
+import { resolveHtmlStillTemplate } from '@/lib/render/html-still/templates';
 import { createStudioComposition, STUDIO_BIGSCREEN_RECT, STUDIO_OVERLAY_RECT } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
@@ -735,7 +736,8 @@ describe('composition scene renderer', () => {
       width: 640,
       height: 360,
       background: 'opaque',
-      pageBackground: '#ff5a5f'
+      pageBackground: '#ff5a5f',
+      timeoutMs: 45_000
     });
     const htmlPath = path.join(projectRoot, 'assets', 'html-still.png');
     await fs.writeFile(htmlPath, still.png);
@@ -806,6 +808,75 @@ describe('composition scene renderer', () => {
     expect(screen[2]).toBeLessThan(120);
     expect(corner[2]).toBeGreaterThan(120);
     expect(corner[0]).toBeLessThan(80);
+  }, 120_000);
+
+  it('places a generated headline template on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('headline', {
+      title: 'Northwind',
+      subtitle: 'Live recap',
+      source: 'IR',
+      background: '#ff5a5f'
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-headline.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-headline',
+      imageLocalPath: 'assets/html-headline.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'headline',
+          templateData: { title: 'Northwind', subtitle: 'Live recap', source: 'IR', background: '#ff5a5f' },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-headline'
+        }
+      })],
+      [
+        makeAsset('html-headline', {
+          filename: 'html-headline.png',
+          localPath: 'assets/html-headline.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-headline-bigscreen');
+    expect(result.status).toBe('completed');
+    const screen = await samplePixel(outputPath, 90, 50);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
   }, 120_000);
 
   it('fails closed on a missing composition asset file', async () => {

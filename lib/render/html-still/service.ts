@@ -10,7 +10,7 @@ import { createId } from '@/lib/utils/ids';
 import { renderHtmlStillPng } from './chromium-still';
 import { HtmlStillError } from './errors';
 import { createHtmlStillFingerprint, htmlStillAssetIsCurrent } from './fingerprint';
-import { isHtmlStillTemplateId, resolveHtmlStillTemplate } from './templates';
+import { canonicalizeHtmlStillTemplateId, resolveHtmlStillTemplate } from './templates';
 
 const activeLocks = new Set<string>();
 
@@ -43,7 +43,10 @@ function ensureHtmlScene(scene: Scene): asserts scene is Scene & { visual: HtmlV
 }
 
 function resolveDocument(visual: HtmlVisual): { markup: string; css?: string; pageBackground?: string } {
-  if (visual.template && isHtmlStillTemplateId(visual.template)) {
+  if (visual.template) {
+    if (!canonicalizeHtmlStillTemplateId(visual.template)) {
+      throw new HtmlStillError('html.template.unknown', `Unknown HTML still template: ${visual.template}.`);
+    }
     const resolved = resolveHtmlStillTemplate(visual.template, visual.templateData ?? {});
     return { markup: resolved.markup, css: resolved.css, pageBackground: resolved.background };
   }
