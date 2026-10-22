@@ -597,6 +597,223 @@ describe('HTML still templates', () => {
       callouts: [{ label: 'A', detail: 'B', side: 'up' }]
     })).toThrow(/left or right/);
   });
+
+  it('builds a flow diagram from unique steps and directed links', () => {
+    const card = resolveHtmlStillTemplate('flow_diagram', {
+      title: 'Studio flow',
+      steps: [
+        { id: 'brief', label: 'Brief', detail: 'Lock scope' },
+        { id: 'render', label: 'Render' },
+        { id: 'compose', label: 'Compose' }
+      ],
+      links: [
+        { from: 'brief', to: 'render' },
+        { from: 'render', to: 'compose' }
+      ]
+    });
+    expect(card.markup).toContain('Studio flow');
+    expect(card.markup).toContain('Process flow');
+    expect(card.markup).toContain('Brief');
+    expect(card.markup).toContain('Lock scope');
+    expect(card.markup).toContain('Render');
+    expect(card.markup).toContain('<svg');
+    expect(card.markup).toContain('<polygon');
+    expect(card.markup).not.toContain('xmlns=');
+    expect(card.markup).not.toContain('url(#');
+    const document = wrapHtmlStillDocument({
+      markup: card.markup,
+      css: card.css,
+      width: 1920,
+      height: 1080,
+      background: 'opaque',
+      pageBackground: card.background
+    });
+    expect(document).not.toMatch(/https?:\/\//i);
+  });
+
+  it('builds a decision tree with question diamonds and outcome boxes', () => {
+    const card = resolveHtmlStillTemplate('decision_tree', {
+      title: 'Go or wait',
+      nodes: [
+        { id: 'ready', kind: 'question', label: 'Ready?' },
+        { id: 'go', kind: 'outcome', label: 'Ship' },
+        { id: 'hold', kind: 'outcome', label: 'Hold' }
+      ],
+      branches: [
+        { from: 'ready', to: 'go', label: 'Ja' },
+        { from: 'ready', to: 'hold', label: 'Nee' }
+      ]
+    });
+    expect(card.markup).toContain('Go or wait');
+    expect(card.markup).toContain('Decision tree');
+    expect(card.markup).toContain('Ready?');
+    expect(card.markup).toContain('Ship');
+    expect(card.markup).toContain('Ja');
+    expect(card.markup).toContain('<polygon');
+    expect(card.markup).toContain('<rect');
+  });
+
+  it('builds a system diagram from labeled components', () => {
+    const card = resolveHtmlStillTemplate('system_diagram', {
+      title: 'Studio stack',
+      components: [
+        { id: 'author', label: 'Authoring', role: 'Input' },
+        { id: 'still', label: 'HTML still', role: 'PNG' }
+      ],
+      links: [{ from: 'author', to: 'still', label: 'render' }]
+    });
+    expect(card.markup).toContain('Studio stack');
+    expect(card.markup).toContain('System map');
+    expect(card.markup).toContain('Authoring');
+    expect(card.markup).toContain('Input');
+    expect(card.markup).toContain('render');
+  });
+
+  it('is deterministic for diagram templates', () => {
+    const flow = {
+      title: 'Flow',
+      steps: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'b' }]
+    };
+    const decision = {
+      title: 'Tree',
+      nodes: [
+        { id: 'q', kind: 'question' as const, label: 'Q' },
+        { id: 'yes', kind: 'outcome' as const, label: 'Yes' }
+      ],
+      branches: [{ from: 'q', to: 'yes', label: 'Ja' }]
+    };
+    const system = {
+      title: 'Stack',
+      components: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'b' }]
+    };
+    expect(resolveHtmlStillTemplate('flow_diagram', flow)).toEqual(resolveHtmlStillTemplate('flow_diagram', {
+      ...flow,
+      steps: [...flow.steps],
+      links: [...flow.links]
+    }));
+    expect(resolveHtmlStillTemplate('decision_tree', decision)).toEqual(resolveHtmlStillTemplate('decision_tree', {
+      ...decision,
+      nodes: [...decision.nodes],
+      branches: [...decision.branches]
+    }));
+    expect(resolveHtmlStillTemplate('system_diagram', system)).toEqual(resolveHtmlStillTemplate('system_diagram', {
+      ...system,
+      components: [...system.components],
+      links: [...system.links]
+    }));
+  });
+
+  it('escapes untrusted diagram text', () => {
+    const flow = resolveHtmlStillTemplate('flow_diagram', {
+      title: '<b>Flow</b>',
+      steps: [
+        { id: 'a', label: 'A & B', detail: '<img>' },
+        { id: 'b', label: '<script>' }
+      ],
+      links: [{ from: 'a', to: 'b' }]
+    });
+    expect(flow.markup).toContain('&lt;b&gt;Flow&lt;/b&gt;');
+    expect(flow.markup).toContain('A &amp; B');
+    expect(flow.markup).toContain('&lt;img&gt;');
+    expect(flow.markup).toContain('&lt;script&gt;');
+    expect(flow.markup).not.toContain('<b>Flow</b>');
+    const decision = resolveHtmlStillTemplate('decision_tree', {
+      title: '<img>',
+      nodes: [
+        { id: 'q', kind: 'question', label: 'Q & A' },
+        { id: 'out', kind: 'outcome', label: '<b>No</b>' }
+      ],
+      branches: [{ from: 'q', to: 'out', label: '<script>' }]
+    });
+    expect(decision.markup).toContain('&lt;img&gt;');
+    expect(decision.markup).toContain('Q &amp; A');
+    expect(decision.markup).toContain('&lt;b&gt;No&lt;/b&gt;');
+    expect(decision.markup).toContain('&lt;script&gt;');
+    const system = resolveHtmlStillTemplate('system_diagram', {
+      title: '<b>Stack</b>',
+      components: [
+        { id: 'a', label: 'A & B', role: '<img>' },
+        { id: 'b', label: 'C' }
+      ],
+      links: [{ from: 'a', to: 'b', label: '<script>' }]
+    });
+    expect(system.markup).toContain('&lt;b&gt;Stack&lt;/b&gt;');
+    expect(system.markup).toContain('A &amp; B');
+    expect(system.markup).toContain('&lt;img&gt;');
+    expect(system.markup).toContain('&lt;script&gt;');
+  });
+
+  it('rejects invalid diagram structures', () => {
+    expect(() => parseHtmlStillTemplateData('flow_diagram', { title: 'X', steps: [{ id: 'a', label: 'A' }], links: [{ from: 'a', to: 'b' }] })).toThrow(/2-8 steps/);
+    expect(() => parseHtmlStillTemplateData('flow_diagram', {
+      title: 'X',
+      steps: [{ id: 'a', label: 'A' }, { id: 'a', label: 'B' }],
+      links: [{ from: 'a', to: 'b' }]
+    })).toThrow(/duplicate step id/);
+    expect(() => parseHtmlStillTemplateData('flow_diagram', {
+      title: 'X',
+      steps: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'missing' }]
+    })).toThrow(/unknown step id/);
+    expect(() => parseHtmlStillTemplateData('flow_diagram', {
+      title: 'X',
+      steps: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'a' }]
+    })).toThrow(/cannot connect a node to itself/);
+    expect(() => parseHtmlStillTemplateData('flow_diagram', {
+      title: 'X',
+      steps: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'b' }, { from: 'b', to: 'a' }]
+    })).toThrow(/cannot contain a cycle/);
+    expect(() => parseHtmlStillTemplateData('decision_tree', {
+      title: 'X',
+      nodes: [{ id: 'a', kind: 'outcome', label: 'A' }, { id: 'b', kind: 'outcome', label: 'B' }],
+      branches: [{ from: 'a', to: 'b' }]
+    })).toThrow(/at least one question/);
+    expect(() => parseHtmlStillTemplateData('decision_tree', {
+      title: 'X',
+      nodes: [{ id: 'q', kind: 'question', label: 'Q' }, { id: 'out', kind: 'outcome', label: 'Out' }],
+      branches: [{ from: 'out', to: 'q' }]
+    })).toThrow(/must start from a question/);
+    expect(() => parseHtmlStillTemplateData('decision_tree', {
+      title: 'X',
+      nodes: [{ id: 'q', kind: 'question', label: 'Q' }, { id: 'out', kind: 'outcome', label: 'Out' }],
+      branches: []
+    })).toThrow(/1-8 branches/);
+    expect(() => parseHtmlStillTemplateData('decision_tree', {
+      title: 'X',
+      nodes: [
+        { id: 'q', kind: 'question', label: 'Q' },
+        { id: 'a', kind: 'outcome', label: 'A' },
+        { id: 'b', kind: 'outcome', label: 'B' },
+        { id: 'c', kind: 'outcome', label: 'C' },
+        { id: 'd', kind: 'outcome', label: 'D' }
+      ],
+      branches: [
+        { from: 'q', to: 'a' },
+        { from: 'q', to: 'b' },
+        { from: 'q', to: 'c' },
+        { from: 'q', to: 'd' }
+      ]
+    })).toThrow(/at most 3 branches/);
+    expect(() => parseHtmlStillTemplateData('system_diagram', {
+      title: 'X',
+      components: [{ id: 'a', label: 'A' }],
+      links: [{ from: 'a', to: 'b' }]
+    })).toThrow(/2-6 components/);
+    expect(() => parseHtmlStillTemplateData('system_diagram', {
+      title: 'X',
+      components: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'a' }]
+    })).toThrow(/cannot connect a node to itself/);
+    expect(() => parseHtmlStillTemplateData('system_diagram', {
+      title: 'X',
+      components: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'missing' }]
+    })).toThrow(/unknown component id/);
+  });
 });
 
 describe('HTML still fingerprint', () => {
@@ -743,6 +960,39 @@ describe('HTML still project validation and resolver', () => {
       templateData: { name: 'Hub', callouts: [{ label: 'Lens', detail: 'Wide' }] }
     })));
     expect(callouts.errors).toEqual([]);
+    const flow = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'flow_diagram',
+      templateData: {
+        title: 'Flow',
+        steps: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+        links: [{ from: 'a', to: 'b' }]
+      }
+    })));
+    expect(flow.errors).toEqual([]);
+    const decision = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'decision_tree',
+      templateData: {
+        title: 'Tree',
+        nodes: [
+          { id: 'q', kind: 'question', label: 'Q' },
+          { id: 'yes', kind: 'outcome', label: 'Yes' }
+        ],
+        branches: [{ from: 'q', to: 'yes', label: 'Ja' }]
+      }
+    })));
+    expect(decision.errors).toEqual([]);
+    const system = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'system_diagram',
+      templateData: {
+        title: 'Stack',
+        components: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+        links: [{ from: 'a', to: 'b' }]
+      }
+    })));
+    expect(system.errors).toEqual([]);
   });
 
   it('rejects missing local image assets on product templates', () => {

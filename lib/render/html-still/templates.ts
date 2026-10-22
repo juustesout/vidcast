@@ -4,8 +4,15 @@ import type {
   HtmlChartTemplateData,
   HtmlComparisonItem,
   HtmlComparisonTemplateData,
+  HtmlDecisionBranch,
+  HtmlDecisionNode,
+  HtmlDecisionNodeKind,
+  HtmlDecisionTreeTemplateData,
   HtmlFeatureCallout,
   HtmlFeatureCalloutsTemplateData,
+  HtmlFlowDiagramTemplateData,
+  HtmlFlowLink,
+  HtmlFlowStep,
   HtmlHeadlineTemplateData,
   HtmlLocationCardTemplateData,
   HtmlProductCardTemplateData,
@@ -18,13 +25,16 @@ import type {
   HtmlStatCardTemplateData,
   HtmlStillTemplateType,
   HtmlStillTrendDirection,
+  HtmlSystemComponent,
+  HtmlSystemDiagramTemplateData,
+  HtmlSystemLink,
   HtmlTimelineEvent,
   HtmlTimelineTemplateData
 } from '@/lib/types/scene';
 import { HtmlStillError } from './errors';
 import { escapeHtml } from './sanitize';
 
-export const HTML_STILL_CANONICAL_TEMPLATE_IDS = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map', 'product_card', 'product_comparison', 'feature_callouts'] as const;
+export const HTML_STILL_CANONICAL_TEMPLATE_IDS = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map', 'product_card', 'product_comparison', 'feature_callouts', 'flow_diagram', 'decision_tree', 'system_diagram'] as const;
 export type HtmlStillCanonicalTemplateId = (typeof HTML_STILL_CANONICAL_TEMPLATE_IDS)[number];
 
 export const HTML_STILL_TEMPLATE_IDS = [
@@ -69,7 +79,23 @@ export const HTML_STILL_TEXT_LIMITS = {
   MIN_PRODUCTS: 2,
   MAX_PRODUCTS: 4,
   MIN_CALLOUTS: 1,
-  MAX_CALLOUTS: 4
+  MAX_CALLOUTS: 4,
+  NODE_ID: 24,
+  BRANCH_LABEL: 24,
+  ROLE: 32,
+  MIN_FLOW_STEPS: 2,
+  MAX_FLOW_STEPS: 8,
+  MIN_FLOW_LINKS: 1,
+  MAX_FLOW_LINKS: 8,
+  MIN_DECISION_NODES: 2,
+  MAX_DECISION_NODES: 8,
+  MIN_DECISION_BRANCHES: 1,
+  MAX_DECISION_BRANCHES: 8,
+  MAX_DECISION_OUT_DEGREE: 3,
+  MIN_SYSTEM_COMPONENTS: 2,
+  MAX_SYSTEM_COMPONENTS: 6,
+  MIN_SYSTEM_LINKS: 1,
+  MAX_SYSTEM_LINKS: 8
 } as const;
 
 const TEMPLATE_ALIASES: Record<string, HtmlStillCanonicalTemplateId> = {
@@ -85,7 +111,10 @@ const TEMPLATE_ALIASES: Record<string, HtmlStillCanonicalTemplateId> = {
   route_map: 'route_map',
   product_card: 'product_card',
   product_comparison: 'product_comparison',
-  feature_callouts: 'feature_callouts'
+  feature_callouts: 'feature_callouts',
+  flow_diagram: 'flow_diagram',
+  decision_tree: 'decision_tree',
+  system_diagram: 'system_diagram'
 };
 
 export type HeadlineCardData = HtmlHeadlineTemplateData;
@@ -602,6 +631,263 @@ export function parseFeatureCalloutsTemplateData(data: Record<string, unknown>):
   };
 }
 
+function requireNodeId(value: unknown, field: string): string {
+  const id = requireText(value, field, HTML_STILL_TEXT_LIMITS.NODE_ID);
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(id)) {
+    throw new HtmlStillError('html.template.data.invalid', `${field} must start with a letter and contain only letters, digits, _ or -.`);
+  }
+  return id;
+}
+
+function assertUniqueIds(ids: string[], label: string): Set<string> {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) {
+      throw new HtmlStillError('html.template.data.invalid', `duplicate ${label} id: ${id}.`);
+    }
+    seen.add(id);
+  }
+  return seen;
+}
+
+function assertNoCycle(ids: string[], edges: Array<{ from: string; to: string }>, label: string): void {
+  const outgoing = new Map<string, string[]>();
+  for (const id of ids) {
+    outgoing.set(id, []);
+  }
+  for (const edge of edges) {
+    outgoing.get(edge.from)?.push(edge.to);
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const walk = (id: string): void => {
+    if (visited.has(id)) {
+      return;
+    }
+    if (visiting.has(id)) {
+      throw new HtmlStillError('html.template.data.invalid', `${label} cannot contain a cycle.`);
+    }
+    visiting.add(id);
+    for (const next of outgoing.get(id) ?? []) {
+      walk(next);
+    }
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of ids) {
+    walk(id);
+  }
+}
+
+function parseFlowStep(value: unknown, index: number): HtmlFlowStep {
+  const step = assertPlainObject(value, `steps[${index}]`);
+  return {
+    id: requireNodeId(step.id, `steps[${index}].id`),
+    label: requireText(step.label, `steps[${index}].label`, HTML_STILL_TEXT_LIMITS.FEATURE),
+    detail: optionalText(step.detail, `steps[${index}].detail`, HTML_STILL_TEXT_LIMITS.LINE)
+  };
+}
+
+function parseDirectedLink(value: unknown, index: number, field: string): HtmlFlowLink {
+  const link = assertPlainObject(value, `${field}[${index}]`);
+  const from = requireNodeId(link.from, `${field}[${index}].from`);
+  const to = requireNodeId(link.to, `${field}[${index}].to`);
+  if (from === to) {
+    throw new HtmlStillError('html.template.data.invalid', `${field}[${index}] cannot connect a node to itself.`);
+  }
+  return { from, to };
+}
+
+export function parseFlowDiagramTemplateData(data: Record<string, unknown>): HtmlFlowDiagramTemplateData {
+  if (!Array.isArray(data.steps)) {
+    throw new HtmlStillError('html.template.data.invalid', 'steps must be an array.');
+  }
+  if (data.steps.length < HTML_STILL_TEXT_LIMITS.MIN_FLOW_STEPS || data.steps.length > HTML_STILL_TEXT_LIMITS.MAX_FLOW_STEPS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `flow_diagram requires ${HTML_STILL_TEXT_LIMITS.MIN_FLOW_STEPS}-${HTML_STILL_TEXT_LIMITS.MAX_FLOW_STEPS} steps.`
+    );
+  }
+  if (!Array.isArray(data.links)) {
+    throw new HtmlStillError('html.template.data.invalid', 'links must be an array.');
+  }
+  if (data.links.length < HTML_STILL_TEXT_LIMITS.MIN_FLOW_LINKS || data.links.length > HTML_STILL_TEXT_LIMITS.MAX_FLOW_LINKS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `flow_diagram requires ${HTML_STILL_TEXT_LIMITS.MIN_FLOW_LINKS}-${HTML_STILL_TEXT_LIMITS.MAX_FLOW_LINKS} links.`
+    );
+  }
+  const steps = data.steps.map((step, index) => parseFlowStep(step, index));
+  const ids = assertUniqueIds(steps.map((step) => step.id), 'step');
+  const links = data.links.map((link, index) => parseDirectedLink(link, index, 'links'));
+  for (const [index, link] of links.entries()) {
+    if (!ids.has(link.from) || !ids.has(link.to)) {
+      throw new HtmlStillError('html.template.data.invalid', `links[${index}] references an unknown step id.`);
+    }
+  }
+  assertNoCycle(steps.map((step) => step.id), links, 'flow_diagram');
+  return {
+    title: requireText(data.title, 'title', HTML_STILL_TEXT_LIMITS.TITLE),
+    steps,
+    links,
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
+function optionalDecisionKind(value: unknown, field: string): HtmlDecisionNodeKind {
+  if (value !== 'question' && value !== 'outcome') {
+    throw new HtmlStillError('html.template.data.invalid', `${field} must be question or outcome.`);
+  }
+  return value;
+}
+
+function parseDecisionNode(value: unknown, index: number): HtmlDecisionNode {
+  const node = assertPlainObject(value, `nodes[${index}]`);
+  return {
+    id: requireNodeId(node.id, `nodes[${index}].id`),
+    kind: optionalDecisionKind(node.kind, `nodes[${index}].kind`),
+    label: requireText(node.label, `nodes[${index}].label`, HTML_STILL_TEXT_LIMITS.FEATURE)
+  };
+}
+
+function parseDecisionBranch(value: unknown, index: number): HtmlDecisionBranch {
+  const branch = assertPlainObject(value, `branches[${index}]`);
+  const from = requireNodeId(branch.from, `branches[${index}].from`);
+  const to = requireNodeId(branch.to, `branches[${index}].to`);
+  if (from === to) {
+    throw new HtmlStillError('html.template.data.invalid', `branches[${index}] cannot connect a node to itself.`);
+  }
+  return {
+    from,
+    to,
+    label: optionalText(branch.label, `branches[${index}].label`, HTML_STILL_TEXT_LIMITS.BRANCH_LABEL)
+  };
+}
+
+export function parseDecisionTreeTemplateData(data: Record<string, unknown>): HtmlDecisionTreeTemplateData {
+  if (!Array.isArray(data.nodes)) {
+    throw new HtmlStillError('html.template.data.invalid', 'nodes must be an array.');
+  }
+  if (data.nodes.length < HTML_STILL_TEXT_LIMITS.MIN_DECISION_NODES || data.nodes.length > HTML_STILL_TEXT_LIMITS.MAX_DECISION_NODES) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `decision_tree requires ${HTML_STILL_TEXT_LIMITS.MIN_DECISION_NODES}-${HTML_STILL_TEXT_LIMITS.MAX_DECISION_NODES} nodes.`
+    );
+  }
+  if (!Array.isArray(data.branches)) {
+    throw new HtmlStillError('html.template.data.invalid', 'branches must be an array.');
+  }
+  if (data.branches.length < HTML_STILL_TEXT_LIMITS.MIN_DECISION_BRANCHES || data.branches.length > HTML_STILL_TEXT_LIMITS.MAX_DECISION_BRANCHES) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `decision_tree requires ${HTML_STILL_TEXT_LIMITS.MIN_DECISION_BRANCHES}-${HTML_STILL_TEXT_LIMITS.MAX_DECISION_BRANCHES} branches.`
+    );
+  }
+  const nodes = data.nodes.map((node, index) => parseDecisionNode(node, index));
+  const ids = assertUniqueIds(nodes.map((node) => node.id), 'node');
+  if (!nodes.some((node) => node.kind === 'question')) {
+    throw new HtmlStillError('html.template.data.invalid', 'decision_tree requires at least one question node.');
+  }
+  if (!nodes.some((node) => node.kind === 'outcome')) {
+    throw new HtmlStillError('html.template.data.invalid', 'decision_tree requires at least one outcome node.');
+  }
+  const branches = data.branches.map((branch, index) => parseDecisionBranch(branch, index));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const outDegree = new Map<string, number>();
+  for (const [index, branch] of branches.entries()) {
+    if (!ids.has(branch.from) || !ids.has(branch.to)) {
+      throw new HtmlStillError('html.template.data.invalid', `branches[${index}] references an unknown node id.`);
+    }
+    const from = byId.get(branch.from);
+    const to = byId.get(branch.to);
+    if (from?.kind !== 'question') {
+      throw new HtmlStillError('html.template.data.invalid', `branches[${index}] must start from a question node.`);
+    }
+    if (!to) {
+      throw new HtmlStillError('html.template.data.invalid', `branches[${index}] references an unknown node id.`);
+    }
+    const next = (outDegree.get(branch.from) ?? 0) + 1;
+    if (next > HTML_STILL_TEXT_LIMITS.MAX_DECISION_OUT_DEGREE) {
+      throw new HtmlStillError('html.template.data.invalid', `question nodes may have at most ${HTML_STILL_TEXT_LIMITS.MAX_DECISION_OUT_DEGREE} branches.`);
+    }
+    outDegree.set(branch.from, next);
+  }
+  for (const node of nodes) {
+    if (node.kind === 'question' && (outDegree.get(node.id) ?? 0) < 1) {
+      throw new HtmlStillError('html.template.data.invalid', `question node ${node.id} must have at least one branch.`);
+    }
+    if (node.kind === 'outcome' && (outDegree.get(node.id) ?? 0) > 0) {
+      throw new HtmlStillError('html.template.data.invalid', `outcome node ${node.id} cannot have outgoing branches.`);
+    }
+  }
+  assertNoCycle(nodes.map((node) => node.id), branches, 'decision_tree');
+  return {
+    title: requireText(data.title, 'title', HTML_STILL_TEXT_LIMITS.TITLE),
+    nodes,
+    branches,
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
+function parseSystemComponent(value: unknown, index: number): HtmlSystemComponent {
+  const component = assertPlainObject(value, `components[${index}]`);
+  return {
+    id: requireNodeId(component.id, `components[${index}].id`),
+    label: requireText(component.label, `components[${index}].label`, HTML_STILL_TEXT_LIMITS.FEATURE),
+    role: optionalText(component.role, `components[${index}].role`, HTML_STILL_TEXT_LIMITS.ROLE)
+  };
+}
+
+function parseSystemLink(value: unknown, index: number): HtmlSystemLink {
+  const link = parseDirectedLink(value, index, 'links');
+  const raw = assertPlainObject(value, `links[${index}]`);
+  return {
+    ...link,
+    label: optionalText(raw.label, `links[${index}].label`, HTML_STILL_TEXT_LIMITS.BRANCH_LABEL)
+  };
+}
+
+export function parseSystemDiagramTemplateData(data: Record<string, unknown>): HtmlSystemDiagramTemplateData {
+  if (!Array.isArray(data.components)) {
+    throw new HtmlStillError('html.template.data.invalid', 'components must be an array.');
+  }
+  if (data.components.length < HTML_STILL_TEXT_LIMITS.MIN_SYSTEM_COMPONENTS || data.components.length > HTML_STILL_TEXT_LIMITS.MAX_SYSTEM_COMPONENTS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `system_diagram requires ${HTML_STILL_TEXT_LIMITS.MIN_SYSTEM_COMPONENTS}-${HTML_STILL_TEXT_LIMITS.MAX_SYSTEM_COMPONENTS} components.`
+    );
+  }
+  if (!Array.isArray(data.links)) {
+    throw new HtmlStillError('html.template.data.invalid', 'links must be an array.');
+  }
+  if (data.links.length < HTML_STILL_TEXT_LIMITS.MIN_SYSTEM_LINKS || data.links.length > HTML_STILL_TEXT_LIMITS.MAX_SYSTEM_LINKS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `system_diagram requires ${HTML_STILL_TEXT_LIMITS.MIN_SYSTEM_LINKS}-${HTML_STILL_TEXT_LIMITS.MAX_SYSTEM_LINKS} links.`
+    );
+  }
+  const components = data.components.map((component, index) => parseSystemComponent(component, index));
+  const ids = assertUniqueIds(components.map((component) => component.id), 'component');
+  const links = data.links.map((link, index) => parseSystemLink(link, index));
+  for (const [index, link] of links.entries()) {
+    if (!ids.has(link.from) || !ids.has(link.to)) {
+      throw new HtmlStillError('html.template.data.invalid', `links[${index}] references an unknown component id.`);
+    }
+  }
+  return {
+    title: requireText(data.title, 'title', HTML_STILL_TEXT_LIMITS.TITLE),
+    components,
+    links,
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
 export type HtmlStillParsedTemplateData =
   | HtmlHeadlineTemplateData
   | HtmlStatCardTemplateData
@@ -612,7 +898,10 @@ export type HtmlStillParsedTemplateData =
   | HtmlRouteMapTemplateData
   | HtmlProductCardTemplateData
   | HtmlProductComparisonTemplateData
-  | HtmlFeatureCalloutsTemplateData;
+  | HtmlFeatureCalloutsTemplateData
+  | HtmlFlowDiagramTemplateData
+  | HtmlDecisionTreeTemplateData
+  | HtmlSystemDiagramTemplateData;
 
 export function collectHtmlStillImageAssetIds(data: HtmlStillParsedTemplateData): string[] {
   const ids: string[] = [];
@@ -660,7 +949,16 @@ export function parseHtmlStillTemplateData(
   if (templateId === 'product_comparison') {
     return parseProductComparisonTemplateData(data);
   }
-  return parseFeatureCalloutsTemplateData(data);
+  if (templateId === 'feature_callouts') {
+    return parseFeatureCalloutsTemplateData(data);
+  }
+  if (templateId === 'flow_diagram') {
+    return parseFlowDiagramTemplateData(data);
+  }
+  if (templateId === 'decision_tree') {
+    return parseDecisionTreeTemplateData(data);
+  }
+  return parseSystemDiagramTemplateData(data);
 }
 
 function trendMark(trend: HtmlStillTrendDirection): string {
@@ -1088,6 +1386,256 @@ export function buildFeatureCalloutsMarkup(data: HtmlFeatureCalloutsTemplateData
   };
 }
 
+function roundCoord(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function directedEdge(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  accent: string,
+  halfW: number,
+  halfH: number,
+  label?: string
+): string {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) {
+    return '';
+  }
+  const ux = dx / len;
+  const uy = dy / len;
+  const inset = Math.min(halfW / Math.max(Math.abs(ux), 0.001), halfH / Math.max(Math.abs(uy), 0.001));
+  const endX = roundCoord(to.x - ux * inset);
+  const endY = roundCoord(to.y - uy * inset);
+  const startX = roundCoord(from.x);
+  const startY = roundCoord(from.y);
+  const bx = endX - ux * 16;
+  const by = endY - uy * 16;
+  const px = -uy * 8;
+  const py = ux * 8;
+  const head = `<polygon points="${endX},${endY} ${roundCoord(bx + px)},${roundCoord(by + py)} ${roundCoord(bx - px)},${roundCoord(by - py)}" fill="${accent}"/>`;
+  const caption = label
+    ? `<text x="${roundCoord((startX + endX) / 2)}" y="${roundCoord((startY + endY) / 2 - 10)}" text-anchor="middle" fill="${accent}" font-size="18" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(label)}</text>`
+    : '';
+  return `<line x1="${startX}" y1="${startY}" x2="${endX}" y2="${endY}" stroke="${accent}" stroke-width="5" stroke-linecap="round"/>${head}${caption}`;
+}
+
+function wrapDiagramCard(title: string, note: string, svg: string, background: string, accent: string, textColor: string, className: string): { markup: string; css: string; background: string } {
+  return {
+    background,
+    css: `
+.card{box-sizing:border-box;width:100%;height:100%;padding:64px 80px 48px;display:flex;flex-direction:column;gap:20px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
+.head{display:flex;align-items:baseline;justify-content:space-between;gap:24px;}
+.title{font-size:52px;font-weight:800;overflow:hidden;max-width:22ch;}
+.note{font-size:20px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.68;}
+.rule{width:96px;height:6px;background:${accent};border-radius:999px;}
+.plot{flex:1;min-height:0;}
+.${className}{display:block;}
+`,
+    markup: `<div class="card"><div class="head"><div class="title">${escapeHtml(title)}</div><div class="note">${escapeHtml(note)}</div></div><div class="rule"></div><div class="plot">${svg}</div></div>`
+  };
+}
+
+function layoutFlowPositions(count: number, width: number, height: number): Array<{ x: number; y: number }> {
+  const padX = 110;
+  const padY = 90;
+  if (count <= 4) {
+    return Array.from({ length: count }, (_, index) => {
+      const t = count === 1 ? 0.5 : index / (count - 1);
+      return { x: padX + t * (width - padX * 2), y: height / 2 };
+    });
+  }
+  const topCount = Math.ceil(count / 2);
+  const bottomCount = count - topCount;
+  return Array.from({ length: count }, (_, index) => {
+    const onTop = index < topCount;
+    const slot = onTop ? index : index - topCount;
+    const group = onTop ? topCount : bottomCount;
+    const t = group === 1 ? 0.5 : slot / (group - 1);
+    return {
+      x: padX + t * (width - padX * 2),
+      y: onTop ? padY + 70 : height - padY - 70
+    };
+  });
+}
+
+function buildFlowDiagramSvg(data: HtmlFlowDiagramTemplateData, accent: string, textColor: string): string {
+  const width = 1480;
+  const height = 720;
+  const positions = layoutFlowPositions(data.steps.length, width, height);
+  const byId = new Map(data.steps.map((step, index) => [step.id, { step, ...positions[index] }]));
+  const boxW = 220;
+  const boxH = 96;
+  const links = data.links.map((link) => {
+    const from = byId.get(link.from);
+    const to = byId.get(link.to);
+    if (!from || !to) {
+      return '';
+    }
+    return directedEdge(from, to, accent, boxW / 2, boxH / 2);
+  }).join('');
+  const nodes = data.steps.map((step) => {
+    const point = byId.get(step.id);
+    if (!point) {
+      return '';
+    }
+    const detail = step.detail
+      ? `<text x="${point.x}" y="${point.y + 22}" text-anchor="middle" fill="${textColor}" font-size="18" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(step.detail)}</text>`
+      : '';
+    return `<rect x="${point.x - boxW / 2}" y="${point.y - boxH / 2}" width="${boxW}" height="${boxH}" rx="18" fill="rgba(15,23,42,0.35)" stroke="${accent}" stroke-width="4"/><text x="${point.x}" y="${point.y + (step.detail ? -6 : 8)}" text-anchor="middle" fill="${textColor}" font-size="24" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(step.label)}</text>${detail}`;
+  }).join('');
+  return `<svg class="flow" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${links}${nodes}</svg>`;
+}
+
+export function buildFlowDiagramMarkup(data: HtmlFlowDiagramTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#0b1220');
+  const accent = hexOr(data.accent, '#38bdf8');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  return wrapDiagramCard(data.title, 'Process flow', buildFlowDiagramSvg(data, accent, textColor), background, accent, textColor, 'flow');
+}
+
+function topologicalLayers(nodes: HtmlDecisionNode[], branches: HtmlDecisionBranch[]): HtmlDecisionNode[][] {
+  const remaining = new Map<string, number>();
+  const outgoing = new Map<string, string[]>();
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  for (const node of nodes) {
+    remaining.set(node.id, 0);
+    outgoing.set(node.id, []);
+  }
+  for (const branch of branches) {
+    outgoing.get(branch.from)?.push(branch.to);
+    remaining.set(branch.to, (remaining.get(branch.to) ?? 0) + 1);
+  }
+  const layers: HtmlDecisionNode[][] = [];
+  let frontier = nodes.filter((node) => (remaining.get(node.id) ?? 0) === 0);
+  const placed = new Set<string>();
+  while (frontier.length > 0) {
+    layers.push(frontier);
+    const next: HtmlDecisionNode[] = [];
+    const seen = new Set<string>();
+    for (const node of frontier) {
+      placed.add(node.id);
+      for (const target of outgoing.get(node.id) ?? []) {
+        remaining.set(target, (remaining.get(target) ?? 0) - 1);
+        if ((remaining.get(target) ?? 0) === 0 && !placed.has(target) && !seen.has(target)) {
+          const found = byId.get(target);
+          if (found) {
+            seen.add(target);
+            next.push(found);
+          }
+        }
+      }
+    }
+    frontier = next;
+  }
+  const leftovers = nodes.filter((node) => !placed.has(node.id));
+  if (leftovers.length > 0) {
+    layers.push(leftovers);
+  }
+  return layers;
+}
+
+function buildDecisionTreeSvg(data: HtmlDecisionTreeTemplateData, accent: string, textColor: string): string {
+  const width = 1480;
+  const height = 720;
+  const layers = topologicalLayers(data.nodes, data.branches);
+  const positions = new Map<string, { x: number; y: number; node: HtmlDecisionNode }>();
+  const padX = 140;
+  const padY = 90;
+  layers.forEach((layer, layerIndex) => {
+    const y = padY + (layers.length === 1 ? height / 2 - padY : (layerIndex / Math.max(layers.length - 1, 1)) * (height - padY * 2));
+    layer.forEach((node, slot) => {
+      const t = layer.length === 1 ? 0.5 : slot / (layer.length - 1);
+      positions.set(node.id, { node, x: padX + t * (width - padX * 2), y });
+    });
+  });
+  const links = data.branches.map((branch) => {
+    const from = positions.get(branch.from);
+    const to = positions.get(branch.to);
+    if (!from || !to) {
+      return '';
+    }
+    const half = to.node.kind === 'question' ? 54 : 40;
+    return directedEdge(from, to, accent, to.node.kind === 'question' ? 118 : 110, half, branch.label);
+  }).join('');
+  const nodes = data.nodes.map((node) => {
+    const point = positions.get(node.id);
+    if (!point) {
+      return '';
+    }
+    if (node.kind === 'question') {
+      return `<polygon points="${point.x},${point.y - 54} ${point.x + 118},${point.y} ${point.x},${point.y + 54} ${point.x - 118},${point.y}" fill="rgba(15,23,42,0.4)" stroke="${accent}" stroke-width="4"/><text x="${point.x}" y="${point.y + 8}" text-anchor="middle" fill="${textColor}" font-size="22" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(node.label)}</text>`;
+    }
+    return `<rect x="${point.x - 110}" y="${point.y - 40}" width="220" height="80" rx="16" fill="rgba(15,23,42,0.4)" stroke="${accent}" stroke-width="4"/><text x="${point.x}" y="${point.y + 8}" text-anchor="middle" fill="${textColor}" font-size="22" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(node.label)}</text>`;
+  }).join('');
+  return `<svg class="decision" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${links}${nodes}</svg>`;
+}
+
+export function buildDecisionTreeMarkup(data: HtmlDecisionTreeTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#111827');
+  const accent = hexOr(data.accent, '#fbbf24');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  return wrapDiagramCard(data.title, 'Decision tree', buildDecisionTreeSvg(data, accent, textColor), background, accent, textColor, 'decision');
+}
+
+function layoutSystemPositions(count: number, width: number, height: number): Array<{ x: number; y: number }> {
+  const padX = 140;
+  const padY = 110;
+  if (count <= 3) {
+    return Array.from({ length: count }, (_, index) => {
+      const t = count === 1 ? 0.5 : index / (count - 1);
+      return { x: padX + t * (width - padX * 2), y: height / 2 };
+    });
+  }
+  const cols = count <= 4 ? 2 : 3;
+  const rows = Math.ceil(count / cols);
+  return Array.from({ length: count }, (_, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const rowCount = Math.min(cols, count - row * cols);
+    const t = rowCount === 1 ? 0.5 : col / (rowCount - 1);
+    return {
+      x: padX + t * (width - padX * 2),
+      y: padY + (rows === 1 ? 0 : row / (rows - 1)) * (height - padY * 2)
+    };
+  });
+}
+
+function buildSystemDiagramSvg(data: HtmlSystemDiagramTemplateData, accent: string, textColor: string): string {
+  const width = 1480;
+  const height = 720;
+  const positions = layoutSystemPositions(data.components.length, width, height);
+  const byId = new Map(data.components.map((component, index) => [component.id, { component, ...positions[index] }]));
+  const links = data.links.map((link) => {
+    const from = byId.get(link.from);
+    const to = byId.get(link.to);
+    if (!from || !to) {
+      return '';
+    }
+    return directedEdge(from, to, accent, 130, 48, link.label);
+  }).join('');
+  const nodes = data.components.map((component) => {
+    const point = byId.get(component.id);
+    if (!point) {
+      return '';
+    }
+    const role = component.role
+      ? `<text x="${point.x}" y="${point.y + 24}" text-anchor="middle" fill="${accent}" font-size="18" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(component.role)}</text>`
+      : '';
+    return `<rect x="${point.x - 130}" y="${point.y - 48}" width="260" height="96" rx="18" fill="rgba(15,23,42,0.4)" stroke="${accent}" stroke-width="4"/><text x="${point.x}" y="${point.y + (component.role ? -6 : 8)}" text-anchor="middle" fill="${textColor}" font-size="24" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(component.label)}</text>${role}`;
+  }).join('');
+  return `<svg class="system" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${links}${nodes}</svg>`;
+}
+
+export function buildSystemDiagramMarkup(data: HtmlSystemDiagramTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#082032');
+  const accent = hexOr(data.accent, '#34d399');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  return wrapDiagramCard(data.title, 'System map', buildSystemDiagramSvg(data, accent, textColor), background, accent, textColor, 'system');
+}
+
 export function resolveHtmlStillTemplate(templateId: HtmlStillTemplateType | HtmlStillTemplateId, data: Record<string, unknown>): { markup: string; css: string; background: string } {
   const canonical = canonicalizeHtmlStillTemplateId(templateId);
   if (!canonical) {
@@ -1121,5 +1669,14 @@ export function resolveHtmlStillTemplate(templateId: HtmlStillTemplateType | Htm
   if (canonical === 'product_comparison') {
     return buildProductComparisonMarkup(parsed as HtmlProductComparisonTemplateData);
   }
-  return buildFeatureCalloutsMarkup(parsed as HtmlFeatureCalloutsTemplateData);
+  if (canonical === 'feature_callouts') {
+    return buildFeatureCalloutsMarkup(parsed as HtmlFeatureCalloutsTemplateData);
+  }
+  if (canonical === 'flow_diagram') {
+    return buildFlowDiagramMarkup(parsed as HtmlFlowDiagramTemplateData);
+  }
+  if (canonical === 'decision_tree') {
+    return buildDecisionTreeMarkup(parsed as HtmlDecisionTreeTemplateData);
+  }
+  return buildSystemDiagramMarkup(parsed as HtmlSystemDiagramTemplateData);
 }

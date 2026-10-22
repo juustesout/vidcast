@@ -230,7 +230,7 @@ export interface GraphicVisual {
 
 export type HtmlStillBackground = 'opaque' | 'transparent';
 
-export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'location_card' | 'route_map' | 'product_card' | 'product_comparison' | 'feature_callouts' | 'headline_card' | 'comparison_card' | 'stat-card';
+export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'location_card' | 'route_map' | 'product_card' | 'product_comparison' | 'feature_callouts' | 'flow_diagram' | 'decision_tree' | 'system_diagram' | 'headline_card' | 'comparison_card' | 'stat-card';
 
 export type HtmlStillTrendDirection = 'up' | 'down' | 'flat';
 
@@ -386,6 +386,70 @@ export interface HtmlFeatureCalloutsTemplateData {
   textColor?: string;
 }
 
+export interface HtmlFlowStep {
+  id: string;
+  label: string;
+  detail?: string;
+}
+
+export interface HtmlFlowLink {
+  from: string;
+  to: string;
+}
+
+export interface HtmlFlowDiagramTemplateData {
+  title: string;
+  steps: HtmlFlowStep[];
+  links: HtmlFlowLink[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export type HtmlDecisionNodeKind = 'question' | 'outcome';
+
+export interface HtmlDecisionNode {
+  id: string;
+  kind: HtmlDecisionNodeKind;
+  label: string;
+}
+
+export interface HtmlDecisionBranch {
+  from: string;
+  to: string;
+  label?: string;
+}
+
+export interface HtmlDecisionTreeTemplateData {
+  title: string;
+  nodes: HtmlDecisionNode[];
+  branches: HtmlDecisionBranch[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export interface HtmlSystemComponent {
+  id: string;
+  label: string;
+  role?: string;
+}
+
+export interface HtmlSystemLink {
+  from: string;
+  to: string;
+  label?: string;
+}
+
+export interface HtmlSystemDiagramTemplateData {
+  title: string;
+  components: HtmlSystemComponent[];
+  links: HtmlSystemLink[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
 export type HtmlStillTemplateData =
   | HtmlHeadlineTemplateData
   | HtmlStatCardTemplateData
@@ -396,7 +460,10 @@ export type HtmlStillTemplateData =
   | HtmlRouteMapTemplateData
   | HtmlProductCardTemplateData
   | HtmlProductComparisonTemplateData
-  | HtmlFeatureCalloutsTemplateData;
+  | HtmlFeatureCalloutsTemplateData
+  | HtmlFlowDiagramTemplateData
+  | HtmlDecisionTreeTemplateData
+  | HtmlSystemDiagramTemplateData;
 
 export interface HtmlVisual {
   kind: 'html';

@@ -1414,6 +1414,257 @@ describe('composition scene renderer', () => {
     expect(corner[2]).toBeGreaterThan(120);
   }, 120_000);
 
+  it('places a generated flow diagram on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('flow_diagram', {
+      title: 'Studio flow',
+      background: '#ff5a5f',
+      steps: [
+        { id: 'brief', label: 'Brief' },
+        { id: 'render', label: 'Render' }
+      ],
+      links: [{ from: 'brief', to: 'render' }]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-flow.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-flow',
+      imageLocalPath: 'assets/html-flow.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'flow_diagram',
+          templateData: {
+            title: 'Studio flow',
+            background: '#ff5a5f',
+            steps: [{ id: 'brief', label: 'Brief' }, { id: 'render', label: 'Render' }],
+            links: [{ from: 'brief', to: 'render' }]
+          },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-flow'
+        }
+      })],
+      [
+        makeAsset('html-flow', {
+          filename: 'html-flow.png',
+          localPath: 'assets/html-flow.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-flow-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places a generated decision tree on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('decision_tree', {
+      title: 'Go or wait',
+      background: '#ff5a5f',
+      nodes: [
+        { id: 'ready', kind: 'question', label: 'Ready?' },
+        { id: 'go', kind: 'outcome', label: 'Ship' },
+        { id: 'hold', kind: 'outcome', label: 'Hold' }
+      ],
+      branches: [
+        { from: 'ready', to: 'go', label: 'Ja' },
+        { from: 'ready', to: 'hold', label: 'Nee' }
+      ]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-decision.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-decision',
+      imageLocalPath: 'assets/html-decision.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'decision_tree',
+          templateData: {
+            title: 'Go or wait',
+            background: '#ff5a5f',
+            nodes: [
+              { id: 'ready', kind: 'question', label: 'Ready?' },
+              { id: 'go', kind: 'outcome', label: 'Ship' },
+              { id: 'hold', kind: 'outcome', label: 'Hold' }
+            ],
+            branches: [
+              { from: 'ready', to: 'go', label: 'Ja' },
+              { from: 'ready', to: 'hold', label: 'Nee' }
+            ]
+          },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-decision'
+        }
+      })],
+      [
+        makeAsset('html-decision', {
+          filename: 'html-decision.png',
+          localPath: 'assets/html-decision.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-decision-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places a generated system diagram on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('system_diagram', {
+      title: 'Studio stack',
+      background: '#ff5a5f',
+      components: [
+        { id: 'author', label: 'Authoring' },
+        { id: 'studio', label: 'Studio' }
+      ],
+      links: [{ from: 'author', to: 'studio', label: 'bind' }]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-system.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-system',
+      imageLocalPath: 'assets/html-system.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'system_diagram',
+          templateData: {
+            title: 'Studio stack',
+            background: '#ff5a5f',
+            components: [{ id: 'author', label: 'Authoring' }, { id: 'studio', label: 'Studio' }],
+            links: [{ from: 'author', to: 'studio', label: 'bind' }]
+          },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-system'
+        }
+      })],
+      [
+        makeAsset('html-system', {
+          filename: 'html-system.png',
+          localPath: 'assets/html-system.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-system-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
   it('fails closed on a missing composition asset file', async () => {
     const composition = createStudioComposition({
       canvas: { width: WIDTH, height: HEIGHT },

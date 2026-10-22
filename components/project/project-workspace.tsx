@@ -91,7 +91,7 @@ interface StockSearchState {
 }
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
-const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map', 'product_card', 'product_comparison', 'feature_callouts'];
+const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map', 'product_card', 'product_comparison', 'feature_callouts', 'flow_diagram', 'decision_tree', 'system_diagram'];
 
 function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<string, unknown> = {}): Record<string, unknown> {
   const title = typeof previous.title === 'string' ? previous.title : 'Headline';
@@ -194,6 +194,60 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
         : [
             { label: 'Lens', detail: 'Wide capture', side: 'left' },
             { label: 'Mic', detail: 'Studio voice', side: 'right' }
+          ]
+    };
+  }
+  if (template === 'flow_diagram') {
+    return {
+      title: title === 'Headline' ? 'Studio flow' : title,
+      steps: Array.isArray(previous.steps) && previous.steps.length > 0
+        ? previous.steps
+        : [
+            { id: 'brief', label: 'Brief', detail: 'Lock scope' },
+            { id: 'render', label: 'Render', detail: 'HTML still' },
+            { id: 'compose', label: 'Compose', detail: 'Studio MP4' }
+          ],
+      links: Array.isArray(previous.links) && previous.links.length > 0
+        ? previous.links
+        : [
+            { from: 'brief', to: 'render' },
+            { from: 'render', to: 'compose' }
+          ]
+    };
+  }
+  if (template === 'decision_tree') {
+    return {
+      title: title === 'Headline' ? 'Go or wait' : title,
+      nodes: Array.isArray(previous.nodes) && previous.nodes.length > 0
+        ? previous.nodes
+        : [
+            { id: 'ready', kind: 'question', label: 'Ready?' },
+            { id: 'go', kind: 'outcome', label: 'Ship' },
+            { id: 'hold', kind: 'outcome', label: 'Hold' }
+          ],
+      branches: Array.isArray(previous.branches) && previous.branches.length > 0
+        ? previous.branches
+        : [
+            { from: 'ready', to: 'go', label: 'Ja' },
+            { from: 'ready', to: 'hold', label: 'Nee' }
+          ]
+    };
+  }
+  if (template === 'system_diagram') {
+    return {
+      title: title === 'Headline' ? 'Studio stack' : title,
+      components: Array.isArray(previous.components) && previous.components.length > 0
+        ? previous.components
+        : [
+            { id: 'author', label: 'Authoring', role: 'Input' },
+            { id: 'still', label: 'HTML still', role: 'PNG' },
+            { id: 'studio', label: 'Studio', role: 'MP4' }
+          ],
+      links: Array.isArray(previous.links) && previous.links.length > 0
+        ? previous.links
+        : [
+            { from: 'author', to: 'still', label: 'render' },
+            { from: 'still', to: 'studio', label: 'bind' }
           ]
     };
   }
@@ -3359,6 +3413,286 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                 visual: {
                                   ...scene.visual,
                                   templateData: { ...(scene.visual.templateData ?? {}), callouts }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'flow_diagram' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Steps (id | label | detail)"
+                          value={Array.isArray(selectedScene.visual.templateData?.steps)
+                            ? (selectedScene.visual.templateData.steps as Array<{ id?: string; label?: string; detail?: string }>)
+                              .map((step) => `${step.id ?? ''} | ${step.label ?? ''} | ${step.detail ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const steps = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  const step: { id: string; label: string; detail?: string } = {
+                                    id: parts[0] ?? '',
+                                    label: parts[1] ?? ''
+                                  };
+                                  if (parts[2]) {
+                                    step.detail = parts.slice(2).join(' | ');
+                                  }
+                                  return step;
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), steps }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Links (from | to)"
+                          value={Array.isArray(selectedScene.visual.templateData?.links)
+                            ? (selectedScene.visual.templateData.links as Array<{ from?: string; to?: string }>)
+                              .map((link) => `${link.from ?? ''} | ${link.to ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const links = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  return { from: parts[0] ?? '', to: parts[1] ?? '' };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), links }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'decision_tree' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Nodes (id | kind | label)"
+                          value={Array.isArray(selectedScene.visual.templateData?.nodes)
+                            ? (selectedScene.visual.templateData.nodes as Array<{ id?: string; kind?: string; label?: string }>)
+                              .map((node) => `${node.id ?? ''} | ${node.kind ?? ''} | ${node.label ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const nodes = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  return { id: parts[0] ?? '', kind: parts[1] ?? '', label: parts.slice(2).join(' | ') };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), nodes }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Branches (from | to | label)"
+                          value={Array.isArray(selectedScene.visual.templateData?.branches)
+                            ? (selectedScene.visual.templateData.branches as Array<{ from?: string; to?: string; label?: string }>)
+                              .map((branch) => `${branch.from ?? ''} | ${branch.to ?? ''} | ${branch.label ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const branches = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  const branch: { from: string; to: string; label?: string } = {
+                                    from: parts[0] ?? '',
+                                    to: parts[1] ?? ''
+                                  };
+                                  if (parts[2]) {
+                                    branch.label = parts.slice(2).join(' | ');
+                                  }
+                                  return branch;
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), branches }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'system_diagram' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Components (id | label | role)"
+                          value={Array.isArray(selectedScene.visual.templateData?.components)
+                            ? (selectedScene.visual.templateData.components as Array<{ id?: string; label?: string; role?: string }>)
+                              .map((component) => `${component.id ?? ''} | ${component.label ?? ''} | ${component.role ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const components = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  const component: { id: string; label: string; role?: string } = {
+                                    id: parts[0] ?? '',
+                                    label: parts[1] ?? ''
+                                  };
+                                  if (parts[2]) {
+                                    component.role = parts.slice(2).join(' | ');
+                                  }
+                                  return component;
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), components }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Links (from | to | label)"
+                          value={Array.isArray(selectedScene.visual.templateData?.links)
+                            ? (selectedScene.visual.templateData.links as Array<{ from?: string; to?: string; label?: string }>)
+                              .map((link) => `${link.from ?? ''} | ${link.to ?? ''} | ${link.label ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const links = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  const link: { from: string; to: string; label?: string } = {
+                                    from: parts[0] ?? '',
+                                    to: parts[1] ?? ''
+                                  };
+                                  if (parts[2]) {
+                                    link.label = parts.slice(2).join(' | ');
+                                  }
+                                  return link;
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), links }
                                 }
                               };
                             })
