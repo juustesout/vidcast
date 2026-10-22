@@ -147,6 +147,12 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
     orientation?: StockOrientation;
     preferredProviders?: StockProviderId[];
     selection?: StockSelection;
+    html?: string;
+    css?: string;
+    width?: number;
+    height?: number;
+    background?: 'opaque' | 'transparent';
+    fingerprint?: string;
   } | undefined;
   const assetId = legacyVisual?.assetId ?? scene.assetIds?.[0];
   const referenceIds = scene.referenceIds ?? [];
@@ -168,6 +174,27 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
       preferredProviders: Array.isArray(legacyVisual.preferredProviders) ? legacyVisual.preferredProviders : undefined,
       assetId: legacyVisual.assetId ?? assetId,
       selection: legacyVisual.selection
+    };
+  }
+
+  if (legacyVisual?.kind === 'html' || scene.type === 'html') {
+    const template = legacyVisual?.template === 'headline_card' || legacyVisual?.template === 'comparison_card'
+      ? legacyVisual.template
+      : undefined;
+    const background = legacyVisual?.background === 'transparent' ? 'transparent' : legacyVisual?.background === 'opaque' ? 'opaque' : undefined;
+    return {
+      kind: 'html',
+      template,
+      html: typeof legacyVisual?.html === 'string' ? legacyVisual.html : undefined,
+      css: typeof legacyVisual?.css === 'string' ? legacyVisual.css : undefined,
+      templateData: legacyVisual?.templateData && typeof legacyVisual.templateData === 'object' && !Array.isArray(legacyVisual.templateData)
+        ? legacyVisual.templateData
+        : undefined,
+      width: typeof legacyVisual?.width === 'number' && Number.isFinite(legacyVisual.width) ? legacyVisual.width : undefined,
+      height: typeof legacyVisual?.height === 'number' && Number.isFinite(legacyVisual.height) ? legacyVisual.height : undefined,
+      background,
+      assetId: typeof legacyVisual?.assetId === 'string' ? legacyVisual.assetId : assetId,
+      fingerprint: typeof legacyVisual?.fingerprint === 'string' ? legacyVisual.fingerprint : undefined
     };
   }
 

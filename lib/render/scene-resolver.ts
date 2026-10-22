@@ -29,7 +29,7 @@ function createSceneIssue(code: string, message: string, severity: 'error' | 'wa
 // cropped (the source is letterboxed), so no warning is emitted.
 function resolveFitIssues(project: Project, source: RenderPlanScene['source'], fit: RenderFit): RenderPlanSceneStateIssue[] {
   if (
-    (source.kind !== 'image' && source.kind !== 'video') ||
+    (source.kind !== 'image' && source.kind !== 'video' && source.kind !== 'html') ||
     typeof source.width !== 'number' ||
     typeof source.height !== 'number' ||
     source.width <= 0 ||
@@ -206,6 +206,54 @@ function resolveVisualSource(project: Project, scene: Scene): {
         },
         issues: []
       };
+    case 'html': {
+      const asset = findAsset(project, visual.assetId);
+      if (asset?.localPath) {
+        return {
+          status: 'renderable',
+          source: {
+            kind: 'html',
+            assetId: asset.id,
+            assetPath: asset.localPath,
+            assetType: asset.type,
+            width: asset.width ?? visual.width,
+            height: asset.height ?? visual.height,
+            mimeType: asset.mimeType,
+            html: visual.html,
+            css: visual.css,
+            htmlTemplate: visual.template,
+            templateData: visual.templateData,
+            htmlBackground: visual.background,
+            htmlFingerprint: visual.fingerprint
+          },
+          issues: []
+        };
+      }
+
+      if (visual.html?.trim() || visual.template) {
+        return {
+          status: 'planned',
+          source: {
+            kind: 'html',
+            html: visual.html,
+            css: visual.css,
+            htmlTemplate: visual.template,
+            templateData: visual.templateData,
+            width: visual.width,
+            height: visual.height,
+            htmlBackground: visual.background,
+            htmlFingerprint: visual.fingerprint
+          },
+          issues: [createSceneIssue('scene.visual.html.planned', 'HTML still has not been rendered to a PNG yet.', 'warning')]
+        };
+      }
+
+      return {
+        status: 'invalid',
+        source: { kind: 'html' },
+        issues: [createSceneIssue('scene.visual.html.missing', 'HTML still requires a template or HTML markup.')]
+      };
+    }
     case 'text':
       return {
         status: 'renderable',
@@ -370,10 +418,10 @@ function resolveSceneComposition(project: Project, scene: Scene): { composition?
       continue;
     }
 
-    const boundStock = layer.type === 'image' && !layer.assetId && !layer.localPath && scene.visual?.kind === 'stock_image'
+    const boundVisualAsset = layer.type === 'image' && !layer.assetId && !layer.localPath && (scene.visual?.kind === 'stock_image' || scene.visual?.kind === 'html')
       ? scene.visual.assetId
       : undefined;
-    const resolved = resolveCompositionAssetPath(project, layer.assetId ?? boundStock, layer.localPath);
+    const resolved = resolveCompositionAssetPath(project, layer.assetId ?? boundVisualAsset, layer.localPath);
     issues.push(...resolved.issues);
     if (
       layer.enabled !== false &&

@@ -13,6 +13,7 @@ import {
   buildLayerScaleFilter,
   resolveSafeProjectAssetPath
 } from '@/lib/render/scene-composition-compositor';
+import { renderHtmlStillPng } from '@/lib/render/html-still/chromium-still';
 import { createStudioComposition, STUDIO_BIGSCREEN_RECT, STUDIO_OVERLAY_RECT } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
@@ -726,6 +727,85 @@ describe('composition scene renderer', () => {
     expect(before[2]).toBeGreaterThan(120);
     expect(after[2]).toBeGreaterThan(120);
     expect(outside[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places a Chromium HTML still on the studio bigscreen in a real MP4', async () => {
+    const still = await renderHtmlStillPng({
+      markup: '<div style="width:100%;height:100%;background:#ff5a5f;"></div>',
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: '#ff5a5f'
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-still.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-still',
+      imageLocalPath: 'assets/html-still.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          html: '<div style="width:100%;height:100%;background:#ff5a5f;"></div>',
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-still'
+        }
+      })],
+      [
+        makeAsset('html-still', {
+          filename: 'html-still.png',
+          localPath: 'assets/html-still.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    expect(plan.scenes[0].source).toMatchObject({
+      kind: 'html',
+      assetId: 'html-still',
+      assetPath: 'assets/html-still.png'
+    });
+    expect(plan.scenes[0].composition?.layers.find((layer) => layer.type === 'image')).toMatchObject({
+      enabled: true,
+      assetId: 'html-still',
+      assetPath: 'assets/html-still.png',
+      rect: { x: 48, y: 24, width: 180, height: 100 },
+      fit: 'contain'
+    });
+
+    const { result, outputPath } = await renderPlan(plan, 'html-still-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+
+    const screen = await samplePixel(outputPath, 90, 50);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(screen[2]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+    expect(corner[0]).toBeLessThan(80);
   }, 120_000);
 
   it('fails closed on a missing composition asset file', async () => {

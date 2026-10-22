@@ -21,6 +21,10 @@ export function getAssetUsage(project: Project, assetId: string): string[] {
         return visual.assetId === assetId || visual.generation.assetId === assetId;
       }
 
+      if (visual.kind === 'html' || visual.kind === 'stock_image') {
+        return visual.assetId === assetId;
+      }
+
       return false;
     })
     .map((scene) => scene.id);

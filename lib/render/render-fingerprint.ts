@@ -24,7 +24,12 @@ export function createSceneRenderFingerprint(plan: RenderPlan, scene: RenderPlan
         template: scene.source.template,
         templateData: scene.source.templateData,
         style: scene.source.style,
-        text: scene.source.text
+        text: scene.source.text,
+        html: scene.source.html,
+        css: scene.source.css,
+        htmlTemplate: scene.source.htmlTemplate,
+        htmlBackground: scene.source.htmlBackground,
+        htmlFingerprint: scene.source.htmlFingerprint
       },
       motion: scene.motion,
       transition: scene.transition,

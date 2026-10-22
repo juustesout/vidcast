@@ -33,7 +33,7 @@ import type { WorkflowNavigationTarget, WorkflowStepId } from '@/lib/workflow/wo
 import type { GenerationProvider, GenerationStatus } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
-import type { GraphicTemplateType, OverlaySpec, Scene, VisualSpec } from '@/lib/types/scene';
+import type { GraphicTemplateType, HtmlStillTemplateType, OverlaySpec, Scene, VisualSpec } from '@/lib/types/scene';
 import type { StockOrientation } from '@/lib/types/stock';
 import { validateProject } from '@/lib/validation/project-validation';
 
@@ -41,7 +41,7 @@ interface ProjectWorkspaceProps {
   project: Project;
 }
 
-type VisualMode = 'asset' | 'generated_image' | 'generated_video' | 'stock_image' | 'graphic' | 'text' | 'blank';
+type VisualMode = 'asset' | 'generated_image' | 'generated_video' | 'stock_image' | 'graphic' | 'html' | 'text' | 'blank';
 type WorkspaceTab = 'story' | 'scenes' | 'assets' | 'references' | 'generation';
 type AssetFilter = 'all' | 'images' | 'video' | 'audio' | 'generated' | 'imported';
 type StoryFocusArea = 'brief' | 'story' | 'scene_plan';
@@ -91,6 +91,7 @@ interface StockSearchState {
 }
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
+const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline_card', 'comparison_card'];
 
 function cloneProject(projectValue: Project): Project {
   return JSON.parse(JSON.stringify(projectValue)) as Project;
@@ -169,6 +170,8 @@ function ensureVisualForMode(scene: Scene, mode: VisualMode): VisualSpec {
       };
     case 'graphic':
       return { kind: 'graphic', template: 'simple_diagram', templateData: {} };
+    case 'html':
+      return { kind: 'html', template: 'headline_card', templateData: { title: 'Headline', subtitle: '' }, width: 1920, height: 1080, background: 'opaque' };
     case 'text':
       return { kind: 'text', text: scene.overlay?.text ?? scene.narration?.text ?? '' };
     case 'blank':
@@ -220,6 +223,10 @@ function actionTypeLabel(type: ProductionPlannedAction['type']): string {
   switch (type) {
     case 'image_generate':
       return 'Image';
+    case 'stock_select':
+      return 'Stock';
+    case 'html_render':
+      return 'HTML still';
     case 'video_submit':
       return 'Video';
     case 'video_poll':
@@ -585,7 +592,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   function setVisualMode(scene: Scene, mode: VisualMode): void {
     updateScene(scene.id, (current) => {
       const visual = ensureVisualForMode(current, mode);
-      const type = mode === 'generated_video' ? 'video' : mode === 'graphic' ? 'graphic' : mode === 'text' ? 'text' : mode === 'blank' ? 'blank' : 'image';
+      const type = mode === 'generated_video' ? 'video' : mode === 'graphic' ? 'graphic' : mode === 'html' ? 'html' : mode === 'text' ? 'text' : mode === 'blank' ? 'blank' : 'image';
       return {
         ...current,
         type,
@@ -914,6 +921,36 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     }
 
     setGenerationMessage(`Generation completed (${body.provider ?? 'provider'}${body.model ? ` / ${body.model}` : ''}).`);
+    if (body.assetId) {
+      setSelectedAssetId(body.assetId);
+    }
+    await refreshProject();
+    setGeneratingSceneId(null);
+  }
+
+  async function runHtmlStill(sceneId: string, regenerate: boolean): Promise<void> {
+    setGeneratingSceneId(sceneId);
+    setGenerationMessage(regenerate ? 'Re-rendering HTML still...' : 'Rendering HTML still...');
+
+    const response = await fetch(`/api/projects/${draft.id}/scenes/${sceneId}/render-html-still`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ regenerate })
+    });
+
+    const body = (await response.json().catch(() => ({}))) as {
+      message?: string;
+      assetId?: string;
+    };
+
+    if (!response.ok) {
+      setGenerationMessage(body.message || 'HTML still render failed.');
+      setGeneratingSceneId(null);
+      await refreshProject();
+      return;
+    }
+
+    setGenerationMessage(body.message || 'HTML still PNG rendered.');
     if (body.assetId) {
       setSelectedAssetId(body.assetId);
     }
@@ -1645,7 +1682,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                 ) : null}
                 <Field label="Duration" value={selectedScene.duration} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, duration: Number(value) }))} type="number" step="0.1" />
                 <SelectField label="Type" value={selectedScene.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, type: value as Scene['type'] }))} options={SCENE_TYPES} />
-                <SelectField label="Visual source" value={visualModeOf(selectedScene)} onChange={(value) => setVisualMode(selectedScene, value as VisualMode)} options={['asset', 'generated_image', 'generated_video', 'stock_image', 'graphic', 'text', 'blank']} />
+                <SelectField label="Visual source" value={visualModeOf(selectedScene)} onChange={(value) => setVisualMode(selectedScene, value as VisualMode)} options={['asset', 'generated_image', 'generated_video', 'stock_image', 'graphic', 'html', 'text', 'blank']} />
                 <SelectField label="Motion" value={selectedScene.render.motion.preset} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, motion: { ...scene.render.motion, preset: value as Scene['render']['motion']['preset'] } } }))} options={MOTION_PRESETS} />
                 <SelectField label="Transition" value={selectedScene.render.transition.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, transition: { ...scene.render.transition, type: value as Scene['render']['transition']['type'] } } }))} options={TRANSITION_PRESETS} />
                 <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
@@ -2301,6 +2338,167 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                     }
                     options={GRAPHIC_TEMPLATES}
                   />
+                ) : null}
+
+                {selectedScene.visual?.kind === 'html' ? (
+                  <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">HTML still</p>
+                    <SelectField
+                      label="Template"
+                      value={selectedScene.visual.template ?? 'headline_card'}
+                      onChange={(value) =>
+                        updateScene(selectedScene.id, (scene) => {
+                          if (!scene.visual || scene.visual.kind !== 'html') {
+                            return scene;
+                          }
+                          const template = value as HtmlStillTemplateType;
+                          const nextData = template === 'comparison_card'
+                            ? {
+                                title: typeof scene.visual.templateData?.title === 'string' ? scene.visual.templateData.title : 'Comparison',
+                                leftLabel: 'Before',
+                                rightLabel: 'After',
+                                rows: [
+                                  { label: 'Metric', left: 'Low', right: 'High' }
+                                ]
+                              }
+                            : {
+                                title: typeof scene.visual.templateData?.title === 'string' ? scene.visual.templateData.title : 'Headline',
+                                subtitle: typeof scene.visual.templateData?.subtitle === 'string' ? scene.visual.templateData.subtitle : ''
+                              };
+                          return {
+                            ...scene,
+                            visual: {
+                              ...scene.visual,
+                              template,
+                              templateData: nextData
+                            }
+                          };
+                        })
+                      }
+                      options={HTML_STILL_TEMPLATES}
+                    />
+                    <Field
+                      label="Title"
+                      value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                      onChange={(value) =>
+                        updateScene(selectedScene.id, (scene) => {
+                          if (!scene.visual || scene.visual.kind !== 'html') {
+                            return scene;
+                          }
+                          return {
+                            ...scene,
+                            visual: {
+                              ...scene.visual,
+                              templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                            }
+                          };
+                        })
+                      }
+                    />
+                    {(selectedScene.visual.template ?? 'headline_card') === 'headline_card' ? (
+                      <>
+                        <Field
+                          label="Kicker"
+                          value={typeof selectedScene.visual.templateData?.kicker === 'string' ? selectedScene.visual.templateData.kicker : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), kicker: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Subtitle"
+                          value={typeof selectedScene.visual.templateData?.subtitle === 'string' ? selectedScene.visual.templateData.subtitle : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), subtitle: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : (
+                      <Field
+                        label="Rows (label | left | right)"
+                        value={Array.isArray(selectedScene.visual.templateData?.rows)
+                          ? (selectedScene.visual.templateData.rows as Array<{ label?: string; left?: string; right?: string }>)
+                            .map((row) => `${row.label ?? ''} | ${row.left ?? ''} | ${row.right ?? ''}`)
+                            .join('\n')
+                          : ''}
+                        asTextArea
+                        onChange={(value) =>
+                          updateScene(selectedScene.id, (scene) => {
+                            if (!scene.visual || scene.visual.kind !== 'html') {
+                              return scene;
+                            }
+                            const rows = String(value)
+                              .split('\n')
+                              .map((line) => line.split('|').map((part) => part.trim()))
+                              .filter((parts) => parts.some((part) => part.length > 0))
+                              .map((parts) => ({
+                                label: parts[0] ?? '',
+                                left: parts[1] ?? '',
+                                right: parts[2] ?? ''
+                              }));
+                            return {
+                              ...scene,
+                              visual: {
+                                ...scene.visual,
+                                templateData: { ...(scene.visual.templateData ?? {}), rows }
+                              }
+                            };
+                          })
+                        }
+                      />
+                    )}
+                    <SelectField
+                      label="Background"
+                      value={selectedScene.visual.background ?? 'opaque'}
+                      onChange={(value) =>
+                        updateScene(selectedScene.id, (scene) => {
+                          if (!scene.visual || scene.visual.kind !== 'html') {
+                            return scene;
+                          }
+                          return {
+                            ...scene,
+                            visual: {
+                              ...scene.visual,
+                              background: value === 'transparent' ? 'transparent' : 'opaque'
+                            }
+                          };
+                        })
+                      }
+                      options={['opaque', 'transparent']}
+                    />
+                    <p className="text-xs text-slate-300">
+                      {selectedScene.visual.assetId ? `PNG asset: ${selectedScene.visual.assetId}` : 'PNG not rendered yet'}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={generatingSceneId === selectedScene.id}
+                      onClick={() => void runHtmlStill(selectedScene.id, Boolean(selectedScene.visual && selectedScene.visual.kind === 'html' && selectedScene.visual.assetId))}
+                      className="rounded-2xl bg-amber-300 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-60"
+                    >
+                      {generatingSceneId === selectedScene.id ? 'Rendering...' : selectedScene.visual.assetId ? 'Re-render HTML still' : 'Render HTML still'}
+                    </button>
+                  </div>
                 ) : null}
 
                 <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3">

@@ -39,6 +39,8 @@ const startRunSchema = z.object({
   limits: z
     .object({
       image_generate: z.number().int().positive().max(128).optional(),
+      stock_select: z.number().int().positive().max(128).optional(),
+      html_render: z.number().int().positive().max(4).optional(),
       video_submit: z.number().int().positive().max(128).optional(),
       video_poll: z.number().int().positive().max(128).optional(),
       narration_generate: z.number().int().positive().max(128).optional(),

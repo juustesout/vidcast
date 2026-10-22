@@ -454,6 +454,26 @@ export function validateProject(project: Project): RenderValidationResult {
     if (visual.kind === 'text' && !visual.text.trim()) {
       pushIssue(warnings, 'warning', 'scene.visual.text.empty', `scenes.${sceneId}.visual.text`, 'Text visual is empty.');
     }
+
+    if (visual.kind === 'html') {
+      const hasTemplate = visual.template === 'headline_card' || visual.template === 'comparison_card';
+      const hasMarkup = typeof visual.html === 'string' && visual.html.trim().length > 0;
+      if (!hasTemplate && !hasMarkup) {
+        pushIssue(errors, 'error', 'scene.visual.html.source.required', `scenes.${sceneId}.visual.html`, 'HTML still requires a template or HTML markup.');
+      }
+      if (visual.background !== undefined && visual.background !== 'opaque' && visual.background !== 'transparent') {
+        pushIssue(errors, 'error', 'scene.visual.html.background.invalid', `scenes.${sceneId}.visual.background`, 'HTML still background must be opaque or transparent.');
+      }
+      if (visual.width !== undefined && (!Number.isInteger(visual.width) || visual.width < 64 || visual.width > 3840)) {
+        pushIssue(errors, 'error', 'scene.visual.html.size.invalid', `scenes.${sceneId}.visual.width`, 'HTML still width must be an integer between 64 and 3840.');
+      }
+      if (visual.height !== undefined && (!Number.isInteger(visual.height) || visual.height < 64 || visual.height > 2160)) {
+        pushIssue(errors, 'error', 'scene.visual.html.size.invalid', `scenes.${sceneId}.visual.height`, 'HTML still height must be an integer between 64 and 2160.');
+      }
+      if (visual.assetId && !assetIds.has(visual.assetId)) {
+        pushIssue(errors, 'error', 'scene.visual.html.asset.missing', `scenes.${sceneId}.visual.assetId`, `Referenced HTML still asset ${visual.assetId} does not exist.`);
+      }
+    }
   }
 
   for (const scene of project.scenes) {

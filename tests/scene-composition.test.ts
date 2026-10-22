@@ -648,6 +648,53 @@ describe('scene composition render plan', () => {
     });
   });
 
+  it('binds an HTML still PNG onto the studio bigscreen layer', () => {
+    const composition = createStudioComposition({
+      backgroundAssetId: 'studio_back',
+      foregroundAssetId: 'studio_desk',
+      presenterMode: 'full_canvas'
+    });
+    composition.layers = composition.layers.filter((layer) => layer.type !== 'presenter');
+    const project = makeProject(
+      [makeScene('scene-1', {
+        kind: 'html',
+        template: 'headline_card',
+        templateData: { title: 'Live' },
+        assetId: 'html-1',
+        width: 1920,
+        height: 1080
+      }, { type: 'html', composition })],
+      {
+        assets: [
+          makeAsset('studio_back'),
+          makeAsset('studio_desk'),
+          makeAsset('html-1', {
+            provenance: 'generated',
+            filename: 'html-1.png',
+            localPath: 'assets/html-1.png',
+            mimeType: 'image/png',
+            width: 1920,
+            height: 1080
+          })
+        ]
+      }
+    );
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].source).toMatchObject({
+      kind: 'html',
+      assetId: 'html-1',
+      assetPath: 'assets/html-1.png'
+    });
+    const screen = plan.scenes[0].composition?.layers.find((layer) => layer.type === 'image');
+    expect(screen).toMatchObject({
+      enabled: true,
+      assetId: 'html-1',
+      assetPath: 'assets/html-1.png',
+      rect: STUDIO_BIGSCREEN_RECT,
+      fit: 'contain'
+    });
+  });
+
   it('warns when a hotlinked stock photo cannot fill the studio bigscreen', () => {
     const composition = createStudioComposition({
       backgroundAssetId: 'studio_back',

@@ -3,7 +3,7 @@ import type { LogoOverlayPosition, MotionPreset, OverlayPosition, OverlayType, S
 import type { AssetProvenance, AssetStatus, AssetType } from './types/asset';
 import type { GenerationProvider, GenerationStatus } from './types/generation';
 
-export const SCENE_TYPES: SceneType[] = ['image', 'video', 'graphic', 'text', 'blank'];
+export const SCENE_TYPES: SceneType[] = ['image', 'video', 'graphic', 'text', 'blank', 'html'];
 
 export const MOTION_PRESETS: MotionPreset[] = [
   'none',

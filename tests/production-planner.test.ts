@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { deriveProductionPlan } from '@/lib/production/production-planner';
 import { normalizeProject } from '@/lib/projects/normalize-project';
+import { createHtmlStillFingerprint } from '@/lib/render/html-still/fingerprint';
 import { createSceneRenderFingerprint } from '@/lib/render/render-fingerprint';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import type { Project } from '@/lib/types/render';
@@ -400,5 +401,56 @@ describe('deriveProductionPlan', () => {
     expect(action?.status).toBe('current');
     expect(action?.execute).toBe(false);
     expect(action?.reason).toMatch(/pinned/i);
+  });
+
+  it('schedules html_render until the PNG fingerprint is current', () => {
+    const project = createProject();
+    const id = 'scene:scene-1:html_render';
+    project.scenes[0].type = 'html';
+    project.scenes[0].visual = {
+      kind: 'html',
+      template: 'headline_card',
+      templateData: { title: 'Live' },
+      width: 1920,
+      height: 1080,
+      background: 'opaque'
+    };
+
+    const ready = deriveProductionPlan(project).actions.find((entry) => entry.id === id);
+    expect(ready?.status).toBe('ready');
+    expect(ready?.execute).toBe(true);
+
+    const renderAction = deriveProductionPlan(project).actions.find((entry) => entry.id === 'scene:scene-1:scene_render');
+    expect(renderAction?.status).toBe('blocked');
+  });
+
+  it('marks a matching HTML still PNG as current and retries a stale fingerprint', () => {
+    const project = createProject();
+    const id = 'scene:scene-1:html_render';
+    const visual = {
+      kind: 'html' as const,
+      template: 'comparison_card' as const,
+      templateData: { title: 'ARR', rows: [{ label: 'Q1', left: '1', right: '2' }] },
+      width: 1920,
+      height: 1080,
+      background: 'opaque' as const,
+      assetId: 'html-1',
+      fingerprint: ''
+    };
+    visual.fingerprint = createHtmlStillFingerprint(visual);
+    project.assets.push({ id: 'html-1', type: 'image', status: 'available', localPath: 'assets/html-1.png' } as unknown as Project['assets'][number]);
+    project.scenes[0].type = 'html';
+    project.scenes[0].visual = visual;
+
+    expect(deriveProductionPlan(project).actions.find((entry) => entry.id === id)?.status).toBe('current');
+
+    project.scenes[0].visual = { ...visual, templateData: { ...visual.templateData, title: 'Changed' } };
+    const stale = deriveProductionPlan(project).actions.find((entry) => entry.id === id);
+    expect(stale?.status).toBe('ready');
+    expect(stale?.reason).toMatch(/Retry/i);
+    expect(stale?.payload).toMatchObject({ regenerate: true });
+
+    const forced = deriveProductionPlan(project, { force: true, completedActionIds: [] }).actions.find((entry) => entry.id === id);
+    expect(forced?.status).toBe('ready');
   });
 });

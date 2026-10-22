@@ -1,3 +1,4 @@
+import { htmlStillAssetIsCurrent } from '@/lib/render/html-still/fingerprint';
 import { deriveNarrationFreshness } from '@/lib/generation/narration-freshness';
 import {
   evaluatePresenterBudget,
@@ -20,6 +21,7 @@ import type { RunMode } from './run-types';
 export type ProductionActionType =
   | 'image_generate'
   | 'stock_select'
+  | 'html_render'
   | 'video_submit'
   | 'video_poll'
   | 'narration_generate'
@@ -381,6 +383,55 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       });
     }
 
+    if (scene.visual?.kind === 'html') {
+      const htmlVisual = scene.visual;
+      const id = actionId('html_render', scene.id);
+      const asset = htmlVisual.assetId
+        ? project.assets.find((entry) => entry.id === htmlVisual.assetId)
+        : undefined;
+      const usable = Boolean(asset?.localPath) && htmlStillAssetIsCurrent(htmlVisual);
+      const hasSource = Boolean(htmlVisual.template || htmlVisual.html?.trim());
+
+      let actionStatus: ProductionActionStatus = 'ready';
+      let reason = 'HTML still render is ready.';
+      let execute = true;
+
+      if (skippedActionIds.has(id)) {
+        actionStatus = 'skipped';
+        execute = false;
+        reason = 'Skipped by user.';
+      } else if (failedActionIds.has(id)) {
+        actionStatus = 'failed';
+        execute = false;
+        reason = 'Failed earlier in this run.';
+      } else if (usable && !forceRegenerate(id)) {
+        actionStatus = 'current';
+        execute = false;
+        reason = 'HTML still PNG is current.';
+      } else if (!hasSource) {
+        actionStatus = 'blocked';
+        execute = false;
+        reason = 'HTML still requires a template or HTML markup.';
+      } else if (asset?.localPath) {
+        actionStatus = 'ready';
+        reason = 'Retry HTML still render.';
+      }
+
+      register({
+        id,
+        type: 'html_render',
+        sceneId: scene.id,
+        sceneOrder: scene.order,
+        status: actionStatus,
+        reason,
+        dependencyActionIds: [],
+        execute,
+        payload: {
+          regenerate: Boolean(asset?.localPath)
+        }
+      });
+    }
+
     const narrationState = deriveNarrationFreshness(project, scene);
     const narrationId = actionId('narration_generate', scene.id);
     let narrationStatus: ProductionActionStatus = 'ready';
@@ -578,7 +629,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
       renderReason = renderStatus.problems[0]?.message || 'Scene is not renderable yet.';
     }
 
-    const visualSubmit = actions.find((action) => action.sceneId === scene.id && (action.type === 'image_generate' || action.type === 'stock_select' || action.type === 'video_submit'));
+    const visualSubmit = actions.find((action) => action.sceneId === scene.id && (action.type === 'image_generate' || action.type === 'stock_select' || action.type === 'html_render' || action.type === 'video_submit'));
     const videoPoll = actions.find((action) => action.sceneId === scene.id && action.type === 'video_poll');
     const visualPending = Boolean(
       (visualSubmit && (visualSubmit.status === 'ready' || visualSubmit.status === 'running' || visualSubmit.status === 'waiting_dependency')) ||
@@ -697,7 +748,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
     const rightOrder = right.sceneOrder ?? Number.MAX_SAFE_INTEGER;
     if (leftOrder !== rightOrder) return leftOrder - rightOrder;
 
-    const actionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
+    const actionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'html_render', 'video_submit', 'video_poll', 'narration_generate', 'scene_render', 'final_compose'];
     return actionOrder.indexOf(left.type) - actionOrder.indexOf(right.type);
   });
 

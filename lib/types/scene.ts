@@ -2,7 +2,7 @@ import type { GenerationAttempt, GenerationRecord } from './generation';
 import type { SceneCompositionSpec } from './scene-composition';
 import type { StockOrientation, StockProviderId, StockSelection } from './stock';
 
-export type SceneType = 'image' | 'video' | 'graphic' | 'text' | 'blank';
+export type SceneType = 'image' | 'video' | 'graphic' | 'text' | 'blank' | 'html';
 
 export type MotionPreset =
   | 'none'
@@ -228,6 +228,23 @@ export interface GraphicVisual {
   style?: GraphicStyleSpec;
 }
 
+export type HtmlStillBackground = 'opaque' | 'transparent';
+
+export type HtmlStillTemplateType = 'headline_card' | 'comparison_card';
+
+export interface HtmlVisual {
+  kind: 'html';
+  template?: HtmlStillTemplateType;
+  html?: string;
+  css?: string;
+  templateData?: Record<string, unknown>;
+  width?: number;
+  height?: number;
+  background?: HtmlStillBackground;
+  assetId?: string;
+  fingerprint?: string;
+}
+
 export interface TextVisual {
   kind: 'text';
   text: string;
@@ -237,7 +254,7 @@ export interface BlankVisual {
   kind: 'blank';
 }
 
-export type VisualSpec = AssetVisual | GeneratedImageVisual | GeneratedVideoVisual | StockImageVisual | GraphicVisual | TextVisual | BlankVisual;
+export type VisualSpec = AssetVisual | GeneratedImageVisual | GeneratedVideoVisual | StockImageVisual | GraphicVisual | HtmlVisual | TextVisual | BlankVisual;
 
 export interface SceneSourceTrace {
   sceneIntentId?: string;

@@ -1,4 +1,6 @@
 import { generateSceneImage, SceneImageGenerationError } from '@/lib/generation/image-generation-service';
+import { HtmlStillError } from '@/lib/render/html-still/errors';
+import { renderSceneHtmlStill } from '@/lib/render/html-still/service';
 import { generateProjectMusic, ProjectMusicGenerationError, selectProjectMusic } from '@/lib/generation/music-service';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
 import { pollPresenterClip, PresenterGenerationError, submitPresenterClip } from '@/lib/generation/presenter-service';
@@ -103,6 +105,7 @@ interface ServiceDependencies {
   derivePlan: typeof deriveProductionPlan;
   generateImage: typeof generateSceneImage;
   selectStockImage: typeof selectSceneStockImage;
+  renderHtmlStill: typeof renderSceneHtmlStill;
   submitVideo: typeof submitSceneVideoGeneration;
   pollVideo: typeof refreshVideoGenerationAttempt;
   generateNarration: typeof generateSceneNarration;
@@ -122,6 +125,7 @@ const defaultDependencies: ServiceDependencies = {
   derivePlan: deriveProductionPlan,
   generateImage: generateSceneImage,
   selectStockImage: selectSceneStockImage,
+  renderHtmlStill: renderSceneHtmlStill,
   submitVideo: submitSceneVideoGeneration,
   pollVideo: refreshVideoGenerationAttempt,
   generateNarration: generateSceneNarration,
@@ -154,6 +158,7 @@ function defaultActionLimits(): Record<ProductionActionType, number> {
   return {
     image_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_IMAGE, 2, 1, 16),
     stock_select: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_STOCK, 2, 1, 16),
+    html_render: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_HTML, 1, 1, 4),
     video_submit: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_SUBMIT, 2, 1, 16),
     video_poll: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_VIDEO_POLL, 4, 1, 32),
     narration_generate: envInt(process.env.PRODUCTION_RUN_CONCURRENCY_NARRATION, 2, 1, 16),
@@ -197,6 +202,7 @@ function mergePerActionLimits(
   return {
     image_generate: envInt(String(override.image_generate ?? defaults.image_generate), defaults.image_generate ?? 1, 1, 64),
     stock_select: envInt(String(override.stock_select ?? defaults.stock_select), defaults.stock_select ?? 1, 1, 64),
+    html_render: envInt(String(override.html_render ?? defaults.html_render), defaults.html_render ?? 1, 1, 4),
     video_submit: envInt(String(override.video_submit ?? defaults.video_submit), defaults.video_submit ?? 1, 1, 64),
     video_poll: envInt(String(override.video_poll ?? defaults.video_poll), defaults.video_poll ?? 1, 1, 64),
     narration_generate: envInt(String(override.narration_generate ?? defaults.narration_generate), defaults.narration_generate ?? 1, 1, 64),
@@ -1100,6 +1106,38 @@ export class HeadlessProductionRunService {
         };
       } catch (error) {
         if (error instanceof SceneImageGenerationError) {
+          throw createProductionRunnerError(error.message, {
+            message: error.message,
+            code: error.code,
+            httpStatus: error.status,
+            endpoint,
+            sceneId: action.sceneId
+          });
+        }
+        throw error;
+      }
+    }
+
+    if (action.type === 'html_render') {
+      if (!action.sceneId) {
+        throw createProductionRunnerError('HTML still action is missing sceneId.', {
+          code: 'INVALID_ACTION',
+          endpoint: `/api/projects/${projectId}/scenes/:sceneId/render-html-still`
+        });
+      }
+
+      const endpoint = `/api/projects/${projectId}/scenes/${action.sceneId}/render-html-still`;
+      try {
+        const regenerate = Boolean(action.payload?.regenerate);
+        const result = await this.dependencies.renderHtmlStill(projectId, action.sceneId, { regenerate });
+        return {
+          message: result.reused ? 'HTML still PNG is current.' : 'HTML still PNG rendered.',
+          endpoint,
+          sceneId: action.sceneId,
+          details: result.assetId
+        };
+      } catch (error) {
+        if (error instanceof HtmlStillError) {
           throw createProductionRunnerError(error.message, {
             message: error.message,
             code: error.code,

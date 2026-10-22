@@ -22,6 +22,9 @@ function getSceneAssetId(scene: Scene): string | undefined {
   if (scene.visual.kind === 'generated_image' || scene.visual.kind === 'generated_video') {
     return scene.visual.assetId ?? scene.visual.generation.assetId;
   }
+  if (scene.visual.kind === 'html' || scene.visual.kind === 'stock_image') {
+    return scene.visual.assetId;
+  }
   return undefined;
 }
 
@@ -64,6 +67,10 @@ function previewPlaceholder(scene: Scene): string {
 
   if (visual.kind === 'graphic') {
     return `GRAPHIC\n${visual.template ?? 'template pending'}`;
+  }
+
+  if (visual.kind === 'html') {
+    return `HTML STILL\n${visual.template ?? 'custom html'}\n${visual.assetId ? 'PNG ready' : 'PNG not rendered yet'}`;
   }
 
   return 'No visual asset yet';
@@ -283,7 +290,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
           }),
           React.createElement(InfoCard, {
             label: 'Template',
-            value: scene.visual && scene.visual.kind === 'graphic' ? scene.visual.template ?? 'None' : 'n/a'
+            value: scene.visual && (scene.visual.kind === 'graphic' || scene.visual.kind === 'html') ? scene.visual.template ?? 'None' : 'n/a'
           })
         ),
         React.createElement(

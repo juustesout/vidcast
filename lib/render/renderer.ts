@@ -175,7 +175,7 @@ async function resolveSceneSourcePath(plan: RenderPlan, scene: RenderPlanScene, 
     return fetchRemoteSourceToFile(scene.source.remoteUrl, options.tempDir, `${options.sceneId}-${options.renderId}-remote`);
   }
 
-  if (scene.source.kind === 'image' || scene.source.kind === 'video') {
+  if (scene.source.kind === 'image' || scene.source.kind === 'video' || (scene.source.kind === 'html' && scene.source.assetPath)) {
     if (!scene.source.assetPath) {
       throw new SceneRenderError('Scene source is missing a resolved asset path.', 'INVALID_PLAN');
     }

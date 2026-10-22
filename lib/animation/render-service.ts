@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { findChromiumPath } from '@/lib/render/chromium';
 import { createFFmpegRuntime } from '@/lib/render/ffmpeg-runtime';
 import { runFfmpeg, runProcess } from '@/lib/render/ffmpeg-executor';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -18,15 +19,6 @@ const MOTION_CANVAS_OUTPUT = path.join(MOTION_CANVAS_ROOT, 'output');
 const PARAMS_FILE = path.join(MOTION_CANVAS_OUTPUT, 'p102-4-params.json');
 const DEFAULT_MC_PORT = 9000;
 const RENDER_TIMEOUT_MS = 180_000;
-const CHROMIUM_CANDIDATES = [
-  process.env.CHROME_PATH,
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-  '/usr/bin/google-chrome',
-  '/usr/bin/google-chrome-stable',
-  '/usr/lib/chromium/chromium'
-];
 
 const runtime = createFFmpegRuntime();
 
@@ -34,22 +26,12 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function findChromium(): Promise<string> {
-  for (const candidate of CHROMIUM_CANDIDATES) {
-    if (candidate && await pathExists(candidate)) {
-      return candidate;
-    }
+  const chromium = await findChromiumPath();
+  if (!chromium) {
+    throw new AnimationError('animation.chromium.missing', 'No Chromium/Chrome binary found for Motion Canvas render.');
   }
-  throw new AnimationError('animation.chromium.missing', 'No Chromium/Chrome binary found for Motion Canvas render.');
+  return chromium;
 }
 
 async function ensureFfmpeg(): Promise<void> {

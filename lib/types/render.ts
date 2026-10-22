@@ -1,6 +1,6 @@
 import type { Asset, AssetType } from './asset';
 import type { ExplainerSpec } from './explainer';
-import type { GraphicStyleSpec, GraphicTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, StudioOverlaySpec, TransitionSpec } from './scene';
+import type { GraphicStyleSpec, GraphicTemplateType, HtmlStillBackground, HtmlStillTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, StudioOverlaySpec, TransitionSpec } from './scene';
 import type { SceneCompositionFit, SceneCompositionLayerType, SceneCompositionPresenterMode, SceneCompositionPresetName, SceneCompositionRect, SceneCompositionSchemaVersion } from './scene-composition';
 import type { ReferenceImage } from './reference';
 import type { PresenterClipSpec, ProjectPresenterSettings, CompositionPresenterPlan } from './presenter';
@@ -142,6 +142,11 @@ export interface RenderPlanSceneSource {
   templateData?: Record<string, unknown>;
   style?: GraphicStyleSpec;
   text?: string;
+  html?: string;
+  css?: string;
+  htmlTemplate?: HtmlStillTemplateType;
+  htmlBackground?: HtmlStillBackground;
+  htmlFingerprint?: string;
 }
 
 // A logo resolved against the project asset list. `assetPath` is project-relative

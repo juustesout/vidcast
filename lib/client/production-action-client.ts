@@ -63,6 +63,34 @@ export async function executeProductionActionRequest(
     };
   }
 
+  if (action.type === 'html_render' && action.sceneId) {
+    const regenerate = Boolean(action.payload?.regenerate);
+    lifecycle?.setSceneGenerating?.(action.sceneId);
+    const endpoint = `/api/projects/${projectId}/scenes/${action.sceneId}/render-html-still`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ regenerate })
+    });
+    const body = (await response.json().catch(() => ({}))) as { message?: string; code?: string; assetId?: string };
+    lifecycle?.setSceneGenerating?.(null);
+    if (!response.ok) {
+      throw createProductionRunnerError(body.message || 'HTML still render failed.', {
+        message: body.message || 'HTML still render failed.',
+        code: body.code,
+        endpoint,
+        httpStatus: response.status,
+        sceneId: action.sceneId
+      });
+    }
+    return {
+      message: body.message || 'HTML still PNG rendered.',
+      endpoint,
+      sceneId: action.sceneId,
+      details: body.assetId
+    };
+  }
+
   if (action.type === 'video_submit' && action.sceneId) {
     const regenerate = Boolean(action.payload?.regenerate);
     // The client batch runner must honour the scene's explicit video provider

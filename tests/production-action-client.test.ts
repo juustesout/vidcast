@@ -256,6 +256,39 @@ describe('executeProductionActionRequest', () => {
     expect(lifecycle.setCompositionFailed.mock.calls).toEqual([[false], [true]]);
   });
 
+  it('renders an HTML still PNG and reports the asset', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ message: 'HTML still PNG rendered.', assetId: 'html-1' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const lifecycle = makeLifecycle();
+
+    const result = await executeProductionActionRequest(makeAction('html_render', 's1', { regenerate: true }), {
+      projectId: 'p1',
+      scenes: [],
+      lifecycle
+    });
+
+    const [endpoint, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(endpoint).toBe('/api/projects/p1/scenes/s1/render-html-still');
+    expect(JSON.parse(String(init.body))).toEqual({ regenerate: true });
+    expect(lifecycle.setSceneGenerating.mock.calls).toEqual([['s1'], [null]]);
+    expect(result).toMatchObject({ message: 'HTML still PNG rendered.', endpoint, sceneId: 's1', details: 'html-1' });
+  });
+
+  it('maps a failed HTML still render to a runner error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ message: 'bad html', code: 'html.invalid' }, 400)));
+    const lifecycle = makeLifecycle();
+
+    const error = await executeProductionActionRequest(makeAction('html_render', 's1'), {
+      projectId: 'p1',
+      scenes: [],
+      lifecycle
+    }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(ProductionRunnerExecutionError);
+    expect(error.diagnostics).toMatchObject({ code: 'html.invalid', httpStatus: 400, sceneId: 's1' });
+    expect(lifecycle.setSceneGenerating.mock.calls).toEqual([['s1'], [null]]);
+  });
+
   it('returns undefined for an action type with no request mapping', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

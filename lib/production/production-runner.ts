@@ -129,6 +129,7 @@ const DEFAULT_CONFIG: ProductionRunnerConfig = {
   limits: {
     image_generate: 2,
     stock_select: 2,
+    html_render: 1,
     video_submit: 2,
     video_poll: 4,
     narration_generate: 2,
@@ -208,6 +209,10 @@ function createActionLabel(action: ProductionPlannedAction): string {
   switch (action.type) {
     case 'image_generate':
       return `${sceneLabel}Image`;
+    case 'stock_select':
+      return `${sceneLabel}Stock`;
+    case 'html_render':
+      return `${sceneLabel}HTML still`;
     case 'video_submit':
       return `${sceneLabel}Video`;
     case 'video_poll':
@@ -455,7 +460,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
 
     previousSignature = statusSignature(plan);
 
-    const executionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'video_submit', 'video_poll', 'narration_generate', 'presenter_submit', 'presenter_poll', 'scene_render', 'final_compose'];
+    const executionOrder: ProductionActionType[] = ['stock_select', 'image_generate', 'html_render', 'video_submit', 'video_poll', 'narration_generate', 'presenter_submit', 'presenter_poll', 'scene_render', 'final_compose'];
     let executed = 0;
 
     for (const type of executionOrder) {
