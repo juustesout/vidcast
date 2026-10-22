@@ -4,6 +4,10 @@ import type {
   HtmlComparisonItem,
   HtmlComparisonTemplateData,
   HtmlHeadlineTemplateData,
+  HtmlLocationCardTemplateData,
+  HtmlRouteLink,
+  HtmlRouteLocation,
+  HtmlRouteMapTemplateData,
   HtmlStatCardTemplateData,
   HtmlStillTemplateType,
   HtmlStillTrendDirection,
@@ -13,7 +17,7 @@ import type {
 import { HtmlStillError } from './errors';
 import { escapeHtml } from './sanitize';
 
-export const HTML_STILL_CANONICAL_TEMPLATE_IDS = ['headline', 'stat_card', 'comparison', 'chart', 'timeline'] as const;
+export const HTML_STILL_CANONICAL_TEMPLATE_IDS = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map'] as const;
 export type HtmlStillCanonicalTemplateId = (typeof HTML_STILL_CANONICAL_TEMPLATE_IDS)[number];
 
 export const HTML_STILL_TEMPLATE_IDS = [
@@ -42,7 +46,14 @@ export const HTML_STILL_TEXT_LIMITS = {
   MAX_CHART_ABS: 1_000_000,
   MIN_TIMELINE_EVENTS: 1,
   MAX_TIMELINE_EVENTS: 6,
-  DATE: 24
+  DATE: 24,
+  PLACE: 48,
+  REGION: 48,
+  LOCATION_ID: 24,
+  MIN_ROUTE_LOCATIONS: 2,
+  MAX_ROUTE_LOCATIONS: 6,
+  MIN_ROUTE_LINKS: 1,
+  MAX_ROUTE_LINKS: 8
 } as const;
 
 const TEMPLATE_ALIASES: Record<string, HtmlStillCanonicalTemplateId> = {
@@ -53,7 +64,9 @@ const TEMPLATE_ALIASES: Record<string, HtmlStillCanonicalTemplateId> = {
   comparison: 'comparison',
   comparison_card: 'comparison',
   chart: 'chart',
-  timeline: 'timeline'
+  timeline: 'timeline',
+  location_card: 'location_card',
+  route_map: 'route_map'
 };
 
 export type HeadlineCardData = HtmlHeadlineTemplateData;
@@ -327,10 +340,119 @@ export function parseTimelineTemplateData(data: Record<string, unknown>): HtmlTi
   };
 }
 
+function requireCoordinate(value: unknown, field: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new HtmlStillError('html.template.data.invalid', `${field} must be a finite number.`);
+  }
+  if (value < min || value > max) {
+    throw new HtmlStillError('html.template.data.invalid', `${field} must be between ${min} and ${max}.`);
+  }
+  return value;
+}
+
+function optionalCoordinate(value: unknown, field: string, min: number, max: number): number | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  return requireCoordinate(value, field, min, max);
+}
+
+function optionalLatLon(data: Record<string, unknown>, prefix: string): { lat?: number; lon?: number } {
+  const lat = optionalCoordinate(data.lat, `${prefix}lat`, -90, 90);
+  const lon = optionalCoordinate(data.lon, `${prefix}lon`, -180, 180);
+  if ((lat === undefined) !== (lon === undefined)) {
+    throw new HtmlStillError('html.template.data.invalid', `${prefix}lat and lon must both be set or both omitted.`);
+  }
+  return lat === undefined || lon === undefined ? {} : { lat, lon };
+}
+
+function requireLocationId(value: unknown, field: string): string {
+  const id = requireText(value, field, HTML_STILL_TEXT_LIMITS.LOCATION_ID);
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(id)) {
+    throw new HtmlStillError('html.template.data.invalid', `${field} must start with a letter and contain only letters, digits, _ or -.`);
+  }
+  return id;
+}
+
+export function parseLocationCardTemplateData(data: Record<string, unknown>): HtmlLocationCardTemplateData {
+  return {
+    place: requireText(data.place, 'place', HTML_STILL_TEXT_LIMITS.PLACE),
+    region: optionalText(data.region, 'region', HTML_STILL_TEXT_LIMITS.REGION),
+    detail: optionalText(data.detail, 'detail', HTML_STILL_TEXT_LIMITS.LINE),
+    ...optionalLatLon(data, ''),
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
+function parseRouteLocation(value: unknown, index: number): HtmlRouteLocation {
+  const location = assertPlainObject(value, `locations[${index}]`);
+  return {
+    id: requireLocationId(location.id, `locations[${index}].id`),
+    label: requireText(location.label, `locations[${index}].label`, HTML_STILL_TEXT_LIMITS.PLACE),
+    ...optionalLatLon(location, `locations[${index}].`)
+  };
+}
+
+function parseRouteLink(value: unknown, index: number): HtmlRouteLink {
+  const link = assertPlainObject(value, `links[${index}]`);
+  const from = requireLocationId(link.from, `links[${index}].from`);
+  const to = requireLocationId(link.to, `links[${index}].to`);
+  if (from === to) {
+    throw new HtmlStillError('html.template.data.invalid', `links[${index}] cannot connect a location to itself.`);
+  }
+  return { from, to };
+}
+
+export function parseRouteMapTemplateData(data: Record<string, unknown>): HtmlRouteMapTemplateData {
+  if (!Array.isArray(data.locations)) {
+    throw new HtmlStillError('html.template.data.invalid', 'locations must be an array.');
+  }
+  if (data.locations.length < HTML_STILL_TEXT_LIMITS.MIN_ROUTE_LOCATIONS || data.locations.length > HTML_STILL_TEXT_LIMITS.MAX_ROUTE_LOCATIONS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `route_map requires ${HTML_STILL_TEXT_LIMITS.MIN_ROUTE_LOCATIONS}-${HTML_STILL_TEXT_LIMITS.MAX_ROUTE_LOCATIONS} locations.`
+    );
+  }
+  if (!Array.isArray(data.links)) {
+    throw new HtmlStillError('html.template.data.invalid', 'links must be an array.');
+  }
+  if (data.links.length < HTML_STILL_TEXT_LIMITS.MIN_ROUTE_LINKS || data.links.length > HTML_STILL_TEXT_LIMITS.MAX_ROUTE_LINKS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `route_map requires ${HTML_STILL_TEXT_LIMITS.MIN_ROUTE_LINKS}-${HTML_STILL_TEXT_LIMITS.MAX_ROUTE_LINKS} links.`
+    );
+  }
+  const locations = data.locations.map((location, index) => parseRouteLocation(location, index));
+  const seen = new Set<string>();
+  for (const location of locations) {
+    if (seen.has(location.id)) {
+      throw new HtmlStillError('html.template.data.invalid', `duplicate location id: ${location.id}.`);
+    }
+    seen.add(location.id);
+  }
+  const links = data.links.map((link, index) => parseRouteLink(link, index));
+  const ids = new Set(locations.map((location) => location.id));
+  for (const [index, link] of links.entries()) {
+    if (!ids.has(link.from) || !ids.has(link.to)) {
+      throw new HtmlStillError('html.template.data.invalid', `links[${index}] references an unknown location id.`);
+    }
+  }
+  return {
+    title: requireText(data.title, 'title', HTML_STILL_TEXT_LIMITS.TITLE),
+    locations,
+    links,
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
 export function parseHtmlStillTemplateData(
   templateId: HtmlStillCanonicalTemplateId,
   data: Record<string, unknown>
-): HtmlHeadlineTemplateData | HtmlStatCardTemplateData | HtmlComparisonTemplateData | HtmlChartTemplateData | HtmlTimelineTemplateData {
+): HtmlHeadlineTemplateData | HtmlStatCardTemplateData | HtmlComparisonTemplateData | HtmlChartTemplateData | HtmlTimelineTemplateData | HtmlLocationCardTemplateData | HtmlRouteMapTemplateData {
   if (templateId === 'headline') {
     return parseHeadlineTemplateData(data);
   }
@@ -343,7 +465,13 @@ export function parseHtmlStillTemplateData(
   if (templateId === 'chart') {
     return parseChartTemplateData(data);
   }
-  return parseTimelineTemplateData(data);
+  if (templateId === 'timeline') {
+    return parseTimelineTemplateData(data);
+  }
+  if (templateId === 'location_card') {
+    return parseLocationCardTemplateData(data);
+  }
+  return parseRouteMapTemplateData(data);
 }
 
 function trendMark(trend: HtmlStillTrendDirection): string {
@@ -565,6 +693,107 @@ export function buildTimelineMarkup(data: HtmlTimelineTemplateData): { markup: s
   };
 }
 
+function formatCoordinate(value: number): string {
+  return value.toFixed(2);
+}
+
+export function buildLocationCardMarkup(data: HtmlLocationCardTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#0f172a');
+  const accent = hexOr(data.accent, '#38bdf8');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  const hasCoords = data.lat !== undefined && data.lon !== undefined;
+  const coords = hasCoords
+    ? `<div class="coords">${escapeHtml(formatCoordinate(data.lat as number))} / ${escapeHtml(formatCoordinate(data.lon as number))}</div>`
+    : '';
+  const pin = `<svg class="pin" viewBox="0 0 120 160" width="180" height="240"><path d="M60 8c-28 0-52 22-52 52 0 38 52 92 52 92s52-54 52-92c0-30-24-52-52-52z" fill="${accent}"/><circle cx="60" cy="58" r="22" fill="#0f172a"/></svg>`;
+  return {
+    background,
+    css: `
+.card{box-sizing:border-box;width:100%;height:100%;padding:96px 120px;display:flex;flex-direction:row;align-items:center;gap:80px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
+.mark{flex:0 0 220px;display:flex;align-items:center;justify-content:center;}
+.pin{display:block;}
+.copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:22px;}
+.region{font-size:28px;letter-spacing:0.22em;text-transform:uppercase;color:${accent};font-weight:700;}
+.place{font-size:92px;line-height:1.02;font-weight:800;overflow:hidden;max-width:14ch;}
+.rule{width:120px;height:8px;background:${accent};border-radius:999px;}
+.detail{font-size:34px;line-height:1.35;opacity:0.9;max-width:28ch;overflow:hidden;}
+.coords{font-size:28px;letter-spacing:0.08em;opacity:0.78;}
+`,
+    markup: `<div class="card"><div class="mark">${pin}</div><div class="copy">${data.region ? `<div class="region">${escapeHtml(data.region)}</div>` : ''}<div class="place">${escapeHtml(data.place)}</div><div class="rule"></div>${data.detail ? `<div class="detail">${escapeHtml(data.detail)}</div>` : ''}${coords}</div></div>`
+  };
+}
+
+function routeHasCompleteCoords(locations: HtmlRouteLocation[]): boolean {
+  return locations.every((location) => location.lat !== undefined && location.lon !== undefined);
+}
+
+function projectRouteLocations(locations: HtmlRouteLocation[]): Array<{ location: HtmlRouteLocation; x: number; y: number }> {
+  const width = 1480;
+  const height = 620;
+  const pad = 90;
+  if (routeHasCompleteCoords(locations)) {
+    const lats = locations.map((location) => location.lat as number);
+    const lons = locations.map((location) => location.lon as number);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
+    const latSpan = Math.max(0.0001, maxLat - minLat);
+    const lonSpan = Math.max(0.0001, maxLon - minLon);
+    return locations.map((location) => ({
+      location,
+      x: pad + ((location.lon as number - minLon) / lonSpan) * (width - pad * 2),
+      y: pad + ((maxLat - (location.lat as number)) / latSpan) * (height - pad * 2)
+    }));
+  }
+  const count = locations.length;
+  return locations.map((location, index) => {
+    const t = count === 1 ? 0.5 : index / (count - 1);
+    return {
+      location,
+      x: pad + t * (width - pad * 2),
+      y: pad + (0.28 + 0.44 * (index % 2)) * (height - pad * 2)
+    };
+  });
+}
+
+function buildRouteMapSvg(data: HtmlRouteMapTemplateData, accent: string, textColor: string): string {
+  const width = 1480;
+  const height = 620;
+  const projected = projectRouteLocations(data.locations);
+  const byId = new Map(projected.map((entry) => [entry.location.id, entry]));
+  const grid = `<rect x="24" y="24" width="${width - 48}" height="${height - 48}" rx="28" fill="none" stroke="${textColor}" stroke-opacity="0.12" stroke-width="3"/><line x1="80" y1="${height / 2}" x2="${width - 80}" y2="${height / 2}" stroke="${textColor}" stroke-opacity="0.08" stroke-width="2"/><line x1="${width / 2}" y1="80" x2="${width / 2}" y2="${height - 80}" stroke="${textColor}" stroke-opacity="0.08" stroke-width="2"/>`;
+  const links = data.links.map((link) => {
+    const from = byId.get(link.from);
+    const to = byId.get(link.to);
+    if (!from || !to) {
+      return '';
+    }
+    return `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="${accent}" stroke-width="10" stroke-linecap="round"/>`;
+  }).join('');
+  const nodes = projected.map((entry) => `<circle cx="${entry.x}" cy="${entry.y}" r="18" fill="${accent}"/><text x="${entry.x}" y="${entry.y - 32}" text-anchor="middle" fill="${textColor}" font-size="26" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(entry.location.label)}</text>`).join('');
+  return `<svg class="map" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${grid}${links}${nodes}</svg>`;
+}
+
+export function buildRouteMapMarkup(data: HtmlRouteMapTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#082032');
+  const accent = hexOr(data.accent, '#fbbf24');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  return {
+    background,
+    css: `
+.card{box-sizing:border-box;width:100%;height:100%;padding:72px 96px 56px;display:flex;flex-direction:column;gap:24px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
+.head{display:flex;align-items:baseline;justify-content:space-between;gap:24px;}
+.title{font-size:56px;font-weight:800;overflow:hidden;max-width:22ch;}
+.note{font-size:22px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.68;}
+.rule{width:96px;height:6px;background:${accent};border-radius:999px;}
+.plot{flex:1;min-height:0;}
+.map{display:block;}
+`,
+    markup: `<div class="card"><div class="head"><div class="title">${escapeHtml(data.title)}</div><div class="note">Schematic map</div></div><div class="rule"></div><div class="plot">${buildRouteMapSvg(data, accent, textColor)}</div></div>`
+  };
+}
+
 export function resolveHtmlStillTemplate(templateId: HtmlStillTemplateType | HtmlStillTemplateId, data: Record<string, unknown>): { markup: string; css: string; background: string } {
   const canonical = canonicalizeHtmlStillTemplateId(templateId);
   if (!canonical) {
@@ -583,5 +812,11 @@ export function resolveHtmlStillTemplate(templateId: HtmlStillTemplateType | Htm
   if (canonical === 'chart') {
     return buildChartMarkup(parsed as HtmlChartTemplateData);
   }
-  return buildTimelineMarkup(parsed as HtmlTimelineTemplateData);
+  if (canonical === 'timeline') {
+    return buildTimelineMarkup(parsed as HtmlTimelineTemplateData);
+  }
+  if (canonical === 'location_card') {
+    return buildLocationCardMarkup(parsed as HtmlLocationCardTemplateData);
+  }
+  return buildRouteMapMarkup(parsed as HtmlRouteMapTemplateData);
 }

@@ -91,7 +91,7 @@ interface StockSearchState {
 }
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
-const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline'];
+const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map'];
 
 function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<string, unknown> = {}): Record<string, unknown> {
   const title = typeof previous.title === 'string' ? previous.title : 'Headline';
@@ -137,6 +137,31 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
             { date: 'Jan', label: 'Kickoff', detail: 'Scope locked' },
             { date: 'Mar', label: 'Beta', detail: 'First customer' },
             { date: 'Jun', label: 'GA', detail: 'Public launch' }
+          ]
+    };
+  }
+  if (template === 'location_card') {
+    return {
+      place: typeof previous.place === 'string' ? previous.place : 'Helsinki',
+      region: typeof previous.region === 'string' ? previous.region : 'Finland',
+      detail: typeof previous.detail === 'string' ? previous.detail : 'Studio origin'
+    };
+  }
+  if (template === 'route_map') {
+    return {
+      title: title === 'Headline' ? 'Route' : title,
+      locations: Array.isArray(previous.locations) && previous.locations.length > 0
+        ? previous.locations
+        : [
+            { id: 'hel', label: 'Helsinki' },
+            { id: 'sto', label: 'Stockholm' },
+            { id: 'osl', label: 'Oslo' }
+          ],
+      links: Array.isArray(previous.links) && previous.links.length > 0
+        ? previous.links
+        : [
+            { from: 'hel', to: 'sto' },
+            { from: 'sto', to: 'osl' }
           ]
     };
   }
@@ -2804,6 +2829,216 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                 visual: {
                                   ...scene.visual,
                                   templateData: { ...(scene.visual.templateData ?? {}), events }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'location_card' ? (
+                      <>
+                        <Field
+                          label="Place"
+                          value={typeof selectedScene.visual.templateData?.place === 'string' ? selectedScene.visual.templateData.place : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), place: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Region"
+                          value={typeof selectedScene.visual.templateData?.region === 'string' ? selectedScene.visual.templateData.region : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), region: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Detail"
+                          value={typeof selectedScene.visual.templateData?.detail === 'string' ? selectedScene.visual.templateData.detail : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), detail: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Latitude"
+                          value={typeof selectedScene.visual.templateData?.lat === 'number' ? String(selectedScene.visual.templateData.lat) : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const trimmed = String(value).trim();
+                              const numeric = Number(trimmed);
+                              const next = { ...(scene.visual.templateData ?? {}) };
+                              if (!trimmed) {
+                                delete next.lat;
+                              } else {
+                                next.lat = Number.isFinite(numeric) ? numeric : trimmed;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: next
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Longitude"
+                          value={typeof selectedScene.visual.templateData?.lon === 'number' ? String(selectedScene.visual.templateData.lon) : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const trimmed = String(value).trim();
+                              const numeric = Number(trimmed);
+                              const next = { ...(scene.visual.templateData ?? {}) };
+                              if (!trimmed) {
+                                delete next.lon;
+                              } else {
+                                next.lon = Number.isFinite(numeric) ? numeric : trimmed;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: next
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'route_map' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Locations (id | label | lat | lon)"
+                          value={Array.isArray(selectedScene.visual.templateData?.locations)
+                            ? (selectedScene.visual.templateData.locations as Array<{ id?: string; label?: string; lat?: number; lon?: number }>)
+                              .map((location) => [location.id ?? '', location.label ?? '', location.lat ?? '', location.lon ?? ''].join(' | '))
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const locations = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  const location: { id: string; label: string; lat?: number; lon?: number } = {
+                                    id: parts[0] ?? '',
+                                    label: parts[1] ?? parts[0] ?? ''
+                                  };
+                                  if (parts[2]) {
+                                    const lat = Number(parts[2]);
+                                    if (Number.isFinite(lat)) {
+                                      location.lat = lat;
+                                    }
+                                  }
+                                  if (parts[3]) {
+                                    const lon = Number(parts[3]);
+                                    if (Number.isFinite(lon)) {
+                                      location.lon = lon;
+                                    }
+                                  }
+                                  return location;
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), locations }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Links (from | to)"
+                          value={Array.isArray(selectedScene.visual.templateData?.links)
+                            ? (selectedScene.visual.templateData.links as Array<{ from?: string; to?: string }>)
+                              .map((link) => `${link.from ?? ''} | ${link.to ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const links = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const [from = '', to = ''] = line.split('|').map((part) => part.trim());
+                                  return { from, to };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), links }
                                 }
                               };
                             })

@@ -230,7 +230,7 @@ export interface GraphicVisual {
 
 export type HtmlStillBackground = 'opaque' | 'transparent';
 
-export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'headline_card' | 'comparison_card' | 'stat-card';
+export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'location_card' | 'route_map' | 'headline_card' | 'comparison_card' | 'stat-card';
 
 export type HtmlStillTrendDirection = 'up' | 'down' | 'flat';
 
@@ -305,12 +305,46 @@ export interface HtmlTimelineTemplateData {
   textColor?: string;
 }
 
+export interface HtmlLocationCardTemplateData {
+  place: string;
+  region?: string;
+  detail?: string;
+  lat?: number;
+  lon?: number;
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export interface HtmlRouteLocation {
+  id: string;
+  label: string;
+  lat?: number;
+  lon?: number;
+}
+
+export interface HtmlRouteLink {
+  from: string;
+  to: string;
+}
+
+export interface HtmlRouteMapTemplateData {
+  title: string;
+  locations: HtmlRouteLocation[];
+  links: HtmlRouteLink[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
 export type HtmlStillTemplateData =
   | HtmlHeadlineTemplateData
   | HtmlStatCardTemplateData
   | HtmlComparisonTemplateData
   | HtmlChartTemplateData
-  | HtmlTimelineTemplateData;
+  | HtmlTimelineTemplateData
+  | HtmlLocationCardTemplateData
+  | HtmlRouteMapTemplateData;
 
 export interface HtmlVisual {
   kind: 'html';

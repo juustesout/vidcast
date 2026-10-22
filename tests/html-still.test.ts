@@ -309,6 +309,138 @@ describe('HTML still templates', () => {
       events: Array.from({ length: 7 }, (_, index) => ({ label: `E${index}`, detail: 'x' }))
     })).toThrow(/1-6 events/);
   });
+
+  it('builds a location card without inventing coordinates', () => {
+    const card = resolveHtmlStillTemplate('location_card', {
+      place: 'Helsinki',
+      region: 'Finland',
+      detail: 'Studio origin'
+    });
+    expect(card.markup).toContain('Helsinki');
+    expect(card.markup).toContain('Finland');
+    expect(card.markup).toContain('Studio origin');
+    expect(card.markup).toContain('class="pin"');
+    expect(card.markup).not.toContain('coords');
+    const withCoords = resolveHtmlStillTemplate('location_card', {
+      place: 'Helsinki',
+      lat: 60.17,
+      lon: 24.94
+    });
+    expect(withCoords.markup).toContain('60.17');
+    expect(withCoords.markup).toContain('24.94');
+  });
+
+  it('builds a schematic route map from location ids and links', () => {
+    const card = resolveHtmlStillTemplate('route_map', {
+      title: 'Nordic hop',
+      locations: [
+        { id: 'hel', label: 'Helsinki' },
+        { id: 'sto', label: 'Stockholm' }
+      ],
+      links: [{ from: 'hel', to: 'sto' }]
+    });
+    expect(card.markup).toContain('Nordic hop');
+    expect(card.markup).toContain('Schematic map');
+    expect(card.markup).toContain('<svg');
+    expect(card.markup).toContain('Helsinki');
+    expect(card.markup).toContain('Stockholm');
+    expect(card.markup).toContain('<line');
+    const document = wrapHtmlStillDocument({
+      markup: card.markup,
+      css: card.css,
+      width: 1920,
+      height: 1080,
+      background: 'opaque',
+      pageBackground: card.background
+    });
+    expect(document).not.toMatch(/https?:\/\//i);
+  });
+
+  it('projects complete coordinates and keeps schematic layout without them', () => {
+    const geo = resolveHtmlStillTemplate('route_map', {
+      title: 'Geo',
+      locations: [
+        { id: 'a', label: 'West', lat: 60, lon: 10 },
+        { id: 'b', label: 'East', lat: 60, lon: 30 }
+      ],
+      links: [{ from: 'a', to: 'b' }]
+    });
+    const schematic = resolveHtmlStillTemplate('route_map', {
+      title: 'Geo',
+      locations: [
+        { id: 'a', label: 'West' },
+        { id: 'b', label: 'East' }
+      ],
+      links: [{ from: 'a', to: 'b' }]
+    });
+    expect(geo.markup).not.toEqual(schematic.markup);
+    expect(geo.markup).toContain('West');
+    expect(schematic.markup).toContain('East');
+  });
+
+  it('is deterministic for location and route data', () => {
+    const location = { place: 'Helsinki', region: 'Finland' };
+    const route = {
+      title: 'Hop',
+      locations: [{ id: 'hel', label: 'Helsinki' }, { id: 'sto', label: 'Stockholm' }],
+      links: [{ from: 'hel', to: 'sto' }]
+    };
+    expect(resolveHtmlStillTemplate('location_card', location)).toEqual(resolveHtmlStillTemplate('location_card', { ...location }));
+    expect(resolveHtmlStillTemplate('route_map', route)).toEqual(resolveHtmlStillTemplate('route_map', {
+      ...route,
+      locations: [...route.locations],
+      links: [...route.links]
+    }));
+  });
+
+  it('escapes untrusted location and route text', () => {
+    const location = resolveHtmlStillTemplate('location_card', {
+      place: '<b>Helsinki</b>',
+      region: 'A & B'
+    });
+    expect(location.markup).toContain('&lt;b&gt;Helsinki&lt;/b&gt;');
+    expect(location.markup).toContain('A &amp; B');
+    expect(location.markup).not.toContain('<b>Helsinki</b>');
+    const route = resolveHtmlStillTemplate('route_map', {
+      title: '<img>',
+      locations: [
+        { id: 'a', label: 'Q1 & Q2' },
+        { id: 'b', label: '<script>' }
+      ],
+      links: [{ from: 'a', to: 'b' }]
+    });
+    expect(route.markup).toContain('&lt;img&gt;');
+    expect(route.markup).toContain('Q1 &amp; Q2');
+    expect(route.markup).toContain('&lt;script&gt;');
+  });
+
+  it('rejects invalid location cards and route maps', () => {
+    expect(() => parseHtmlStillTemplateData('location_card', {})).toThrow(/place is required/);
+    expect(() => parseHtmlStillTemplateData('location_card', { place: 'Helsinki', lat: 60 })).toThrow(/both be set/);
+    expect(() => parseHtmlStillTemplateData('location_card', { place: 'Helsinki', lat: 91, lon: 24 })).toThrow(/between -90 and 90/);
+    expect(() => parseHtmlStillTemplateData('location_card', { place: 'Helsinki', lat: 60, lon: 200 })).toThrow(/between -180 and 180/);
+    expect(() => parseHtmlStillTemplateData('route_map', { title: 'Hop', locations: [{ id: 'a', label: 'A' }], links: [{ from: 'a', to: 'b' }] })).toThrow(/2-6 locations/);
+    expect(() => parseHtmlStillTemplateData('route_map', {
+      title: 'Hop',
+      locations: [{ id: 'a', label: 'A' }, { id: 'a', label: 'B' }],
+      links: [{ from: 'a', to: 'b' }]
+    })).toThrow(/duplicate location id/);
+    expect(() => parseHtmlStillTemplateData('route_map', {
+      title: 'Hop',
+      locations: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'missing' }]
+    })).toThrow(/unknown location id/);
+    expect(() => parseHtmlStillTemplateData('route_map', {
+      title: 'Hop',
+      locations: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: [{ from: 'a', to: 'a' }]
+    })).toThrow(/cannot connect a location to itself/);
+    expect(() => parseHtmlStillTemplateData('route_map', {
+      title: 'Hop',
+      locations: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+      links: []
+    })).toThrow(/1-8 links/);
+  });
 });
 
 describe('HTML still fingerprint', () => {
@@ -393,6 +525,13 @@ describe('HTML still project validation and resolver', () => {
       templateData: { title: 'ARR', kind: 'bar', points: [] }
     })));
     expect(emptyChart.errors.some((issue) => issue.code === 'html.template.data.invalid')).toBe(true);
+
+    const badRoute = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'route_map',
+      templateData: { title: 'Hop', locations: [{ id: 'a', label: 'A' }], links: [] }
+    })));
+    expect(badRoute.errors.some((issue) => issue.code === 'html.template.data.invalid')).toBe(true);
   });
 
   it('accepts typed chart and timeline scenes', () => {
@@ -408,6 +547,22 @@ describe('HTML still project validation and resolver', () => {
       templateData: { title: 'Roadmap', events: [{ label: 'Kickoff', detail: 'Go' }] }
     })));
     expect(timeline.errors).toEqual([]);
+    const location = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'location_card',
+      templateData: { place: 'Helsinki', region: 'Finland' }
+    })));
+    expect(location.errors).toEqual([]);
+    const route = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'route_map',
+      templateData: {
+        title: 'Hop',
+        locations: [{ id: 'hel', label: 'Helsinki' }, { id: 'sto', label: 'Stockholm' }],
+        links: [{ from: 'hel', to: 'sto' }]
+      }
+    })));
+    expect(route.errors).toEqual([]);
   });
 
   it('keeps a custom HTML still without a template valid', () => {

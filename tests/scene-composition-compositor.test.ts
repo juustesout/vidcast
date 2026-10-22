@@ -1029,6 +1029,157 @@ describe('composition scene renderer', () => {
     expect(corner[2]).toBeGreaterThan(120);
   }, 120_000);
 
+  it('places a generated location card on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('location_card', {
+      place: 'Helsinki',
+      region: 'Finland',
+      background: '#ff5a5f'
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-location.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-location',
+      imageLocalPath: 'assets/html-location.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'location_card',
+          templateData: { place: 'Helsinki', region: 'Finland', background: '#ff5a5f' },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-location'
+        }
+      })],
+      [
+        makeAsset('html-location', {
+          filename: 'html-location.png',
+          localPath: 'assets/html-location.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-location-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places a generated route map on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('route_map', {
+      title: 'Nordic hop',
+      background: '#ff5a5f',
+      locations: [
+        { id: 'hel', label: 'Helsinki' },
+        { id: 'sto', label: 'Stockholm' }
+      ],
+      links: [{ from: 'hel', to: 'sto' }]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-route.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-route',
+      imageLocalPath: 'assets/html-route.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'route_map',
+          templateData: {
+            title: 'Nordic hop',
+            background: '#ff5a5f',
+            locations: [{ id: 'hel', label: 'Helsinki' }, { id: 'sto', label: 'Stockholm' }],
+            links: [{ from: 'hel', to: 'sto' }]
+          },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-route'
+        }
+      })],
+      [
+        makeAsset('html-route', {
+          filename: 'html-route.png',
+          localPath: 'assets/html-route.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-route-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
   it('fails closed on a missing composition asset file', async () => {
     const composition = createStudioComposition({
       canvas: { width: WIDTH, height: HEIGHT },
