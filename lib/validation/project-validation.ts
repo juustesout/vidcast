@@ -1,6 +1,6 @@
 import { ASPECT_RATIOS, ASSET_PROVENANCE_VALUES, ASSET_STATUS_VALUES, ASSET_TYPES, GENERATION_STATUSES, LOGO_OVERLAY_LIMITS, LOGO_OVERLAY_POSITIONS, MAX_SCENE_DURATION_SECONDS, MOTION_PRESETS, OVERLAY_MAX_FADE_SECONDS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS } from '@/lib/constants';
 import { HtmlStillError } from '@/lib/render/html-still/errors';
-import { canonicalizeHtmlStillTemplateId, parseHtmlStillTemplateData } from '@/lib/render/html-still/templates';
+import { canonicalizeHtmlStillTemplateId, collectHtmlStillImageAssetIds, parseHtmlStillTemplateData } from '@/lib/render/html-still/templates';
 import { isValidGraphicColor } from '@/lib/render/graphic-style';
 import { isLogoOverlayPosition } from '@/lib/render/logo-overlay';
 import { isValidOverlayColor } from '@/lib/render/overlay-resolve';
@@ -466,7 +466,12 @@ export function validateProject(project: Project): RenderValidationResult {
         pushIssue(errors, 'error', 'scene.visual.html.source.required', `scenes.${sceneId}.visual.html`, 'HTML still requires a template or HTML markup.');
       } else if (hasTemplate) {
         try {
-          parseHtmlStillTemplateData(hasTemplate, visual.templateData ?? {});
+          const parsed = parseHtmlStillTemplateData(hasTemplate, visual.templateData ?? {});
+          for (const imageAssetId of collectHtmlStillImageAssetIds(parsed)) {
+            if (!assetIds.has(imageAssetId)) {
+              pushIssue(errors, 'error', 'scene.visual.html.imageAsset.missing', `scenes.${sceneId}.visual.templateData.imageAssetId`, `Referenced HTML still image asset ${imageAssetId} does not exist.`);
+            }
+          }
         } catch (error) {
           const message = error instanceof HtmlStillError ? error.message : 'HTML still template data is invalid.';
           const code = error instanceof HtmlStillError ? error.code : 'html.template.data.invalid';

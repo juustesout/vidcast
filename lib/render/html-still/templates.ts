@@ -1,10 +1,17 @@
 import type {
+  HtmlCalloutSide,
   HtmlChartPoint,
   HtmlChartTemplateData,
   HtmlComparisonItem,
   HtmlComparisonTemplateData,
+  HtmlFeatureCallout,
+  HtmlFeatureCalloutsTemplateData,
   HtmlHeadlineTemplateData,
   HtmlLocationCardTemplateData,
+  HtmlProductCardTemplateData,
+  HtmlProductComparisonItem,
+  HtmlProductComparisonTemplateData,
+  HtmlProductFeature,
   HtmlRouteLink,
   HtmlRouteLocation,
   HtmlRouteMapTemplateData,
@@ -17,7 +24,7 @@ import type {
 import { HtmlStillError } from './errors';
 import { escapeHtml } from './sanitize';
 
-export const HTML_STILL_CANONICAL_TEMPLATE_IDS = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map'] as const;
+export const HTML_STILL_CANONICAL_TEMPLATE_IDS = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map', 'product_card', 'product_comparison', 'feature_callouts'] as const;
 export type HtmlStillCanonicalTemplateId = (typeof HTML_STILL_CANONICAL_TEMPLATE_IDS)[number];
 
 export const HTML_STILL_TEMPLATE_IDS = [
@@ -53,7 +60,16 @@ export const HTML_STILL_TEXT_LIMITS = {
   MIN_ROUTE_LOCATIONS: 2,
   MAX_ROUTE_LOCATIONS: 6,
   MIN_ROUTE_LINKS: 1,
-  MAX_ROUTE_LINKS: 8
+  MAX_ROUTE_LINKS: 8,
+  PRODUCT_NAME: 48,
+  CURRENCY: 8,
+  MAX_PRICE: 1_000_000,
+  MIN_PRODUCT_FEATURES: 0,
+  MAX_PRODUCT_FEATURES: 6,
+  MIN_PRODUCTS: 2,
+  MAX_PRODUCTS: 4,
+  MIN_CALLOUTS: 1,
+  MAX_CALLOUTS: 4
 } as const;
 
 const TEMPLATE_ALIASES: Record<string, HtmlStillCanonicalTemplateId> = {
@@ -66,7 +82,10 @@ const TEMPLATE_ALIASES: Record<string, HtmlStillCanonicalTemplateId> = {
   chart: 'chart',
   timeline: 'timeline',
   location_card: 'location_card',
-  route_map: 'route_map'
+  route_map: 'route_map',
+  product_card: 'product_card',
+  product_comparison: 'product_comparison',
+  feature_callouts: 'feature_callouts'
 };
 
 export type HeadlineCardData = HtmlHeadlineTemplateData;
@@ -449,10 +468,171 @@ export function parseRouteMapTemplateData(data: Record<string, unknown>): HtmlRo
   };
 }
 
+function parseProductFeature(value: unknown, index: number): HtmlProductFeature {
+  const feature = assertPlainObject(value, `features[${index}]`);
+  return {
+    label: requireText(feature.label, `features[${index}].label`, HTML_STILL_TEXT_LIMITS.FEATURE),
+    value: requireText(feature.value, `features[${index}].value`, HTML_STILL_TEXT_LIMITS.FEATURE)
+  };
+}
+
+function parseProductFeatures(value: unknown, required: boolean): HtmlProductFeature[] {
+  if (value === undefined || value === null) {
+    if (required) {
+      throw new HtmlStillError('html.template.data.invalid', 'features must be an array.');
+    }
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new HtmlStillError('html.template.data.invalid', 'features must be an array.');
+  }
+  if (value.length > HTML_STILL_TEXT_LIMITS.MAX_PRODUCT_FEATURES) {
+    throw new HtmlStillError('html.template.data.invalid', `features supports at most ${HTML_STILL_TEXT_LIMITS.MAX_PRODUCT_FEATURES} items.`);
+  }
+  if (required && value.length < HTML_STILL_TEXT_LIMITS.MIN_FEATURES) {
+    throw new HtmlStillError('html.template.data.invalid', `features requires at least ${HTML_STILL_TEXT_LIMITS.MIN_FEATURES} item.`);
+  }
+  return value.map((feature, index) => parseProductFeature(feature, index));
+}
+
+function optionalPrice(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > HTML_STILL_TEXT_LIMITS.MAX_PRICE) {
+    throw new HtmlStillError('html.template.data.invalid', `price must be a finite number between 0 and ${HTML_STILL_TEXT_LIMITS.MAX_PRICE}.`);
+  }
+  return value;
+}
+
+export function parseProductCardTemplateData(data: Record<string, unknown>): HtmlProductCardTemplateData {
+  const features = parseProductFeatures(data.features, false);
+  const price = optionalPrice(data.price);
+  const currency = optionalText(data.currency, 'currency', HTML_STILL_TEXT_LIMITS.CURRENCY);
+  if (currency && price === undefined) {
+    throw new HtmlStillError('html.template.data.invalid', 'currency requires price.');
+  }
+  return {
+    name: requireText(data.name, 'name', HTML_STILL_TEXT_LIMITS.PRODUCT_NAME),
+    subtitle: optionalText(data.subtitle, 'subtitle', HTML_STILL_TEXT_LIMITS.LINE),
+    description: optionalText(data.description, 'description', HTML_STILL_TEXT_LIMITS.LINE),
+    price,
+    currency,
+    features: features.length > 0 ? features : undefined,
+    imageAssetId: optionalAssetId(data.imageAssetId, 'imageAssetId'),
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
+function parseProductComparisonItem(value: unknown, index: number): HtmlProductComparisonItem {
+  const product = assertPlainObject(value, `products[${index}]`);
+  return {
+    name: requireText(product.name, `products[${index}].name`, HTML_STILL_TEXT_LIMITS.PRODUCT_NAME),
+    imageAssetId: optionalAssetId(product.imageAssetId, `products[${index}].imageAssetId`),
+    features: parseProductFeatures(product.features, true)
+  };
+}
+
+export function parseProductComparisonTemplateData(data: Record<string, unknown>): HtmlProductComparisonTemplateData {
+  if (!Array.isArray(data.products)) {
+    throw new HtmlStillError('html.template.data.invalid', 'products must be an array.');
+  }
+  if (data.products.length < HTML_STILL_TEXT_LIMITS.MIN_PRODUCTS || data.products.length > HTML_STILL_TEXT_LIMITS.MAX_PRODUCTS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `product_comparison requires ${HTML_STILL_TEXT_LIMITS.MIN_PRODUCTS}-${HTML_STILL_TEXT_LIMITS.MAX_PRODUCTS} products.`
+    );
+  }
+  const products = data.products.map((product, index) => parseProductComparisonItem(product, index));
+  const featureCount = products[0].features.length;
+  if (products.some((product) => product.features.length !== featureCount)) {
+    throw new HtmlStillError('html.template.data.invalid', 'product_comparison items must share the same number of features.');
+  }
+  const labels = products[0].features.map((feature) => feature.label);
+  if (products.some((product) => product.features.some((feature, index) => feature.label !== labels[index]))) {
+    throw new HtmlStillError('html.template.data.invalid', 'product_comparison items must share the same feature labels in the same order.');
+  }
+  return {
+    title: requireText(data.title, 'title', HTML_STILL_TEXT_LIMITS.TITLE),
+    products,
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
+function optionalCalloutSide(value: unknown, field: string): HtmlCalloutSide | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  if (value !== 'left' && value !== 'right') {
+    throw new HtmlStillError('html.template.data.invalid', `${field} must be left or right.`);
+  }
+  return value;
+}
+
+function parseFeatureCallout(value: unknown, index: number): HtmlFeatureCallout {
+  const callout = assertPlainObject(value, `callouts[${index}]`);
+  return {
+    label: requireText(callout.label, `callouts[${index}].label`, HTML_STILL_TEXT_LIMITS.FEATURE),
+    detail: requireText(callout.detail, `callouts[${index}].detail`, HTML_STILL_TEXT_LIMITS.LINE),
+    side: optionalCalloutSide(callout.side, `callouts[${index}].side`)
+  };
+}
+
+export function parseFeatureCalloutsTemplateData(data: Record<string, unknown>): HtmlFeatureCalloutsTemplateData {
+  if (!Array.isArray(data.callouts)) {
+    throw new HtmlStillError('html.template.data.invalid', 'callouts must be an array.');
+  }
+  if (data.callouts.length < HTML_STILL_TEXT_LIMITS.MIN_CALLOUTS || data.callouts.length > HTML_STILL_TEXT_LIMITS.MAX_CALLOUTS) {
+    throw new HtmlStillError(
+      'html.template.data.invalid',
+      `feature_callouts requires ${HTML_STILL_TEXT_LIMITS.MIN_CALLOUTS}-${HTML_STILL_TEXT_LIMITS.MAX_CALLOUTS} callouts.`
+    );
+  }
+  return {
+    name: requireText(data.name, 'name', HTML_STILL_TEXT_LIMITS.PRODUCT_NAME),
+    imageAssetId: optionalAssetId(data.imageAssetId, 'imageAssetId'),
+    callouts: data.callouts.map((callout, index) => parseFeatureCallout(callout, index)),
+    background: optionalHex(data.background, 'background'),
+    accent: optionalHex(data.accent, 'accent'),
+    textColor: optionalHex(data.textColor, 'textColor')
+  };
+}
+
+export type HtmlStillParsedTemplateData =
+  | HtmlHeadlineTemplateData
+  | HtmlStatCardTemplateData
+  | HtmlComparisonTemplateData
+  | HtmlChartTemplateData
+  | HtmlTimelineTemplateData
+  | HtmlLocationCardTemplateData
+  | HtmlRouteMapTemplateData
+  | HtmlProductCardTemplateData
+  | HtmlProductComparisonTemplateData
+  | HtmlFeatureCalloutsTemplateData;
+
+export function collectHtmlStillImageAssetIds(data: HtmlStillParsedTemplateData): string[] {
+  const ids: string[] = [];
+  if ('imageAssetId' in data && typeof data.imageAssetId === 'string') {
+    ids.push(data.imageAssetId);
+  }
+  if ('products' in data && Array.isArray(data.products)) {
+    for (const product of data.products) {
+      if (product.imageAssetId) {
+        ids.push(product.imageAssetId);
+      }
+    }
+  }
+  return ids;
+}
+
 export function parseHtmlStillTemplateData(
   templateId: HtmlStillCanonicalTemplateId,
   data: Record<string, unknown>
-): HtmlHeadlineTemplateData | HtmlStatCardTemplateData | HtmlComparisonTemplateData | HtmlChartTemplateData | HtmlTimelineTemplateData | HtmlLocationCardTemplateData | HtmlRouteMapTemplateData {
+): HtmlStillParsedTemplateData {
   if (templateId === 'headline') {
     return parseHeadlineTemplateData(data);
   }
@@ -471,7 +651,16 @@ export function parseHtmlStillTemplateData(
   if (templateId === 'location_card') {
     return parseLocationCardTemplateData(data);
   }
-  return parseRouteMapTemplateData(data);
+  if (templateId === 'route_map') {
+    return parseRouteMapTemplateData(data);
+  }
+  if (templateId === 'product_card') {
+    return parseProductCardTemplateData(data);
+  }
+  if (templateId === 'product_comparison') {
+    return parseProductComparisonTemplateData(data);
+  }
+  return parseFeatureCalloutsTemplateData(data);
 }
 
 function trendMark(trend: HtmlStillTrendDirection): string {
@@ -794,6 +983,111 @@ export function buildRouteMapMarkup(data: HtmlRouteMapTemplateData): { markup: s
   };
 }
 
+function formatPrice(value: number, currency?: string): string {
+  const amount = Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return currency ? `${escapeHtml(currency)} ${amount}` : amount;
+}
+
+function productImageBlock(hasImage: boolean): string {
+  return hasImage
+    ? `<div class="image image-present"><span>Asset</span></div>`
+    : `<div class="image image-missing"><span>No image</span></div>`;
+}
+
+export function buildProductCardMarkup(data: HtmlProductCardTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#111827');
+  const accent = hexOr(data.accent, '#34d399');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  const features = (data.features ?? []).map((feature) => `<li><span>${escapeHtml(feature.label)}</span><strong>${escapeHtml(feature.value)}</strong></li>`).join('');
+  return {
+    background,
+    css: `
+.card{box-sizing:border-box;width:100%;height:100%;padding:88px 110px;display:flex;flex-direction:row;align-items:stretch;gap:72px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
+.copy{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:22px;}
+.subtitle{font-size:26px;letter-spacing:0.2em;text-transform:uppercase;color:${accent};font-weight:700;}
+.name{font-size:84px;line-height:1.02;font-weight:800;overflow:hidden;max-width:14ch;}
+.rule{width:120px;height:8px;background:${accent};border-radius:999px;}
+.description{font-size:32px;line-height:1.35;opacity:0.9;max-width:28ch;overflow:hidden;}
+.price{font-size:48px;font-weight:800;}
+.features{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px;}
+.features li{display:flex;justify-content:space-between;gap:16px;font-size:28px;}
+.features span{opacity:0.76;}
+.image{width:460px;flex:0 0 460px;border:4px solid ${accent};border-radius:32px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);}
+.image span{font-size:24px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.72;}
+.image-missing{border-style:dashed;}
+`,
+    markup: `<div class="card"><div class="copy">${data.subtitle ? `<div class="subtitle">${escapeHtml(data.subtitle)}</div>` : ''}<div class="name">${escapeHtml(data.name)}</div><div class="rule"></div>${data.description ? `<div class="description">${escapeHtml(data.description)}</div>` : ''}${data.price !== undefined ? `<div class="price">${formatPrice(data.price, data.currency)}</div>` : ''}${features ? `<ul class="features">${features}</ul>` : ''}</div>${productImageBlock(Boolean(data.imageAssetId))}</div>`
+  };
+}
+
+export function buildProductComparisonMarkup(data: HtmlProductComparisonTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#0b1220');
+  const accent = hexOr(data.accent, '#818cf8');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  const columns = data.products.map((product) => {
+    const features = product.features.map((feature) => `<li><span>${escapeHtml(feature.label)}</span><strong>${escapeHtml(feature.value)}</strong></li>`).join('');
+    return `<section class="item">${productImageBlock(Boolean(product.imageAssetId))}<h2>${escapeHtml(product.name)}</h2><ul>${features}</ul></section>`;
+  }).join('');
+  return {
+    background,
+    css: `
+.card{box-sizing:border-box;width:100%;height:100%;padding:72px 80px;display:flex;flex-direction:column;gap:32px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
+.title{font-size:56px;font-weight:800;overflow:hidden;max-width:24ch;}
+.rule{width:96px;height:6px;background:${accent};border-radius:999px;}
+.grid{display:flex;gap:24px;flex:1;min-height:0;}
+.item{flex:1;min-width:0;background:rgba(15,23,42,0.35);border-radius:28px;padding:28px 24px;display:flex;flex-direction:column;gap:18px;}
+.item h2{margin:0;font-size:32px;overflow:hidden;max-width:16ch;}
+.item ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px;}
+.item li{display:flex;justify-content:space-between;gap:12px;font-size:24px;}
+.item span{opacity:0.72;}
+.image{height:160px;width:100%;border:3px solid ${accent};border-radius:20px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);}
+.image span{font-size:18px;letter-spacing:0.16em;text-transform:uppercase;opacity:0.7;}
+.image-missing{border-style:dashed;}
+`,
+    markup: `<div class="card"><div class="title">${escapeHtml(data.title)}</div><div class="rule"></div><div class="grid">${columns}</div></div>`
+  };
+}
+
+function calloutSide(callout: HtmlFeatureCallout, index: number): HtmlCalloutSide {
+  return callout.side ?? (index % 2 === 0 ? 'left' : 'right');
+}
+
+function buildFeatureCalloutsSvg(data: HtmlFeatureCalloutsTemplateData, accent: string, textColor: string): string {
+  const width = 1480;
+  const height = 720;
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const image = `<rect x="${centerX - 210}" y="${centerY - 230}" width="420" height="460" rx="36" fill="none" stroke="${accent}" stroke-width="6"${data.imageAssetId ? '' : ' stroke-dasharray="18 14"'}/><text x="${centerX}" y="${centerY + 8}" text-anchor="middle" fill="${textColor}" font-size="28" font-family="DejaVu Sans,Arial,sans-serif">${data.imageAssetId ? 'Asset' : 'No image'}</text>`;
+  const left = data.callouts.map((callout, index) => ({ callout, index })).filter((entry) => calloutSide(entry.callout, entry.index) === 'left');
+  const right = data.callouts.map((callout, index) => ({ callout, index })).filter((entry) => calloutSide(entry.callout, entry.index) === 'right');
+  const place = (entries: Array<{ callout: HtmlFeatureCallout; index: number }>, side: HtmlCalloutSide) => entries.map((entry, slot) => {
+    const y = 140 + slot * Math.min(160, 480 / Math.max(entries.length, 1));
+    const x = side === 'left' ? 80 : width - 80;
+    const anchor = side === 'left' ? 'start' : 'end';
+    const lineX = side === 'left' ? centerX - 210 : centerX + 210;
+    const markerX = side === 'left' ? centerX - 170 : centerX + 170;
+    return `<line x1="${x + (side === 'left' ? 320 : -320)}" y1="${y + 18}" x2="${lineX}" y2="${y + 18}" stroke="${accent}" stroke-width="4"/><circle cx="${markerX}" cy="${y + 18}" r="10" fill="${accent}"/><text x="${x}" y="${y}" text-anchor="${anchor}" fill="${accent}" font-size="26" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(entry.callout.label)}</text><text x="${x}" y="${y + 40}" text-anchor="${anchor}" fill="${textColor}" font-size="24" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(entry.callout.detail)}</text>`;
+  }).join('');
+  return `<svg class="callouts" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${image}${place(left, 'left')}${place(right, 'right')}</svg>`;
+}
+
+export function buildFeatureCalloutsMarkup(data: HtmlFeatureCalloutsTemplateData): { markup: string; css: string; background: string } {
+  const background = hexOr(data.background, '#0f172a');
+  const accent = hexOr(data.accent, '#f472b6');
+  const textColor = hexOr(data.textColor, '#f8fafc');
+  return {
+    background,
+    css: `
+.card{box-sizing:border-box;width:100%;height:100%;padding:64px 80px 48px;display:flex;flex-direction:column;gap:20px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
+.name{font-size:56px;font-weight:800;overflow:hidden;max-width:22ch;}
+.rule{width:96px;height:6px;background:${accent};border-radius:999px;}
+.plot{flex:1;min-height:0;}
+.callouts{display:block;}
+`,
+    markup: `<div class="card"><div class="name">${escapeHtml(data.name)}</div><div class="rule"></div><div class="plot">${buildFeatureCalloutsSvg(data, accent, textColor)}</div></div>`
+  };
+}
+
 export function resolveHtmlStillTemplate(templateId: HtmlStillTemplateType | HtmlStillTemplateId, data: Record<string, unknown>): { markup: string; css: string; background: string } {
   const canonical = canonicalizeHtmlStillTemplateId(templateId);
   if (!canonical) {
@@ -818,5 +1112,14 @@ export function resolveHtmlStillTemplate(templateId: HtmlStillTemplateType | Htm
   if (canonical === 'location_card') {
     return buildLocationCardMarkup(parsed as HtmlLocationCardTemplateData);
   }
-  return buildRouteMapMarkup(parsed as HtmlRouteMapTemplateData);
+  if (canonical === 'route_map') {
+    return buildRouteMapMarkup(parsed as HtmlRouteMapTemplateData);
+  }
+  if (canonical === 'product_card') {
+    return buildProductCardMarkup(parsed as HtmlProductCardTemplateData);
+  }
+  if (canonical === 'product_comparison') {
+    return buildProductComparisonMarkup(parsed as HtmlProductComparisonTemplateData);
+  }
+  return buildFeatureCalloutsMarkup(parsed as HtmlFeatureCalloutsTemplateData);
 }

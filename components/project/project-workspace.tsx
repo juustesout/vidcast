@@ -91,7 +91,7 @@ interface StockSearchState {
 }
 
 const GRAPHIC_TEMPLATES: GraphicTemplateType[] = ['title_card', 'bullet_list', 'statistic', 'quote', 'comparison', 'simple_diagram', 'callout', 'end_card'];
-const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map'];
+const HTML_STILL_TEMPLATES: HtmlStillTemplateType[] = ['headline', 'stat_card', 'comparison', 'chart', 'timeline', 'location_card', 'route_map', 'product_card', 'product_comparison', 'feature_callouts'];
 
 function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<string, unknown> = {}): Record<string, unknown> {
   const title = typeof previous.title === 'string' ? previous.title : 'Headline';
@@ -162,6 +162,38 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
         : [
             { from: 'hel', to: 'sto' },
             { from: 'sto', to: 'osl' }
+          ]
+    };
+  }
+  if (template === 'product_card') {
+    return {
+      name: typeof previous.name === 'string' ? previous.name : 'Northwind Hub',
+      subtitle: typeof previous.subtitle === 'string' ? previous.subtitle : 'Studio kit',
+      description: typeof previous.description === 'string' ? previous.description : '',
+      features: Array.isArray(previous.features) && previous.features.length > 0
+        ? previous.features
+        : [{ label: 'Weight', value: '1.2 kg' }]
+    };
+  }
+  if (template === 'product_comparison') {
+    return {
+      title: title === 'Headline' ? 'Product compare' : title,
+      products: Array.isArray(previous.products) && previous.products.length > 0
+        ? previous.products
+        : [
+            { name: 'Air', features: [{ label: 'Weight', value: '0.9 kg' }] },
+            { name: 'Pro', features: [{ label: 'Weight', value: '1.4 kg' }] }
+          ]
+    };
+  }
+  if (template === 'feature_callouts') {
+    return {
+      name: typeof previous.name === 'string' ? previous.name : 'Northwind Hub',
+      callouts: Array.isArray(previous.callouts) && previous.callouts.length > 0
+        ? previous.callouts
+        : [
+            { label: 'Lens', detail: 'Wide capture', side: 'left' },
+            { label: 'Mic', detail: 'Studio voice', side: 'right' }
           ]
     };
   }
@@ -3039,6 +3071,294 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                 visual: {
                                   ...scene.visual,
                                   templateData: { ...(scene.visual.templateData ?? {}), links }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'product_card' ? (
+                      <>
+                        <Field
+                          label="Name"
+                          value={typeof selectedScene.visual.templateData?.name === 'string' ? selectedScene.visual.templateData.name : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), name: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Subtitle"
+                          value={typeof selectedScene.visual.templateData?.subtitle === 'string' ? selectedScene.visual.templateData.subtitle : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), subtitle: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Description"
+                          value={typeof selectedScene.visual.templateData?.description === 'string' ? selectedScene.visual.templateData.description : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), description: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Price"
+                          value={typeof selectedScene.visual.templateData?.price === 'number' ? String(selectedScene.visual.templateData.price) : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const trimmed = String(value).trim();
+                              const numeric = Number(trimmed);
+                              const next = { ...(scene.visual.templateData ?? {}) };
+                              if (!trimmed) {
+                                delete next.price;
+                              } else {
+                                next.price = Number.isFinite(numeric) ? numeric : trimmed;
+                              }
+                              return { ...scene, visual: { ...scene.visual, templateData: next } };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Currency"
+                          value={typeof selectedScene.visual.templateData?.currency === 'string' ? selectedScene.visual.templateData.currency : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), currency: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Image asset id"
+                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const next = { ...(scene.visual.templateData ?? {}) };
+                              if (!String(value).trim()) {
+                                delete next.imageAssetId;
+                              } else {
+                                next.imageAssetId = String(value).trim();
+                              }
+                              return { ...scene, visual: { ...scene.visual, templateData: next } };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Features (label | value)"
+                          value={Array.isArray(selectedScene.visual.templateData?.features)
+                            ? (selectedScene.visual.templateData.features as Array<{ label?: string; value?: string }>)
+                              .map((feature) => `${feature.label ?? ''} | ${feature.value ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const features = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const [label = '', ...rest] = line.split('|').map((part) => part.trim());
+                                  return { label, value: rest.join(' | ') };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), features }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'product_comparison' ? (
+                      <>
+                        <Field
+                          label="Title"
+                          value={typeof selectedScene.visual.templateData?.title === 'string' ? selectedScene.visual.templateData.title : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), title: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Products (name | imageAssetId | feature:value; feature:value)"
+                          value={Array.isArray(selectedScene.visual.templateData?.products)
+                            ? (selectedScene.visual.templateData.products as Array<{ name?: string; imageAssetId?: string; features?: Array<{ label?: string; value?: string }> }>)
+                              .map((product) => `${product.name ?? ''} | ${product.imageAssetId ?? ''} | ${(product.features ?? []).map((feature) => `${feature.label ?? ''}:${feature.value ?? ''}`).join('; ')}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const products = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  const featurePart = parts.slice(2).join('|');
+                                  const features = featurePart
+                                    .split(';')
+                                    .map((entry) => entry.trim())
+                                    .filter(Boolean)
+                                    .map((entry) => {
+                                      const [label, ...rest] = entry.split(':');
+                                      return { label: (label ?? '').trim(), value: rest.join(':').trim() };
+                                    });
+                                  const product: { name: string; imageAssetId?: string; features: Array<{ label: string; value: string }> } = {
+                                    name: parts[0] ?? '',
+                                    features
+                                  };
+                                  if (parts[1]) {
+                                    product.imageAssetId = parts[1];
+                                  }
+                                  return product;
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), products }
+                                }
+                              };
+                            })
+                          }
+                        />
+                      </>
+                    ) : null}
+                    {selectedScene.visual.template === 'feature_callouts' ? (
+                      <>
+                        <Field
+                          label="Name"
+                          value={typeof selectedScene.visual.templateData?.name === 'string' ? selectedScene.visual.templateData.name : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), name: String(value) }
+                                }
+                              };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Image asset id"
+                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : ''}
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const next = { ...(scene.visual.templateData ?? {}) };
+                              if (!String(value).trim()) {
+                                delete next.imageAssetId;
+                              } else {
+                                next.imageAssetId = String(value).trim();
+                              }
+                              return { ...scene, visual: { ...scene.visual, templateData: next } };
+                            })
+                          }
+                        />
+                        <Field
+                          label="Callouts (side | label | detail)"
+                          value={Array.isArray(selectedScene.visual.templateData?.callouts)
+                            ? (selectedScene.visual.templateData.callouts as Array<{ side?: string; label?: string; detail?: string }>)
+                              .map((callout) => `${callout.side ?? ''} | ${callout.label ?? ''} | ${callout.detail ?? ''}`)
+                              .join('\n')
+                            : ''}
+                          asTextArea
+                          onChange={(value) =>
+                            updateScene(selectedScene.id, (scene) => {
+                              if (!scene.visual || scene.visual.kind !== 'html') {
+                                return scene;
+                              }
+                              const callouts = String(value)
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0)
+                                .map((line) => {
+                                  const parts = line.split('|').map((part) => part.trim());
+                                  if (parts[0] === 'left' || parts[0] === 'right') {
+                                    return { side: parts[0], label: parts[1] ?? '', detail: parts.slice(2).join(' | ') };
+                                  }
+                                  return { label: parts[0] ?? '', detail: parts.slice(1).join(' | ') };
+                                });
+                              return {
+                                ...scene,
+                                visual: {
+                                  ...scene.visual,
+                                  templateData: { ...(scene.visual.templateData ?? {}), callouts }
                                 }
                               };
                             })

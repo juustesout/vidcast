@@ -441,6 +441,162 @@ describe('HTML still templates', () => {
       links: []
     })).toThrow(/1-8 links/);
   });
+
+  it('builds a product card and uses an explicit placeholder without an image', () => {
+    const card = resolveHtmlStillTemplate('product_card', {
+      name: 'Northwind Hub',
+      subtitle: 'Studio kit',
+      description: 'Local still',
+      price: 129,
+      currency: 'EUR',
+      features: [{ label: 'Weight', value: '1.2 kg' }]
+    });
+    expect(card.markup).toContain('Northwind Hub');
+    expect(card.markup).toContain('Studio kit');
+    expect(card.markup).toContain('Local still');
+    expect(card.markup).toContain('EUR 129');
+    expect(card.markup).toContain('Weight');
+    expect(card.markup).toContain('1.2 kg');
+    expect(card.markup).toContain('No image');
+    expect(card.markup).toContain('image-missing');
+    expect(card.markup).not.toContain('<script');
+    const withAsset = resolveHtmlStillTemplate('product_card', {
+      name: 'Northwind Hub',
+      imageAssetId: 'product-1'
+    });
+    expect(withAsset.markup).toContain('Asset');
+    expect(withAsset.markup).not.toContain('No image');
+  });
+
+  it('builds a product comparison with shared feature labels', () => {
+    const card = resolveHtmlStillTemplate('product_comparison', {
+      title: 'Air vs Pro',
+      products: [
+        { name: 'Air', features: [{ label: 'Weight', value: '0.9 kg' }, { label: 'Range', value: '8 h' }] },
+        { name: 'Pro', imageAssetId: 'pro-1', features: [{ label: 'Weight', value: '1.4 kg' }, { label: 'Range', value: '12 h' }] }
+      ]
+    });
+    expect(card.markup).toContain('Air vs Pro');
+    expect(card.markup).toContain('Air');
+    expect(card.markup).toContain('Pro');
+    expect(card.markup).toContain('0.9 kg');
+    expect(card.markup).toContain('12 h');
+    expect(card.markup).toContain('No image');
+    expect(card.markup).toContain('Asset');
+  });
+
+  it('builds feature callouts and defaults even/odd sides', () => {
+    const card = resolveHtmlStillTemplate('feature_callouts', {
+      name: 'Northwind Hub',
+      callouts: [
+        { label: 'Lens', detail: 'Wide capture' },
+        { label: 'Mic', detail: 'Studio voice' }
+      ]
+    });
+    expect(card.markup).toContain('Northwind Hub');
+    expect(card.markup).toContain('Lens');
+    expect(card.markup).toContain('Wide capture');
+    expect(card.markup).toContain('Mic');
+    expect(card.markup).toContain('No image');
+    expect(card.markup).toContain('<svg');
+    expect(card.markup).not.toContain('xmlns=');
+    const sided = resolveHtmlStillTemplate('feature_callouts', {
+      name: 'Hub',
+      imageAssetId: 'hub-1',
+      callouts: [
+        { label: 'A', detail: 'Left', side: 'left' },
+        { label: 'B', detail: 'Right', side: 'right' }
+      ]
+    });
+    expect(sided.markup).toContain('Asset');
+    expect(sided.markup).toContain('Left');
+    expect(sided.markup).toContain('Right');
+  });
+
+  it('is deterministic for product templates', () => {
+    const product = { name: 'Hub', features: [{ label: 'Weight', value: '1 kg' }] };
+    const comparison = {
+      title: 'Compare',
+      products: [
+        { name: 'Air', features: [{ label: 'Weight', value: '1 kg' }] },
+        { name: 'Pro', features: [{ label: 'Weight', value: '2 kg' }] }
+      ]
+    };
+    const callouts = { name: 'Hub', callouts: [{ label: 'Lens', detail: 'Wide' }] };
+    expect(resolveHtmlStillTemplate('product_card', product)).toEqual(resolveHtmlStillTemplate('product_card', { ...product, features: [...product.features] }));
+    expect(resolveHtmlStillTemplate('product_comparison', comparison)).toEqual(resolveHtmlStillTemplate('product_comparison', {
+      ...comparison,
+      products: comparison.products.map((item) => ({ ...item, features: [...item.features] }))
+    }));
+    expect(resolveHtmlStillTemplate('feature_callouts', callouts)).toEqual(resolveHtmlStillTemplate('feature_callouts', {
+      ...callouts,
+      callouts: [...callouts.callouts]
+    }));
+  });
+
+  it('escapes untrusted product template text', () => {
+    const product = resolveHtmlStillTemplate('product_card', {
+      name: '<b>Hub</b>',
+      subtitle: 'A & B',
+      description: '<img>',
+      features: [{ label: 'Q1 & Q2', value: '<script>' }]
+    });
+    expect(product.markup).toContain('&lt;b&gt;Hub&lt;/b&gt;');
+    expect(product.markup).toContain('A &amp; B');
+    expect(product.markup).toContain('&lt;img&gt;');
+    expect(product.markup).toContain('Q1 &amp; Q2');
+    expect(product.markup).toContain('&lt;script&gt;');
+    expect(product.markup).not.toContain('<b>Hub</b>');
+    const comparison = resolveHtmlStillTemplate('product_comparison', {
+      title: '<img>',
+      products: [
+        { name: 'A & B', features: [{ label: '<b>W</b>', value: '1' }] },
+        { name: 'C', features: [{ label: '<b>W</b>', value: '2' }] }
+      ]
+    });
+    expect(comparison.markup).toContain('&lt;img&gt;');
+    expect(comparison.markup).toContain('A &amp; B');
+    expect(comparison.markup).toContain('&lt;b&gt;W&lt;/b&gt;');
+    const callouts = resolveHtmlStillTemplate('feature_callouts', {
+      name: '<script>',
+      callouts: [{ label: 'A & B', detail: '<img>' }]
+    });
+    expect(callouts.markup).toContain('&lt;script&gt;');
+    expect(callouts.markup).toContain('A &amp; B');
+    expect(callouts.markup).toContain('&lt;img&gt;');
+  });
+
+  it('rejects invalid product template data', () => {
+    expect(() => parseHtmlStillTemplateData('product_card', {})).toThrow(/name is required/);
+    expect(() => parseHtmlStillTemplateData('product_card', { name: 'Hub', currency: 'EUR' })).toThrow(/currency requires price/);
+    expect(() => parseHtmlStillTemplateData('product_card', { name: 'Hub', price: -1 })).toThrow(/finite number/);
+    expect(() => parseHtmlStillTemplateData('product_card', { name: 'Hub', imageAssetId: 'https://example.com/x.png' })).toThrow(/asset id/);
+    expect(() => parseHtmlStillTemplateData('product_comparison', { title: 'X', products: [{ name: 'Only', features: [{ label: 'A', value: '1' }] }] })).toThrow(/2-4 products/);
+    expect(() => parseHtmlStillTemplateData('product_comparison', {
+      title: 'X',
+      products: [
+        { name: 'A', features: [{ label: 'One', value: '1' }] },
+        { name: 'B', features: [{ label: 'Two', value: '2' }] }
+      ]
+    })).toThrow(/same feature labels/);
+    expect(() => parseHtmlStillTemplateData('product_comparison', {
+      title: 'X',
+      products: [
+        { name: 'A', features: [{ label: 'One', value: '1' }] },
+        { name: 'B', features: [{ label: 'One', value: '1' }, { label: 'Two', value: '2' }] }
+      ]
+    })).toThrow(/same number of features/);
+    expect(() => parseHtmlStillTemplateData('feature_callouts', { name: 'Hub', callouts: [] })).toThrow(/1-4 callouts/);
+    expect(() => parseHtmlStillTemplateData('feature_callouts', { name: 'Hub', callouts: [{ label: 'Only' }] })).toThrow(/detail is required/);
+    expect(() => parseHtmlStillTemplateData('feature_callouts', {
+      name: 'Hub',
+      callouts: Array.from({ length: 5 }, (_, index) => ({ label: `C${index}`, detail: 'x' }))
+    })).toThrow(/1-4 callouts/);
+    expect(() => parseHtmlStillTemplateData('feature_callouts', {
+      name: 'Hub',
+      callouts: [{ label: 'A', detail: 'B', side: 'up' }]
+    })).toThrow(/left or right/);
+  });
 });
 
 describe('HTML still fingerprint', () => {
@@ -563,6 +719,59 @@ describe('HTML still project validation and resolver', () => {
       }
     })));
     expect(route.errors).toEqual([]);
+    const product = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_card',
+      templateData: { name: 'Hub', features: [{ label: 'Weight', value: '1 kg' }] }
+    })));
+    expect(product.errors).toEqual([]);
+    const comparison = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_comparison',
+      templateData: {
+        title: 'Compare',
+        products: [
+          { name: 'Air', features: [{ label: 'Weight', value: '1 kg' }] },
+          { name: 'Pro', features: [{ label: 'Weight', value: '2 kg' }] }
+        ]
+      }
+    })));
+    expect(comparison.errors).toEqual([]);
+    const callouts = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'feature_callouts',
+      templateData: { name: 'Hub', callouts: [{ label: 'Lens', detail: 'Wide' }] }
+    })));
+    expect(callouts.errors).toEqual([]);
+  });
+
+  it('rejects missing local image assets on product templates', () => {
+    const missing = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_card',
+      templateData: { name: 'Hub', imageAssetId: 'missing-image' }
+    })));
+    expect(missing.errors.some((issue) => issue.code === 'scene.visual.html.imageAsset.missing')).toBe(true);
+
+    const present = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_card',
+      templateData: { name: 'Hub', imageAssetId: 'product-1' }
+    }), [makeAsset('product-1')]));
+    expect(present.errors).toEqual([]);
+
+    const comparisonMissing = validateProject(makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_comparison',
+      templateData: {
+        title: 'Compare',
+        products: [
+          { name: 'Air', imageAssetId: 'air-1', features: [{ label: 'Weight', value: '1 kg' }] },
+          { name: 'Pro', features: [{ label: 'Weight', value: '2 kg' }] }
+        ]
+      }
+    })));
+    expect(comparisonMissing.errors.some((issue) => issue.code === 'scene.visual.html.imageAsset.missing')).toBe(true);
   });
 
   it('keeps a custom HTML still without a template valid', () => {

@@ -1180,6 +1180,240 @@ describe('composition scene renderer', () => {
     expect(corner[2]).toBeGreaterThan(120);
   }, 120_000);
 
+  it('places a generated product card on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('product_card', {
+      name: 'Northwind Hub',
+      subtitle: 'Studio kit',
+      background: '#ff5a5f',
+      features: [{ label: 'Weight', value: '1.2 kg' }]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-product.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-product',
+      imageLocalPath: 'assets/html-product.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'product_card',
+          templateData: { name: 'Northwind Hub', subtitle: 'Studio kit', background: '#ff5a5f', features: [{ label: 'Weight', value: '1.2 kg' }] },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-product'
+        }
+      })],
+      [
+        makeAsset('html-product', {
+          filename: 'html-product.png',
+          localPath: 'assets/html-product.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-product-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places a generated product comparison on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('product_comparison', {
+      title: 'Air vs Pro',
+      background: '#ff5a5f',
+      products: [
+        { name: 'Air', features: [{ label: 'Weight', value: '0.9 kg' }] },
+        { name: 'Pro', features: [{ label: 'Weight', value: '1.4 kg' }] }
+      ]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-product-compare.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-product-compare',
+      imageLocalPath: 'assets/html-product-compare.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'product_comparison',
+          templateData: {
+            title: 'Air vs Pro',
+            background: '#ff5a5f',
+            products: [
+              { name: 'Air', features: [{ label: 'Weight', value: '0.9 kg' }] },
+              { name: 'Pro', features: [{ label: 'Weight', value: '1.4 kg' }] }
+            ]
+          },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-product-compare'
+        }
+      })],
+      [
+        makeAsset('html-product-compare', {
+          filename: 'html-product-compare.png',
+          localPath: 'assets/html-product-compare.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-product-compare-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
+  it('places generated feature callouts on the studio bigscreen in a real MP4', async () => {
+    const generated = resolveHtmlStillTemplate('feature_callouts', {
+      name: 'Northwind Hub',
+      background: '#ff5a5f',
+      callouts: [
+        { label: 'Lens', detail: 'Wide capture', side: 'left' },
+        { label: 'Mic', detail: 'Studio voice', side: 'right' }
+      ]
+    });
+    const still = await renderHtmlStillPng({
+      markup: generated.markup,
+      css: generated.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: generated.background,
+      timeoutMs: 45_000
+    });
+    const htmlPath = path.join(projectRoot, 'assets', 'html-callouts.png');
+    await fs.writeFile(htmlPath, still.png);
+
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      imageAssetId: 'html-callouts',
+      imageLocalPath: 'assets/html-callouts.png',
+      deskEnabled: false
+    });
+    composition.layers = composition.layers
+      .filter((layer) => layer.type !== 'presenter')
+      .map((layer) => (
+        layer.type === 'image' ? { ...layer, rect: { x: 48, y: 24, width: 180, height: 100 } } : layer
+      ));
+
+    const project = makeProject(
+      [makeScene(composition, {
+        type: 'html',
+        visual: {
+          kind: 'html',
+          template: 'feature_callouts',
+          templateData: {
+            name: 'Northwind Hub',
+            background: '#ff5a5f',
+            callouts: [
+              { label: 'Lens', detail: 'Wide capture', side: 'left' },
+              { label: 'Mic', detail: 'Studio voice', side: 'right' }
+            ]
+          },
+          width: 640,
+          height: 360,
+          background: 'opaque',
+          assetId: 'html-callouts'
+        }
+      })],
+      [
+        makeAsset('html-callouts', {
+          filename: 'html-callouts.png',
+          localPath: 'assets/html-callouts.png',
+          mimeType: 'image/png',
+          width: 640,
+          height: 360,
+          provenance: 'generated'
+        })
+      ]
+    );
+
+    const plan = resolveRenderPlan(project);
+    expect(plan.scenes[0].status).toBe('renderable');
+    const { result, outputPath } = await renderPlan(plan, 'html-callouts-bigscreen');
+    expect(result.status).toBe('completed');
+    const info = await probe(outputPath);
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect(video).toMatchObject({ codec_name: 'h264', width: WIDTH, height: HEIGHT, pix_fmt: 'yuv420p' });
+    const screen = await samplePixel(outputPath, 58, 32);
+    const corner = await samplePixel(outputPath, 8, 8);
+    expect(screen[0]).toBeGreaterThan(180);
+    expect(screen[1]).toBeLessThan(120);
+    expect(corner[2]).toBeGreaterThan(120);
+  }, 120_000);
+
   it('fails closed on a missing composition asset file', async () => {
     const composition = createStudioComposition({
       canvas: { width: WIDTH, height: HEIGHT },

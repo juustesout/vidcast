@@ -230,7 +230,7 @@ export interface GraphicVisual {
 
 export type HtmlStillBackground = 'opaque' | 'transparent';
 
-export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'location_card' | 'route_map' | 'headline_card' | 'comparison_card' | 'stat-card';
+export type HtmlStillTemplateType = 'headline' | 'stat_card' | 'comparison' | 'chart' | 'timeline' | 'location_card' | 'route_map' | 'product_card' | 'product_comparison' | 'feature_callouts' | 'headline_card' | 'comparison_card' | 'stat-card';
 
 export type HtmlStillTrendDirection = 'up' | 'down' | 'flat';
 
@@ -337,6 +337,55 @@ export interface HtmlRouteMapTemplateData {
   textColor?: string;
 }
 
+export interface HtmlProductFeature {
+  label: string;
+  value: string;
+}
+
+export interface HtmlProductCardTemplateData {
+  name: string;
+  subtitle?: string;
+  description?: string;
+  price?: number;
+  currency?: string;
+  features?: HtmlProductFeature[];
+  imageAssetId?: string;
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export interface HtmlProductComparisonItem {
+  name: string;
+  imageAssetId?: string;
+  features: HtmlProductFeature[];
+}
+
+export interface HtmlProductComparisonTemplateData {
+  title: string;
+  products: HtmlProductComparisonItem[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
+export type HtmlCalloutSide = 'left' | 'right';
+
+export interface HtmlFeatureCallout {
+  label: string;
+  detail: string;
+  side?: HtmlCalloutSide;
+}
+
+export interface HtmlFeatureCalloutsTemplateData {
+  name: string;
+  imageAssetId?: string;
+  callouts: HtmlFeatureCallout[];
+  background?: string;
+  accent?: string;
+  textColor?: string;
+}
+
 export type HtmlStillTemplateData =
   | HtmlHeadlineTemplateData
   | HtmlStatCardTemplateData
@@ -344,7 +393,10 @@ export type HtmlStillTemplateData =
   | HtmlChartTemplateData
   | HtmlTimelineTemplateData
   | HtmlLocationCardTemplateData
-  | HtmlRouteMapTemplateData;
+  | HtmlRouteMapTemplateData
+  | HtmlProductCardTemplateData
+  | HtmlProductComparisonTemplateData
+  | HtmlFeatureCalloutsTemplateData;
 
 export interface HtmlVisual {
   kind: 'html';
