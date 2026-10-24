@@ -3,7 +3,9 @@ import { DEFAULT_ELEVENLABS_MUSIC_MODEL } from '@/lib/ai/music/elevenlabs-provid
 import { MusicProviderError } from '@/lib/ai/music/provider';
 import { clampMusicLengthMs, resolveTimelineMusicLengthMs } from '@/lib/render/music-mix';
 import { resolveProjectTimelineDurationSeconds } from '@/lib/render/scene-resolver';
+import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
@@ -32,9 +34,15 @@ export class ProjectMusicGenerationError extends Error {
     | 'music.provider.auth'
     | 'music.provider.rateLimited'
     | 'music.provider.rejected'
-    | 'music.provider.failed'
-    | 'music.asset.notFound'
-    | 'music.asset.invalidType';
+     | 'music.provider.failed'
+     | 'music.asset.notFound'
+     | 'music.asset.invalidType'
+     | 'music.approval.required'
+     | 'music.approval.stale'
+        | 'paid.spend.cap.exceeded'
+        | 'paid.spend.cap.invalid'
+        | 'paid.spend.cap.unavailable'
+        | 'paid.spend.cap.in_flight';
 
   constructor(
     message: string,
@@ -49,10 +57,16 @@ export class ProjectMusicGenerationError extends Error {
       | 'music.provider.auth'
       | 'music.provider.rateLimited'
       | 'music.provider.rejected'
-      | 'music.provider.failed'
-      | 'music.asset.notFound'
-      | 'music.asset.invalidType'
-  ) {
+       | 'music.provider.failed'
+       | 'music.asset.notFound'
+       | 'music.asset.invalidType'
+       | 'music.approval.required'
+       | 'music.approval.stale'
+        | 'paid.spend.cap.exceeded'
+        | 'paid.spend.cap.invalid'
+        | 'paid.spend.cap.unavailable'
+        | 'paid.spend.cap.in_flight'
+    ) {
     super(message);
     this.name = 'ProjectMusicGenerationError';
     this.status = status;
@@ -116,9 +130,9 @@ function mapRunPolicyError(error: RunPolicyError): ProjectMusicGenerationError {
   return new ProjectMusicGenerationError(error.message, error.status, 'music.provider.unsupported');
 }
 
-function resolveMusicProvider(requestedProvider: string | undefined, mode: RunMode | undefined): string {
+function resolveMusicProvider(requestedProvider: string | undefined, mode: RunMode | undefined) {
   try {
-    return resolveManualGenerationProvider('music', requestedProvider, { mode }).provider;
+    return resolveManualGenerationProvider('music', requestedProvider, { mode });
   } catch (error) {
     if (error instanceof RunPolicyError) {
       throw mapRunPolicyError(error);
@@ -181,7 +195,16 @@ export async function generateProjectMusic(
     // must never be reused as a provider codec code, or a later real-provider
     // regeneration would send an unsupported value (e.g. "wav").
     const outputFormat = options.outputFormat;
-    const providerId = resolveMusicProvider(options.provider, options.mode);
+    const resolution = resolveMusicProvider(options.provider, options.mode);
+    try {
+      requireHumanApprovalForMode(project, resolution.mode);
+    } catch (error) {
+      if (error instanceof HumanApprovalError) {
+        throw new ProjectMusicGenerationError(error.message, error.status, `music.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      throw error;
+    }
+    const providerId = resolution.provider;
     const regenerate = Boolean(options.regenerate);
 
     if (!regenerate && existingMusic.status === 'generated' && existingMusic.assetId) {
@@ -206,6 +229,21 @@ export async function generateProjectMusic(
         throw error;
       }
     })();
+
+    let paidSubmit;
+    try {
+      paidSubmit = await assertAndReservePaidSubmit({
+        projectId,
+        modality: 'music',
+        provider: registered.providerId,
+        mode: resolution.mode
+      });
+    } catch (error) {
+      if (error instanceof PaidSubmitCapError) {
+        throw new ProjectMusicGenerationError(error.message, error.status, error.code);
+      }
+      throw error;
+    }
 
     const attemptId = createId('music_attempt');
     const previousAssetId = existingMusic.assetId;
@@ -255,6 +293,7 @@ export async function generateProjectMusic(
         outputFormat
       });
     } catch (error) {
+      await finalizePaidSubmit(paidSubmit, 'failed');
       const message = error instanceof Error ? error.message : 'Music provider call failed.';
       await dependencies.store.mutateProject(projectId, (fresh) => ({
         ...fresh,
@@ -276,6 +315,8 @@ export async function generateProjectMusic(
       }
       throw new ProjectMusicGenerationError('Music provider call failed.', 502, 'music.provider.failed');
     }
+
+    await finalizePaidSubmit(paidSubmit, 'completed');
 
     if (!generated.data || generated.data.byteLength === 0) {
       const message = 'Music provider returned an empty audio result.';

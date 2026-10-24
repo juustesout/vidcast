@@ -2,7 +2,9 @@ import { AudioIntegrityError, validateGeneratedAudio, type AudioIntegrityResult 
 import { resolveRealNarrationPilotGate } from '@/lib/ai/text-to-speech/real-narration-pilot';
 import { createTextToSpeechRegistry } from '@/lib/ai/text-to-speech/registry';
 import { TextToSpeechProviderError, type TextToSpeechFormat } from '@/lib/ai/text-to-speech/provider';
+import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -46,8 +48,14 @@ export class SceneNarrationGenerationError extends Error {
     | 'narration.provider.notConfigured'
     | 'narration.provider.unsupported'
     | 'narration.provider.failed'
-    | 'narration.scene.alreadyRunning'
-    | 'narration.scene.alreadyGenerated';
+     | 'narration.scene.alreadyRunning'
+     | 'narration.scene.alreadyGenerated'
+      | 'narration.approval.required'
+     | 'narration.approval.stale'
+        | 'paid.spend.cap.exceeded'
+        | 'paid.spend.cap.invalid'
+        | 'paid.spend.cap.unavailable'
+        | 'paid.spend.cap.in_flight';
 
   constructor(
     message: string,
@@ -59,9 +67,15 @@ export class SceneNarrationGenerationError extends Error {
       | 'narration.provider.notConfigured'
       | 'narration.provider.unsupported'
       | 'narration.provider.failed'
-      | 'narration.scene.alreadyRunning'
-      | 'narration.scene.alreadyGenerated'
-  ) {
+       | 'narration.scene.alreadyRunning'
+       | 'narration.scene.alreadyGenerated'
+       | 'narration.approval.required'
+       | 'narration.approval.stale'
+        | 'paid.spend.cap.exceeded'
+        | 'paid.spend.cap.invalid'
+        | 'paid.spend.cap.unavailable'
+        | 'paid.spend.cap.in_flight'
+    ) {
     super(message);
     this.name = 'SceneNarrationGenerationError';
     this.status = status;
@@ -128,10 +142,10 @@ function mapRunPolicyError(error: RunPolicyError): SceneNarrationGenerationError
   return new SceneNarrationGenerationError(error.message, error.status, 'narration.provider.unsupported');
 }
 
-function resolveNarrationProvider(requestedProvider: string | undefined, mode: RunMode | undefined): string {
+function resolveNarrationProvider(requestedProvider: string | undefined, mode: RunMode | undefined) {
   try {
     const narrationPilot = resolveRealNarrationPilotGate().allowed;
-    return resolveManualGenerationProvider('narration', requestedProvider, { mode, narrationPilot }).provider;
+    return resolveManualGenerationProvider('narration', requestedProvider, { mode, narrationPilot });
   } catch (error) {
     if (error instanceof RunPolicyError) {
       throw mapRunPolicyError(error);
@@ -188,7 +202,16 @@ export async function generateSceneNarration(
 
     const format = options.format ?? existingNarration.format ?? resolveDefaultFormat();
     const model = options.model ?? existingNarration.model ?? resolveDefaultModel();
-    const providerId = resolveNarrationProvider(options.provider, options.mode);
+    const resolution = resolveNarrationProvider(options.provider, options.mode);
+    try {
+      requireHumanApprovalForMode(project, resolution.mode);
+    } catch (error) {
+      if (error instanceof HumanApprovalError) {
+        throw new SceneNarrationGenerationError(error.message, error.status, `narration.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      throw error;
+    }
+    const providerId = resolution.provider;
     const regenerate = Boolean(options.regenerate);
 
     if (!regenerate && existingNarration.status === 'generated' && existingNarration.audioAssetId) {
@@ -204,6 +227,22 @@ export async function generateSceneNarration(
       provider = dependencies.registry.getProvider(providerId);
     } catch {
       throw new SceneNarrationGenerationError(`Unknown narration provider: ${providerId}`, 422, 'narration.provider.unsupported');
+    }
+
+    let paidSubmit;
+    try {
+      paidSubmit = await assertAndReservePaidSubmit({
+        projectId,
+        sceneId,
+        modality: 'narration',
+        provider: provider.providerId,
+        mode: resolution.mode
+      });
+    } catch (error) {
+      if (error instanceof PaidSubmitCapError) {
+        throw new SceneNarrationGenerationError(error.message, error.status, error.code);
+      }
+      throw error;
     }
 
     const attemptId = createId('generation_attempt');
@@ -254,6 +293,7 @@ export async function generateSceneNarration(
         settings: options.settings
       });
     } catch (error) {
+      await finalizePaidSubmit(paidSubmit, 'failed');
       const message = error instanceof Error ? error.message : 'Narration provider call failed.';
       const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
         ...entry,
@@ -283,6 +323,8 @@ export async function generateSceneNarration(
       }
       throw new SceneNarrationGenerationError('Narration provider call failed.', 502, 'narration.provider.failed');
     }
+
+    await finalizePaidSubmit(paidSubmit, 'completed');
 
     let integrity: AudioIntegrityResult;
     try {

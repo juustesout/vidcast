@@ -4,7 +4,9 @@ import { isRealVideoProviderKey, toGenerationProvider } from '@/lib/ai/video-gen
 import { createVideoGenerationRegistry } from '@/lib/ai/video-generation/registry';
 import { VideoGenerationProviderError, type VideoReferenceInput } from '@/lib/ai/video-generation/provider';
 import { resolveVideoGeneration, resolveVideoGenerationProviderForAttempt } from '@/lib/ai/video-generation/resolver';
+import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
+import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import { RunPolicyError } from '@/lib/production/run-policy';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -433,6 +435,31 @@ export async function submitSceneVideoGeneration(
       throw error;
     }
 
+    try {
+      requireHumanApprovalForMode(project, resolved.mode);
+    } catch (error) {
+      if (error instanceof HumanApprovalError) {
+        throw new SceneVideoGenerationError(error.message, error.status, `generation.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      throw error;
+    }
+
+    let paidSubmit;
+    try {
+      paidSubmit = await assertAndReservePaidSubmit({
+        projectId,
+        sceneId,
+        modality: 'video',
+        provider: resolved.providerKey,
+        mode: resolved.mode
+      });
+    } catch (error) {
+      if (error instanceof PaidSubmitCapError) {
+        throw new SceneVideoGenerationError(error.message, error.status, error.code);
+      }
+      throw error;
+    }
+
     // Attempt-scoped diagnostics describe the attempt that is being replaced.
     // Carrying `submitUnresolved` into the next attempt would make a clean
     // resubmit look unresolvable (and suppress recovery), so drop these flags.
@@ -485,6 +512,7 @@ export async function submitSceneVideoGeneration(
     try {
       submission = await resolved.provider.submit(resolved.request);
     } catch (error) {
+      await finalizePaidSubmit(paidSubmit, 'failed');
       const providerFailure = sanitizeProviderError(error);
 
       if (submitFailureIsAmbiguous(error, resolved.providerKey)) {
@@ -555,6 +583,8 @@ export async function submitSceneVideoGeneration(
       }
       throw new SceneVideoGenerationError('Provider call failed while submitting video generation.', 502, 'generation.provider.failed');
     }
+
+    await finalizePaidSubmit(paidSubmit, 'completed');
 
     const updatedAttempt: GenerationAttempt = {
       ...queuedAttempt,

@@ -21,7 +21,9 @@ import {
 import {
   evaluatePresenterPaidCostPrecondition
 } from '@/lib/presenter/pricing';
+import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
@@ -58,8 +60,14 @@ export class PresenterGenerationError extends Error {
     | 'presenter.scene.alreadyRunning'
     | 'presenter.scene.alreadyGenerated'
     | 'presenter.scene.submissionUnknown'
-    | 'presenter.cost.notConfigured'
-    | 'presenter.budget.exceeded';
+     | 'presenter.cost.notConfigured'
+     | 'presenter.budget.exceeded'
+     | 'presenter.approval.required'
+     | 'presenter.approval.stale'
+      | 'paid.spend.cap.exceeded'
+      | 'paid.spend.cap.invalid'
+      | 'paid.spend.cap.unavailable'
+      | 'paid.spend.cap.in_flight';
   readonly details?: Record<string, unknown>;
 
   constructor(
@@ -78,8 +86,14 @@ export class PresenterGenerationError extends Error {
       | 'presenter.scene.alreadyRunning'
       | 'presenter.scene.alreadyGenerated'
       | 'presenter.scene.submissionUnknown'
-      | 'presenter.cost.notConfigured'
-      | 'presenter.budget.exceeded',
+       | 'presenter.cost.notConfigured'
+       | 'presenter.budget.exceeded'
+       | 'presenter.approval.required'
+       | 'presenter.approval.stale'
+        | 'paid.spend.cap.exceeded'
+        | 'paid.spend.cap.invalid'
+        | 'paid.spend.cap.unavailable'
+        | 'paid.spend.cap.in_flight',
     details?: Record<string, unknown>
   ) {
     super(message);
@@ -336,7 +350,16 @@ export async function submitPresenterClip(
       throw new PresenterGenerationError('Presenter clip generation is already in progress for this scene.', 409, 'presenter.scene.alreadyRunning');
     }
 
-    const { provider: providerId } = resolvePresenterProvider(project, options.provider, options.mode);
+    const resolution = resolvePresenterProvider(project, options.provider, options.mode);
+    try {
+      requireHumanApprovalForMode(project, resolution.mode);
+    } catch (error) {
+      if (error instanceof HumanApprovalError) {
+        throw new PresenterGenerationError(error.message, error.status, `presenter.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      throw error;
+    }
+    const providerId = resolution.provider;
     let provider: PresenterProvider;
     try {
       provider = dependencies.registry.getProvider(providerId);
@@ -365,6 +388,23 @@ export async function submitPresenterClip(
       : undefined;
 
     const avatarId = resolveAvatarId(project, provider, options.avatarId);
+
+    let paidSubmit;
+    try {
+      paidSubmit = await assertAndReservePaidSubmit({
+        projectId,
+        sceneId,
+        modality: 'presenter',
+        provider: provider.providerId,
+        mode: resolution.mode
+      });
+    } catch (error) {
+      if (error instanceof PaidSubmitCapError) {
+        throw new PresenterGenerationError(error.message, error.status, error.code);
+      }
+      throw error;
+    }
+
     const walletBalanceBeforeUsd = cost ? await readProviderBalance(provider) : undefined;
     const attemptId = createId('presenter_attempt');
     const attempt: PresenterClipAttempt = {
@@ -418,6 +458,11 @@ export async function submitPresenterClip(
       const failedCost = cost
         ? await observeProviderCost(provider, cost, walletBalanceBeforeUsd)
         : undefined;
+      await finalizePaidSubmit(
+        paidSubmit,
+        'failed',
+        failedCost?.observedUsd !== undefined ? { actualUsd: failedCost.observedUsd } : undefined
+      );
       const failedAttempt: PresenterClipAttempt = {
         ...attempt,
         status: 'failed',
@@ -441,6 +486,11 @@ export async function submitPresenterClip(
     const generatingCost = cost
       ? await observeProviderCost(provider, cost, walletBalanceBeforeUsd)
       : undefined;
+    await finalizePaidSubmit(
+      paidSubmit,
+      'completed',
+      generatingCost?.observedUsd !== undefined ? { actualUsd: generatingCost.observedUsd } : undefined
+    );
     const generatingAttempt: PresenterClipAttempt = {
       ...attempt,
       status: 'generating',

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   clearProjectMusic,
@@ -6,6 +6,8 @@ import {
   ProjectMusicGenerationError,
   selectProjectMusic
 } from '@/lib/generation/music-service';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import { MusicProviderError } from '@/lib/ai/music/provider';
 import type { GeneratedMusicInput } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -82,6 +84,7 @@ function createDependencies(
   const deletedAssets: string[] = [];
   const generatedRequests: Array<{ durationMs: number; model?: string; outputFormat?: string }> = [];
   let createdCount = 0;
+  let generateCalls = 0;
 
   const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
@@ -132,6 +135,7 @@ function createDependencies(
       return {
         providerId: 'fake',
         async generate(request: { durationMs: number; model?: string; outputFormat?: string }) {
+          generateCalls += 1;
           generatedRequests.push(request);
           if (behavior.providerError) {
             throw behavior.providerError;
@@ -153,7 +157,57 @@ function createDependencies(
     }
   };
 
-  return { state, store, media, registry, createdCount: () => createdCount, deletedAssets, generatedRequests };
+  return { state, store, media, registry, createdCount: () => createdCount, deletedAssets, generatedRequests, generateCalls: () => generateCalls };
+}
+
+function withHumanApproval(project: Project): Project {
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  setPaidSubmitLedgerForTests(undefined);
+});
+
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
 }
 
 describe('project music generation service', () => {
@@ -381,5 +435,46 @@ describe('project music generation service', () => {
     expect(result).toEqual({ status: 'cleared' });
     expect(deps.state.project.music).toBeUndefined();
     expect(deps.state.project.assets).toHaveLength(1);
+  });
+
+  it('does not consult the spend ledger for mock music generation', async () => {
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0' });
+    const ledger = new InMemoryPaidSubmitLedger();
+    let reserveCalls = 0;
+    const original = ledger.reserve.bind(ledger);
+    ledger.reserve = async (input) => {
+      reserveCalls += 1;
+      return original(input);
+    };
+    setPaidSubmitLedgerForTests(ledger);
+    const deps = createDependencies(createProject());
+
+    const result = await generateProjectMusic('project-1', { prompt: 'calm ambient' }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+    expect(result.status).toBe('generated');
+    expect(reserveCalls).toBe(0);
+  });
+
+  it('blocks a real music submit when the host cap is exhausted', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0', PAID_SPEND_CAP_MAX_MUSIC_SUBMITS: '1' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const deps = createDependencies(withHumanApproval(createProject()));
+
+    await expect(
+      generateProjectMusic('project-1', { prompt: 'calm ambient', mode: 'real', provider: 'elevenlabs' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.exceeded'
+    });
+    expect(deps.generateCalls()).toBe(0);
   });
 });

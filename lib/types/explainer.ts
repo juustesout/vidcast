@@ -28,6 +28,18 @@ export type SceneIntentNarrativeRole = 'hook' | 'setup' | 'explanation' | 'examp
 
 export type SceneIntentStatus = 'draft' | 'approved';
 
+export interface SceneIntentApproval {
+  approvedBy: string;
+  approvedAt: string;
+  contentHash: string;
+}
+
+export interface HumanProductionApproval {
+  approvedBy: string;
+  approvedAt: string;
+  contentHash: string;
+}
+
 export interface SceneTimingIntent {
   durationSeconds: number;
 }
@@ -53,6 +65,7 @@ export interface SceneIntentDraft {
   timing: SceneTimingIntent;
   notes?: string;
   status: SceneIntentStatus;
+  approval?: SceneIntentApproval;
   materializedSceneId?: string;
 }
 
@@ -61,4 +74,5 @@ export interface ExplainerSpec {
   story: ExplainerStory;
   // Reserved for P9.2. P9.1 stores structure only.
   sceneIntents: SceneIntentDraft[];
+  humanApproval?: HumanProductionApproval;
 }

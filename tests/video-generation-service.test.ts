@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { cancelSceneVideoGeneration, classifyStatusPollError, refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import { VideoGenerationProviderError } from '@/lib/ai/video-generation/provider';
 import { reconcileInterruptedGenerations } from '@/lib/production/run-recovery';
 import type { VideoGenerationRequest } from '@/lib/ai/video-generation/provider';
@@ -10,7 +12,22 @@ import type { Project } from '@/lib/types/render';
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  setPaidSubmitLedgerForTests(undefined);
 });
+
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
+}
 
 function createProject(): Project {
   const now = new Date().toISOString();
@@ -94,6 +111,37 @@ function createProject(): Project {
       }
     ]
   };
+}
+
+function withHumanApproval(project: Project): Project {
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
 }
 
 function createInMemoryDependencies(
@@ -352,10 +400,29 @@ describe('video generation service', () => {
     expect(poll.status).toBe('generated');
   });
 
-  it('keeps an ambiguous real-provider submit active and blocks a duplicate paid submit', async () => {
+  it('blocks real video generation without human approval', async () => {
     vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
     vi.stubEnv('FAL_KEY', 'fal-test-key');
     const project = createProject();
+    const deps = createInMemoryDependencies(project, { providerId: 'fal' });
+
+    await expect(
+      submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'generation.approval.required'
+    });
+    expect(deps.submitCalls()).toBe(0);
+  });
+
+  it('keeps an ambiguous real-provider submit active and blocks a duplicate paid submit', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    const project = withHumanApproval(createProject());
     const deps = createInMemoryDependencies(project, {
       providerId: 'fal',
       submitError: new VideoGenerationProviderError('FAL video generation timed out or was aborted.', 504, 'PROVIDER_FAILED')
@@ -1049,6 +1116,93 @@ describe('video generation service', () => {
       }
       expect(classifyStatusPollError(new Error('unexpected'))).toBe('transient');
       expect(classifyStatusPollError('boom')).toBe('transient');
+    });
+  });
+
+  describe('paid submit cap', () => {
+    it('counts a real video submit and does not increment on poll', async () => {
+      vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+      vi.stubEnv('FAL_KEY', 'fal-test-key');
+      enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '1', PAID_SPEND_CAP_MAX_VIDEO_SUBMITS: '1' });
+      const ledger = new InMemoryPaidSubmitLedger();
+      setPaidSubmitLedgerForTests(ledger);
+      const project = withHumanApproval(createProject());
+      const deps = createInMemoryDependencies(project, { providerId: 'fal' });
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      expect(deps.submitCalls()).toBe(1);
+      expect((await ledger.snapshot()).entries).toHaveLength(1);
+
+      await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      }, { mode: 'real' });
+      expect((await ledger.snapshot()).entries).toHaveLength(1);
+      expect(deps.submitCalls()).toBe(1);
+    });
+
+    it('does not debit an unresolved retry that never POSTs', async () => {
+      vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+      vi.stubEnv('FAL_KEY', 'fal-test-key');
+      enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '2', PAID_SPEND_CAP_MAX_VIDEO_SUBMITS: '2' });
+      const ledger = new InMemoryPaidSubmitLedger();
+      setPaidSubmitLedgerForTests(ledger);
+      const project = withHumanApproval(createProject());
+      const deps = createInMemoryDependencies(project, {
+        providerId: 'fal',
+        submitError: new VideoGenerationProviderError('FAL video generation timed out or was aborted.', 504, 'PROVIDER_FAILED')
+      });
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.attempt.submitUnresolved' });
+      expect((await ledger.snapshot()).entries).toHaveLength(1);
+      expect(deps.submitCalls()).toBe(1);
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+          store: deps.store,
+          media: deps.media,
+          registry: deps.registry as never
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+      expect((await ledger.snapshot()).entries).toHaveLength(1);
+      expect(deps.submitCalls()).toBe(1);
+    });
+
+    it('does not consult the spend ledger for mock video submit or poll', async () => {
+      enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0' });
+      const ledger = new InMemoryPaidSubmitLedger();
+      let reserveCalls = 0;
+      const original = ledger.reserve.bind(ledger);
+      ledger.reserve = async (input) => {
+        reserveCalls += 1;
+        return original(input);
+      };
+      setPaidSubmitLedgerForTests(ledger);
+      const project = createProject();
+      const deps = createInMemoryDependencies(project);
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      });
+      expect(reserveCalls).toBe(0);
     });
   });
 });

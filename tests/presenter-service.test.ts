@@ -4,11 +4,13 @@ import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PresenterJobStatus, PresenterProvider } from '@/lib/ai/presenter/provider';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import {
   pollPresenterClip,
   PresenterGenerationError,
   submitPresenterClip
 } from '@/lib/generation/presenter-service';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
@@ -305,29 +307,74 @@ function configureRealPresenterPricing(pricing = JSON.stringify({
 
 function realProject(overrides: {
   maxCostUsd?: number;
+  maxGeneratedSeconds?: number;
+  maxPaidRequests?: number;
   outputFormat?: 'mp4' | 'webm';
   presenterClips?: Project['presenterClips'];
   assets?: Asset[];
 } = {}): Project {
-  return buildProject({
+  const project = buildProject({
     presenter: {
       enabled: true,
       provider: 'heygen',
       avatarId: 'avatar-1',
       outputFormat: overrides.outputFormat ?? 'mp4',
       sceneSettings: [{ sceneId: 'scene-1', layout: 'fullscreen' }],
-      maxGeneratedSeconds: 20,
-      maxPaidRequests: 2,
+      maxGeneratedSeconds: overrides.maxGeneratedSeconds ?? 20,
+      maxPaidRequests: overrides.maxPaidRequests ?? 2,
       maxCostUsd: overrides.maxCostUsd ?? 0.2
     },
     presenterClips: overrides.presenterClips,
     ...(overrides.assets ? { assets: overrides.assets } : {})
   });
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
 }
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  setPaidSubmitLedgerForTests(undefined);
 });
+
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
+}
 
 afterAll(async () => {
   await Promise.all(createdRoots.map((root) => fs.rm(root, { recursive: true, force: true })));
@@ -535,16 +582,9 @@ describe('presenter generation service', () => {
   it('blocks a paid submission when the request budget is exhausted', async () => {
     vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
     vi.stubEnv('HEYGEN_API_KEY', 'test-key');
-    const project = buildProject({
-      presenter: {
-        enabled: true,
-        provider: 'heygen',
-        avatarId: 'avatar-1',
-        outputFormat: 'mp4',
-        sceneSettings: [{ sceneId: 'scene-1', layout: 'fullscreen' }],
-        maxGeneratedSeconds: 2,
-        maxPaidRequests: 1
-      },
+    const project = realProject({
+      maxGeneratedSeconds: 2,
+      maxPaidRequests: 1,
       presenterClips: [
         {
           sceneId: 'scene-1',
@@ -746,5 +786,57 @@ describe('presenter generation service', () => {
     expect(submitted.status).toBe('accepted');
     expect(deps.submitCalls).toBe(1);
     expect(deps.state.project.presenterClips?.[0]?.attempts).toHaveLength(2);
+  });
+
+  it('does not consult the spend ledger for mock presenter submit or poll', async () => {
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0' });
+    const ledger = new InMemoryPaidSubmitLedger();
+    let reserveCalls = 0;
+    const original = ledger.reserve.bind(ledger);
+    ledger.reserve = async (input) => {
+      reserveCalls += 1;
+      return original(input);
+    };
+    setPaidSubmitLedgerForTests(ledger);
+    const project = buildProject();
+    const deps = await createDependencies(project, mockProvider());
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps);
+    await pollPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(reserveCalls).toBe(0);
+  });
+
+  it('counts a real presenter submit and does not increment on poll', async () => {
+    configureRealPresenterPricing();
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '1', PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS: '1' });
+    const ledger = new InMemoryPaidSubmitLedger();
+    setPaidSubmitLedgerForTests(ledger);
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5, 4.9]));
+
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps);
+    expect(submitted.status).toBe('accepted');
+    expect(deps.submitCalls).toBe(1);
+    expect((await ledger.snapshot()).entries).toHaveLength(1);
+
+    await pollPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps);
+    expect((await ledger.snapshot()).entries).toHaveLength(1);
+    expect(deps.submitCalls).toBe(1);
+  });
+
+  it('still blocks on maxCostUsd when the host cap has remaining units', async () => {
+    configureRealPresenterPricing();
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '5', PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS: '5' });
+    const ledger = new InMemoryPaidSubmitLedger();
+    setPaidSubmitLedgerForTests(ledger);
+    const project = realProject({ maxCostUsd: 0.01 });
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({ code: 'presenter.budget.exceeded' });
+    expect(deps.submitCalls).toBe(0);
+    expect((await ledger.snapshot()).entries).toHaveLength(0);
   });
 });

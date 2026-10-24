@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { buildSilentWav } from '@/lib/ai/audio/silent-wav';
 import { TextToSpeechProviderError } from '@/lib/ai/text-to-speech/provider';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
@@ -138,11 +140,14 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
     }
   };
 
+  let synthesizeCalls = 0;
+
   const registry = {
     getProvider() {
       return {
         providerId: 'fake',
         async synthesize() {
+          synthesizeCalls += 1;
           if (behavior?.providerError) {
             throw behavior.providerError;
           }
@@ -167,7 +172,57 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
     }
   };
 
-  return { state, store, media, registry };
+  return { state, store, media, registry, synthesizeCalls: () => synthesizeCalls };
+}
+
+function withHumanApproval(project: Project): Project {
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  setPaidSubmitLedgerForTests(undefined);
+});
+
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
 }
 
 describe('narration generation service', () => {
@@ -270,5 +325,48 @@ describe('narration generation service', () => {
       registry: withoutAlignment.registry as never
     });
     expect(withoutAlignment.state.project.scenes[0].narration?.alignment).toBeUndefined();
+  });
+
+  it('does not consult the spend ledger for mock narration generation', async () => {
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0' });
+    const ledger = new InMemoryPaidSubmitLedger();
+    let reserveCalls = 0;
+    const original = ledger.reserve.bind(ledger);
+    ledger.reserve = async (input) => {
+      reserveCalls += 1;
+      return original(input);
+    };
+    setPaidSubmitLedgerForTests(ledger);
+    const project = createProject();
+    const deps = createInMemoryDependencies(project);
+
+    const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+    expect(result.status).toBe('generated');
+    expect(reserveCalls).toBe(0);
+  });
+
+  it('blocks a real narration submit when the host cap is exhausted', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0', PAID_SPEND_CAP_MAX_NARRATION_SUBMITS: '3' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneNarration(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'elevenlabs' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.exceeded'
+    });
+    expect(deps.synthesizeCalls()).toBe(0);
   });
 });

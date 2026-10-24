@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { FakeImageGenerationProvider } from '@/lib/ai/image-generation/fake-provider';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { generateSceneImage, SceneImageGenerationError } from '@/lib/generation/image-generation-service';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
@@ -110,6 +112,7 @@ function createInMemoryDependencies(project: Project, providerBehavior?: { throw
   };
 
   let createdAssetCount = 0;
+  let generateImageCalls = 0;
 
   const media: Pick<MediaStore, 'saveGeneratedImage' | 'exists' | 'readRelativeFile'> = {
     async saveGeneratedImage(input) {
@@ -153,15 +156,41 @@ function createInMemoryDependencies(project: Project, providerBehavior?: { throw
         return {
           providerId: 'fake',
           async generateImage() {
+            generateImageCalls += 1;
             throw new Error('provider failed');
           }
         };
       }
-      return fakeProvider;
+      return {
+        providerId: fakeProvider.providerId,
+        async generateImage(request: Parameters<FakeImageGenerationProvider['generateImage']>[0]) {
+          generateImageCalls += 1;
+          return fakeProvider.generateImage(request);
+        }
+      };
     }
   };
 
-  return { state, store, media, registry };
+  return { state, store, media, registry, generateImageCalls: () => generateImageCalls };
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  setPaidSubmitLedgerForTests(undefined);
+});
+
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '3');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
 }
 
 describe('image generation service', () => {
@@ -228,16 +257,164 @@ describe('image generation service', () => {
     expect(deps.state.project.assets.length).toBe(1);
   });
 
-  it('returns configuration conflict when regenerate is false on already generated scene', async () => {
+  function withHumanApproval(project: Project): Project {
+    const next: Project = {
+      ...project,
+      explainer: {
+        brief: project.explainer?.brief ?? {
+          topic: '',
+          goal: '',
+          audience: '',
+          tone: '',
+          targetDurationSeconds: project.durationTarget,
+          notes: ''
+        },
+        story: project.explainer?.story ?? {
+          title: project.title,
+          hook: '',
+          script: '',
+          beats: [],
+          cta: '',
+          notes: '',
+          versions: []
+        },
+        sceneIntents: project.explainer?.sceneIntents ?? []
+      }
+    };
+    next.explainer = {
+      ...next.explainer!,
+      humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+    };
+    return next;
+  }
+
+  it('blocks real image generation without human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
     await expect(
-      generateSceneImage(project.id, 'scene-1', { regenerate: false }, {
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
         store: deps.store,
         media: deps.media,
         registry: deps.registry as never
       })
-    ).rejects.toThrow(SceneImageGenerationError);
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'generation.approval.required'
+    });
+  });
+
+  it('allows real image generation after a matching human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+
+    expect(result.status).toBe('generated');
+  });
+
+  it('blocks a real image submit when the host cap is exhausted', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0', PAID_SPEND_CAP_MAX_IMAGE_SUBMITS: '2' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.exceeded'
+    });
+    expect(deps.generateImageCalls()).toBe(0);
+  });
+
+  it('allows one remaining real image submit and denies a regenerate after the cap is spent', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '1', PAID_SPEND_CAP_MAX_IMAGE_SUBMITS: '1' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    const first = await generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+    expect(first.status).toBe('generated');
+    expect(deps.generateImageCalls()).toBe(1);
+
+    const secondProject = withHumanApproval(createProject());
+    secondProject.id = 'project-2';
+    const secondDeps = createInMemoryDependencies(secondProject);
+
+    await expect(
+      generateSceneImage(secondProject.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
+        store: secondDeps.store,
+        media: secondDeps.media,
+        registry: secondDeps.registry as never
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.exceeded'
+    });
+    expect(secondDeps.generateImageCalls()).toBe(0);
+  });
+
+  it('does not consult the spend ledger for mock image generation', async () => {
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '0' });
+    const ledger = new InMemoryPaidSubmitLedger();
+    let reserveCalls = 0;
+    const original = ledger.reserve.bind(ledger);
+    ledger.reserve = async (input) => {
+      reserveCalls += 1;
+      return original(input);
+    };
+    setPaidSubmitLedgerForTests(ledger);
+    const project = createProject();
+    const deps = createInMemoryDependencies(project);
+
+    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
+      store: deps.store,
+      media: deps.media,
+      registry: deps.registry as never
+    });
+    expect(result.status).toBe('generated');
+    expect(reserveCalls).toBe(0);
+  });
+
+  it('fails closed when the spend cap is enabled without limit env', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
+        store: deps.store,
+        media: deps.media,
+        registry: deps.registry as never
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(deps.generateImageCalls()).toBe(0);
   });
 });

@@ -58,3 +58,11 @@ export function getStockStatePath(): string {
 export function getStockStateDir(): string {
   return path.join(getProjectsRoot(), '_stock');
 }
+
+export function getPaidSpendStatePath(): string {
+  return path.join(getProjectsRoot(), '_spend', 'spend-state.json');
+}
+
+export function getPaidSpendStateDir(): string {
+  return path.join(getProjectsRoot(), '_spend');
+}
