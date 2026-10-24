@@ -3,7 +3,8 @@
 import Image from 'next/image';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
+import { ANIMATION_TEMPLATE_IDS, type AnimationDestination, type AnimationTemplateSummary } from '@/lib/animation/types';
+import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, LOGO_OVERLAY_LIMITS, LOGO_OVERLAY_POSITIONS, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { HtmlStillSlotImagePicker } from '@/components/project/html-still-slot-image-picker';
@@ -14,7 +15,7 @@ import { ValidationPanel } from '@/components/project/validation-panel';
 import { ReferencesPanel } from '@/components/project/references-panel';
 import { EmptyPanel, Field, InfoMiniCard, SelectField, TabButton } from '@/components/project/workspace-controls';
 import { createProjectCompositionRequest, createSceneNarrationRequest, createSceneRenderRequest } from '@/lib/client/render-client';
-import { executeProductionActionRequest } from '@/lib/client/production-action-client';
+import { followServerRunFlow, ProductionRunTracker, startServerRunFlow } from '@/lib/client/production-run-tracker';
 import { deriveGenerationTasks } from '@/lib/projects/generation-tasks';
 import { resolveVideoProviderForwarding } from '@/lib/generation/video-provider-forwarding';
 import { resolveVideoModelAuthoringHints } from '@/lib/ai/video-generation/models';
@@ -22,6 +23,16 @@ import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveScen
 import { applyHtmlStillSlotImage, isHtmlStillSlotImageAsset } from '@/lib/projects/html-still-slot-images';
 import { getAssetUsage } from '@/lib/projects/usage';
 import { defaultBoxForType, defaultPositionForType } from '@/lib/render/overlay-resolve';
+import {
+  createStudioComposition,
+  resolveStudioPipRect,
+  resolveStudioPresenterRect,
+  STUDIO_COMPOSITION_CANVAS,
+  STUDIO_LAYER_IDS,
+  STUDIO_PRESENTER_PIP_OFFSET_X,
+  STUDIO_PRESENTER_PIP_OFFSET_Y,
+  STUDIO_PRESENTER_PIP_SCALE
+} from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
 import { createId } from '@/lib/utils/ids';
 import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll';
@@ -29,13 +40,19 @@ import { joinProjectAssetUrl, joinProjectReferenceUrl } from '@/lib/utils/projec
 import { deriveActiveWorkflowStepId } from '@/lib/workflow/workflow-navigation';
 import { deriveWorkflowStatus } from '@/lib/workflow/workflow-status';
 import { deriveProductionPlan, groupProductionActionsByScene, type ProductionPlannedAction } from '@/lib/production/production-planner';
-import { runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent, type ProductionRunnerResultStatus } from '@/lib/production/production-runner';
+import { type ProductionRunnerEvent, type ProductionRunnerResultStatus } from '@/lib/production/production-runner';
 import { formatProductionLogAsText } from '@/lib/production/production-log-export';
 import type { WorkflowNavigationTarget, WorkflowStepId } from '@/lib/workflow/workflow-status';
 import type { GenerationProvider, GenerationStatus } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
-import type { GraphicTemplateType, HtmlStillTemplateType, OverlaySpec, Scene, VisualSpec } from '@/lib/types/scene';
+import type { GraphicTemplateType, HtmlStillTemplateType, LogoOverlaySpec, OverlaySpec, Scene, VisualSpec } from '@/lib/types/scene';
+import type {
+  SceneCompositionCanvas,
+  SceneCompositionPipPresetName,
+  SceneCompositionPresenterLayer,
+  SceneCompositionPresenterMode
+} from '@/lib/types/scene-composition';
 import type { StockOrientation } from '@/lib/types/stock';
 import { validateProject } from '@/lib/validation/project-validation';
 
@@ -404,6 +421,10 @@ function actionTypeLabel(type: ProductionPlannedAction['type']): string {
       return 'Video Poll';
     case 'narration_generate':
       return 'Narration';
+    case 'presenter_submit':
+      return 'Presenter';
+    case 'presenter_poll':
+      return 'Presenter Poll';
     case 'scene_render':
       return 'Render';
     case 'final_compose':
@@ -452,6 +473,96 @@ function runStatusLabel(status: 'idle' | 'running' | ProductionRunnerResultStatu
   }
 }
 
+const COMPOSITION_PRESENTER_MODES: SceneCompositionPresenterMode[] = ['full_canvas', 'pip'];
+const COMPOSITION_PIP_PRESETS: Array<SceneCompositionPipPresetName | 'custom'> = ['intro', 'news', 'custom'];
+const LOGO_MODE_OPTIONS = ['inherit', 'custom', 'off'] as const;
+type LogoMode = (typeof LOGO_MODE_OPTIONS)[number];
+
+function presenterLayerOf(scene: Scene): SceneCompositionPresenterLayer | undefined {
+  return scene.composition?.layers.find((layer): layer is SceneCompositionPresenterLayer => layer.type === 'presenter');
+}
+
+function presenterModeOf(scene: Scene): SceneCompositionPresenterMode {
+  return presenterLayerOf(scene)?.mode ?? 'full_canvas';
+}
+
+function presenterPipPresetOf(scene: Scene): SceneCompositionPipPresetName | 'custom' {
+  const layer = presenterLayerOf(scene);
+  if (layer?.mode !== 'pip') {
+    return 'intro';
+  }
+  return layer.pipPreset ?? 'custom';
+}
+
+function ensureStudioComposition(scene: Scene): NonNullable<Scene['composition']> {
+  if (scene.composition?.preset === 'studio') {
+    return {
+      ...scene.composition,
+      layers: scene.composition.layers.slice()
+    };
+  }
+  return createStudioComposition({
+    presenterMode: 'full_canvas',
+    overlayEnabled: false
+  });
+}
+
+function withPresenterLayer(scene: Scene, updater: (layer: SceneCompositionPresenterLayer, canvas: SceneCompositionCanvas) => SceneCompositionPresenterLayer): Scene {
+  const composition = ensureStudioComposition(scene);
+  const canvas = composition.canvas ?? STUDIO_COMPOSITION_CANVAS;
+  const existing = composition.layers.find((layer): layer is SceneCompositionPresenterLayer => layer.type === 'presenter');
+  const current: SceneCompositionPresenterLayer = existing ?? {
+    id: STUDIO_LAYER_IDS.presenter,
+    type: 'presenter',
+    enabled: true,
+    zIndex: 20,
+    mode: 'full_canvas',
+    rect: { x: 0, y: 0, width: canvas.width, height: canvas.height },
+    fit: 'contain'
+  };
+  const next = updater(current, canvas);
+  const index = composition.layers.findIndex((layer) => layer.id === next.id || layer.type === 'presenter');
+  const layers = composition.layers.slice();
+  if (index >= 0) {
+    layers[index] = next;
+  } else {
+    layers.push(next);
+  }
+  return { ...scene, composition: { ...composition, layers } };
+}
+
+function logoModeOf(scene: Scene): LogoMode {
+  if (scene.logo === null) {
+    return 'off';
+  }
+  if (scene.logo) {
+    return 'custom';
+  }
+  return 'inherit';
+}
+
+function defaultLogoSpec(assetId = ''): LogoOverlaySpec {
+  return { assetId, position: 'bottom_right', scale: 0.15 };
+}
+
+function animationDestinationOf(asset: { metadata?: { animationDestination?: string | number | boolean | null } }): AnimationDestination | undefined {
+  return asset.metadata?.animationDestination === 'overlay' || asset.metadata?.animationDestination === 'bigscreen'
+    ? asset.metadata.animationDestination
+    : undefined;
+}
+
+function attachedAnimationLayer(scene: Scene): { destination: AnimationDestination; assetId?: string } | null {
+  const overlay = scene.composition?.layers.find((layer) => layer.id === STUDIO_LAYER_IDS.overlay && layer.type === 'overlay' && layer.enabled !== false);
+  if (overlay && 'assetId' in overlay && overlay.assetId) {
+    return { destination: 'overlay', assetId: overlay.assetId };
+  }
+  const image = scene.composition?.layers.find((layer) => layer.id === STUDIO_LAYER_IDS.image && layer.type === 'image' && layer.enabled !== false);
+  if (image && 'assetId' in image && image.assetId) {
+    return { destination: 'bigscreen', assetId: image.assetId };
+  }
+  return null;
+}
+
 export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   const [draft, setDraft] = useState<Project>(() => cloneProject(project));
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('story');
@@ -490,8 +601,16 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   const [stockSelectingId, setStockSelectingId] = useState<string | null>(null);
   const [stockMessage, setStockMessage] = useState('');
   const [stockSearch, setStockSearch] = useState<StockSearchState | null>(null);
+  const [animationTemplates, setAnimationTemplates] = useState<AnimationTemplateSummary[]>([]);
+  const [animationTemplateId, setAnimationTemplateId] = useState<(typeof ANIMATION_TEMPLATE_IDS)[number]>('northwind_arr_chart');
+  const [animationAssetId, setAnimationAssetId] = useState('');
+  const [animationDestination, setAnimationDestination] = useState<AnimationDestination>('bigscreen');
+  const [animationBusy, setAnimationBusy] = useState(false);
+  const [animationMessage, setAnimationMessage] = useState('');
   const isVideoPollingRef = useRef(false);
   const batchCopyResetTimerRef = useRef<number | null>(null);
+  const produceFollowActiveRef = useRef(false);
+  const produceTrackerRef = useRef<ProductionRunTracker | null>(null);
 
   const [newReferenceName, setNewReferenceName] = useState('Main Character');
   const [newReferenceDescription, setNewReferenceDescription] = useState('');
@@ -584,6 +703,16 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   }, []);
 
   useEffect(() => {
+    void (async () => {
+      const response = await fetch('/api/animation-templates');
+      const body = (await response.json().catch(() => null)) as { templates?: AnimationTemplateSummary[] } | null;
+      if (response.ok && body?.templates) {
+        setAnimationTemplates(body.templates);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     const latest = (draft.compositions ?? [])[0];
     if (latest) {
       setLastComposition({ compositionId: latest.compositionId, outputPath: latest.outputPath });
@@ -599,6 +728,8 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
 
   useEffect(() => {
     return () => {
+      produceFollowActiveRef.current = false;
+      produceTrackerRef.current?.invalidate();
       if (batchCopyResetTimerRef.current) {
         window.clearTimeout(batchCopyResetTimerRef.current);
       }
@@ -646,6 +777,30 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   const audioAssets = useMemo(() => {
     return draft.assets.filter((asset) => asset.type === 'audio' || asset.type === 'music' || asset.type === 'voice');
   }, [draft.assets]);
+
+  const logoAssets = useMemo(() => {
+    return draft.assets.filter((asset) => asset.type === 'image' || asset.type === 'graphic');
+  }, [draft.assets]);
+
+  const animationAssets = useMemo(() => {
+    return draft.assets.filter((asset) => Boolean(animationDestinationOf(asset)));
+  }, [draft.assets]);
+
+  const animationTemplateOptions = useMemo(
+    () => (animationTemplates.length > 0 ? animationTemplates.map((template) => template.id) : [...ANIMATION_TEMPLATE_IDS]),
+    [animationTemplates]
+  );
+
+  const animationTemplateLabels = useMemo(() => {
+    const labels: Record<string, string> = {
+      northwind_arr_chart: 'Northwind ARR chart',
+      nix_overlay: 'Nix overlay'
+    };
+    for (const template of animationTemplates) {
+      labels[template.id] = template.title;
+    }
+    return labels;
+  }, [animationTemplates]);
 
   const hasNarrationAudioInProject = useMemo(() => {
     return draft.scenes.some((scene) => Boolean(scene.narration?.audioAssetId));
@@ -753,6 +908,144 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     updateScene(sceneId, (scene) => ({ ...scene, overlay: updater(scene.overlay ?? { type: 'none' }) }));
   }
 
+  function updatePresenterMode(sceneId: string, mode: SceneCompositionPresenterMode): void {
+    updateScene(sceneId, (scene) => withPresenterLayer(scene, (layer, canvas) => {
+      if (mode === 'full_canvas') {
+        return {
+          id: layer.id,
+          type: 'presenter',
+          enabled: true,
+          zIndex: layer.zIndex,
+          mode: 'full_canvas',
+          rect: { x: 0, y: 0, width: canvas.width, height: canvas.height },
+          fit: layer.fit ?? 'contain'
+        };
+      }
+      const pipPreset = layer.pipPreset ?? 'intro';
+      return {
+        id: layer.id,
+        type: 'presenter',
+        enabled: true,
+        zIndex: layer.zIndex,
+        mode: 'pip',
+        pipPreset,
+        rect: resolveStudioPipRect(canvas, pipPreset),
+        fit: layer.fit ?? 'contain'
+      };
+    }));
+  }
+
+  function updatePresenterPipPreset(sceneId: string, preset: SceneCompositionPipPresetName | 'custom'): void {
+    updateScene(sceneId, (scene) => withPresenterLayer(scene, (layer, canvas) => {
+      if (preset === 'custom') {
+        const scale = layer.scale ?? STUDIO_PRESENTER_PIP_SCALE;
+        const offsetX = layer.offsetX ?? STUDIO_PRESENTER_PIP_OFFSET_X;
+        const offsetY = layer.offsetY ?? STUDIO_PRESENTER_PIP_OFFSET_Y;
+        return {
+          id: layer.id,
+          type: 'presenter',
+          enabled: true,
+          zIndex: layer.zIndex,
+          mode: 'pip',
+          scale,
+          offsetX,
+          offsetY,
+          rect: resolveStudioPresenterRect(canvas, { scale, offsetX, offsetY }),
+          fit: layer.fit ?? 'contain'
+        };
+      }
+      return {
+        id: layer.id,
+        type: 'presenter',
+        enabled: true,
+        zIndex: layer.zIndex,
+        mode: 'pip',
+        pipPreset: preset,
+        rect: resolveStudioPipRect(canvas, preset),
+        fit: layer.fit ?? 'contain'
+      };
+    }));
+  }
+
+  function updateLogo(sceneId: string, updater: (logo: LogoOverlaySpec | null | undefined) => LogoOverlaySpec | null | undefined): void {
+    updateScene(sceneId, (scene) => ({ ...scene, logo: updater(scene.logo) }));
+  }
+
+  async function renderMotionCanvasTemplate(): Promise<void> {
+    if (animationBusy) {
+      return;
+    }
+    setAnimationBusy(true);
+    setAnimationMessage('Rendering Motion Canvas template...');
+    const saved = await saveProject();
+    if (!saved) {
+      setAnimationBusy(false);
+      setAnimationMessage('Could not save project before animation render.');
+      return;
+    }
+    const response = await fetch(`/api/projects/${draft.id}/animations/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templateId: animationTemplateId })
+    });
+    const body = (await response.json().catch(() => ({}))) as {
+      message?: string;
+      assetId?: string;
+      destination?: AnimationDestination;
+      templateId?: string;
+    };
+    if (!response.ok) {
+      setAnimationBusy(false);
+      setAnimationMessage(body.message || 'Could not render animation template.');
+      return;
+    }
+    if (body.assetId) {
+      setAnimationAssetId(body.assetId);
+    }
+    if (body.destination) {
+      setAnimationDestination(body.destination);
+    }
+    await refreshProject();
+    setAnimationBusy(false);
+    setAnimationMessage(`Rendered ${body.templateId ?? animationTemplateId}. Attach it to this scene next.`);
+  }
+
+  async function attachMotionCanvasAnimation(sceneId: string): Promise<void> {
+    if (animationBusy) {
+      return;
+    }
+    if (!animationAssetId) {
+      setAnimationMessage('Select a rendered animation asset before attaching.');
+      return;
+    }
+    setAnimationBusy(true);
+    setAnimationMessage('Attaching animation to scene...');
+    const saved = await saveProject();
+    if (!saved) {
+      setAnimationBusy(false);
+      setAnimationMessage('Could not save project before animation attach.');
+      return;
+    }
+    const response = await fetch(`/api/projects/${draft.id}/scenes/${sceneId}/animations/attach`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assetId: animationAssetId,
+        destination: animationDestination
+      })
+    });
+    const body = (await response.json().catch(() => ({}))) as { message?: string; destination?: AnimationDestination };
+    if (!response.ok) {
+      setAnimationBusy(false);
+      setAnimationMessage(body.message || 'Could not attach animation to scene.');
+      await refreshProject();
+      return;
+    }
+    await refreshProject();
+    setAnimationBusy(false);
+    setAnimationMessage(`Attached as ${body.destination ?? animationDestination}.`);
+  }
+
   function addScene(): void {
     updateProject({
       ...draft,
@@ -831,99 +1124,100 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     return body.project;
   }
 
-  async function executeProductionAction(action: ProductionPlannedAction): Promise<ProductionActionExecutionOutcome | void> {
-    return executeProductionActionRequest(action, {
-      projectId: draft.id,
-      scenes: draft.scenes,
-      lifecycle: {
-        setSceneGenerating: setGeneratingSceneId,
-        setSceneNarrating: setNarratingSceneId,
-        setSceneRendering: setRenderingSceneId,
-        setComposing: setComposingProject,
-        setCompositionFailed
-      }
-    });
-  }
-
   async function runProduceReady(): Promise<void> {
     if (batchRunning) {
       return;
     }
 
-    const saved = await saveProject();
-    if (!saved) {
-      setBatchMessage('Could not save project before production run.');
-      return;
-    }
-
+    produceFollowActiveRef.current = true;
     setBatchRunning(true);
     setBatchOutcome('running');
     setBatchFailedActionIds([]);
-    setBatchMessage('Starting production run...');
+    setBatchMessage('Saving project before production run...');
     setBatchSummary({ running: 0, completed: 0, failed: 0, waiting: 0 });
     setBatchEvents([]);
 
     try {
-      const result = await runProductionBatch({
-        initialProject: draft,
-        derivePlan: (project, options) => deriveProductionPlan(project, {
-          ...options,
-          runtime: {
-            runningGenerationSceneIds: generatingSceneId ? [generatingSceneId] : [],
-            runningNarrationSceneIds: narratingSceneId ? [narratingSceneId] : [],
-            runningRenderSceneIds: renderingSceneId ? [renderingSceneId] : [],
-            composing: composingProject
+      const started = await startServerRunFlow({
+        projectId: draft.id,
+        ensureSaved: saveProject
+      });
+
+      if (!started.ok) {
+        if (started.blockedBySave) {
+          setBatchOutcome('failed');
+          setBatchMessage('Could not save project before production run.');
+          return;
+        }
+
+        setBatchOutcome('failed');
+        setBatchMessage(started.error?.message || 'Could not start production run.');
+        return;
+      }
+
+      const tracker = new ProductionRunTracker();
+      produceTrackerRef.current = tracker;
+      setBatchMessage(started.result.data.reused ? 'Reused active server run.' : 'Started production run...');
+
+      const followed = await followServerRunFlow({
+        run: started.result.data.run,
+        tracker,
+        shouldContinue: () => produceFollowActiveRef.current,
+        onProgress: async (state) => {
+          const run = state.run;
+          if (run) {
+            setBatchSummary({
+              running: run.summary.running,
+              completed: run.summary.completed,
+              failed: run.summary.failed,
+              waiting: run.summary.waiting
+            });
+            setBatchFailedActionIds(run.failedActionIds);
+            setBatchOutcome(run.status === 'queued' || run.status === 'running' ? 'running' : run.status);
           }
-        }),
-        executeAction: async (action) => {
-          try {
-            await executeProductionAction(action);
-          } catch (error) {
-            setBatchFailedActionIds((existing) => existing.includes(action.id) ? existing : [...existing, action.id]);
-            throw error;
-          }
-        },
-        refreshProject: async () => {
-          const refreshed = await refreshProject();
-          return refreshed ?? draft;
-        },
-        onProgress: (progress) => {
-          setBatchSummary({
-            running: progress.plan.summary.running,
-            completed: progress.completedActionIds.length,
-            failed: progress.failedActionIds.length,
-            waiting: progress.plan.summary.waiting
-          });
-        },
-        onEvent: (event) => {
-          setBatchEvents((existing) => [...existing, event]);
+          setBatchEvents(state.logItems.map((item) => item.event));
         }
       });
 
-      const waitingCount = result.unresolvedActions.filter((action) => action.status === 'waiting_dependency').length;
-      const runningCount = result.unresolvedActions.filter((action) => action.status === 'running').length;
-      setBatchSummary({
-        running: runningCount,
-        completed: result.completedActionIds.length,
-        failed: result.failedActionIds.length,
-        waiting: waitingCount
-      });
-
-      setBatchOutcome(result.status);
-      if (result.status === 'completed') {
-        setBatchMessage('Production finished successfully.');
-      } else if (result.status === 'partial') {
-        setBatchMessage('Production finished with partial completion.');
-      } else if (result.status === 'failed') {
-        setBatchMessage(`Production finished with failures (${result.failedActionIds.length}).`);
-      } else {
-        setBatchMessage(`Production stopped with unresolved actions (${result.unresolvedActions.length}).`);
+      const run = followed.state.run;
+      if (run) {
+        setBatchSummary({
+          running: run.summary.running,
+          completed: run.summary.completed,
+          failed: run.summary.failed,
+          waiting: run.summary.waiting
+        });
+        setBatchFailedActionIds(run.failedActionIds);
+        setBatchOutcome(run.status === 'queued' || run.status === 'running' ? 'running' : run.status);
       }
+      setBatchEvents(followed.state.logItems.map((item) => item.event));
+
+      if (!followed.ok) {
+        if (followed.kind === 'restart_lost') {
+          setBatchOutcome('failed');
+          setBatchMessage(followed.error?.message || 'Tracked server run was lost after a restart or memory expiry.');
+        } else if (produceFollowActiveRef.current) {
+          setBatchOutcome('failed');
+          setBatchMessage(followed.error?.message || 'Production run stopped before completion.');
+        }
+      } else if (run?.status === 'completed') {
+        setBatchMessage('Production finished successfully.');
+      } else if (run?.status === 'partial') {
+        setBatchMessage('Production finished with partial completion.');
+      } else if (run?.status === 'failed') {
+        setBatchMessage(`Production finished with failures (${run.failedActionIds.length}).`);
+      } else if (run) {
+        setBatchMessage(`Production stopped with unresolved actions (${run.unresolvedActions.length}).`);
+      }
+
       await refreshProject();
     } catch (error) {
       setBatchOutcome('failed');
       setBatchMessage(error instanceof Error ? error.message : 'Production run failed unexpectedly.');
     } finally {
+      produceFollowActiveRef.current = false;
+      produceTrackerRef.current?.invalidate();
+      produceTrackerRef.current = null;
       setBatchRunning(false);
     }
   }
@@ -1984,6 +2278,208 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                       />
                     </>
                   ) : null}
+                </div>
+                <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Presenter layout</p>
+                  <SelectField
+                    label="Presenter mode"
+                    value={presenterModeOf(selectedScene)}
+                    onChange={(value) => updatePresenterMode(selectedScene.id, value as SceneCompositionPresenterMode)}
+                    options={COMPOSITION_PRESENTER_MODES}
+                  />
+                  {presenterModeOf(selectedScene) === 'pip' ? (
+                    <SelectField
+                      label="PiP preset"
+                      value={presenterPipPresetOf(selectedScene)}
+                      onChange={(value) => updatePresenterPipPreset(selectedScene.id, value as SceneCompositionPipPresetName | 'custom')}
+                      options={COMPOSITION_PIP_PRESETS}
+                    />
+                  ) : null}
+                  <p className="text-xs text-slate-400">
+                    Scene composition presenter mode (`full_canvas` / `pip`), not the project presenter layout field.
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Logo</p>
+                  <SelectField
+                    label="Logo mode"
+                    value={logoModeOf(selectedScene)}
+                    onChange={(value) => {
+                      const mode = value as LogoMode;
+                      if (mode === 'off') {
+                        updateLogo(selectedScene.id, () => null);
+                        return;
+                      }
+                      if (mode === 'inherit') {
+                        updateScene(selectedScene.id, (scene) => {
+                          const next = { ...scene };
+                          delete next.logo;
+                          return next;
+                        });
+                        return;
+                      }
+                      updateLogo(selectedScene.id, (logo) => logo && typeof logo === 'object' ? logo : defaultLogoSpec());
+                    }}
+                    options={LOGO_MODE_OPTIONS}
+                  />
+                  {logoModeOf(selectedScene) === 'custom' ? (
+                    <>
+                      <div>
+                        <label className="mb-1 block text-xs uppercase tracking-[0.2em] text-slate-500">Logo asset</label>
+                        <select
+                          value={selectedScene.logo?.assetId ?? ''}
+                          onChange={(event) => updateLogo(selectedScene.id, (logo) => ({
+                            ...(logo && typeof logo === 'object' ? logo : defaultLogoSpec()),
+                            assetId: event.target.value
+                          }))}
+                          className="w-full rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100"
+                        >
+                          <option value="">No logo asset selected</option>
+                          {logoAssets.map((asset) => (
+                            <option key={asset.id} value={asset.id}>
+                              {asset.filename} ({asset.type}{asset.localPath ? '' : ', no path'})
+                            </option>
+                          ))}
+                          {selectedScene.logo?.assetId && !logoAssets.some((asset) => asset.id === selectedScene.logo?.assetId) ? (
+                            <option value={selectedScene.logo.assetId}>{selectedScene.logo.assetId} (invalid or missing)</option>
+                          ) : null}
+                        </select>
+                      </div>
+                      <SelectField
+                        label="Logo position"
+                        value={selectedScene.logo?.position ?? 'bottom_right'}
+                        onChange={(value) => updateLogo(selectedScene.id, (logo) => ({
+                          ...(logo && typeof logo === 'object' ? logo : defaultLogoSpec()),
+                          position: value as LogoOverlaySpec['position']
+                        }))}
+                        options={LOGO_OVERLAY_POSITIONS}
+                      />
+                      <Field
+                        label={`Logo scale (${LOGO_OVERLAY_LIMITS.MIN_SCALE}-${LOGO_OVERLAY_LIMITS.MAX_SCALE})`}
+                        value={selectedScene.logo?.scale ?? ''}
+                        type="number"
+                        step="0.01"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateLogo(selectedScene.id, (logo) => ({
+                            ...(logo && typeof logo === 'object' ? logo : defaultLogoSpec()),
+                            scale: Number.isFinite(next) && next > 0 ? next : undefined
+                          }));
+                        }}
+                      />
+                      <Field
+                        label={`Logo max width (${LOGO_OVERLAY_LIMITS.MIN_MAX_WIDTH}-${LOGO_OVERLAY_LIMITS.MAX_MAX_WIDTH})`}
+                        value={selectedScene.logo?.maxWidth ?? ''}
+                        type="number"
+                        step="1"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateLogo(selectedScene.id, (logo) => ({
+                            ...(logo && typeof logo === 'object' ? logo : defaultLogoSpec()),
+                            maxWidth: Number.isFinite(next) && next > 0 ? next : undefined
+                          }));
+                        }}
+                      />
+                      <Field
+                        label={`Logo margin (${LOGO_OVERLAY_LIMITS.MIN_MARGIN}-${LOGO_OVERLAY_LIMITS.MAX_MARGIN})`}
+                        value={selectedScene.logo?.margin ?? ''}
+                        type="number"
+                        step="1"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateLogo(selectedScene.id, (logo) => ({
+                            ...(logo && typeof logo === 'object' ? logo : defaultLogoSpec()),
+                            margin: Number.isFinite(next) && next >= 0 ? next : undefined
+                          }));
+                        }}
+                      />
+                      <Field
+                        label={`Logo opacity (${LOGO_OVERLAY_LIMITS.MIN_OPACITY}-${LOGO_OVERLAY_LIMITS.MAX_OPACITY})`}
+                        value={selectedScene.logo?.opacity ?? ''}
+                        type="number"
+                        step="0.05"
+                        onChange={(value) => {
+                          const next = Number(value);
+                          updateLogo(selectedScene.id, (logo) => ({
+                            ...(logo && typeof logo === 'object' ? logo : defaultLogoSpec()),
+                            opacity: Number.isFinite(next) ? next : undefined
+                          }));
+                        }}
+                      />
+                    </>
+                  ) : null}
+                  {logoModeOf(selectedScene) === 'inherit' ? (
+                    <p className="text-xs text-slate-400">
+                      {draft.renderSettings.logo?.assetId ? `Inherits project logo ${draft.renderSettings.logo.assetId}.` : 'No project default logo. Scene renders without a logo.'}
+                    </p>
+                  ) : null}
+                  {logoModeOf(selectedScene) === 'off' ? (
+                    <p className="text-xs text-slate-400">Explicit opt-out. Project default logo is not applied.</p>
+                  ) : null}
+                </div>
+                <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Motion Canvas</p>
+                  <SelectField
+                    label="Template"
+                    value={animationTemplateId}
+                    onChange={(value) => setAnimationTemplateId(value as (typeof ANIMATION_TEMPLATE_IDS)[number])}
+                    options={animationTemplateOptions}
+                    labels={animationTemplateLabels}
+                  />
+                  <button
+                    type="button"
+                    disabled={animationBusy}
+                    onClick={() => void renderMotionCanvasTemplate()}
+                    className="rounded-2xl border border-slate-700 px-3 py-2 text-xs text-slate-200 disabled:opacity-60"
+                  >
+                    {animationBusy ? 'Working...' : 'Render template'}
+                  </button>
+                  <div>
+                    <label className="mb-1 block text-xs uppercase tracking-[0.2em] text-slate-500">Animation asset</label>
+                    <select
+                      value={animationAssetId}
+                      onChange={(event) => {
+                        const nextId = event.target.value;
+                        setAnimationAssetId(nextId);
+                        const asset = draft.assets.find((entry) => entry.id === nextId);
+                        const destination = asset ? animationDestinationOf(asset) : undefined;
+                        if (destination) {
+                          setAnimationDestination(destination);
+                        }
+                      }}
+                      className="w-full rounded-2xl border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-sm text-slate-100"
+                    >
+                      <option value="">No animation asset selected</option>
+                      {animationAssets.map((asset) => (
+                        <option key={asset.id} value={asset.id}>
+                          {asset.filename} ({animationDestinationOf(asset) ?? asset.type})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <SelectField
+                    label="Destination"
+                    value={animationDestination}
+                    onChange={(value) => setAnimationDestination(value as AnimationDestination)}
+                    options={['bigscreen', 'overlay']}
+                  />
+                  <button
+                    type="button"
+                    disabled={animationBusy || !animationAssetId}
+                    onClick={() => void attachMotionCanvasAnimation(selectedScene.id)}
+                    className="rounded-2xl border border-slate-700 px-3 py-2 text-xs text-slate-200 disabled:opacity-60"
+                  >
+                    Attach to scene
+                  </button>
+                  {(() => {
+                    const attached = attachedAnimationLayer(selectedScene);
+                    return attached ? (
+                      <p className="text-xs text-slate-300">Attached: {attached.assetId} as {attached.destination}</p>
+                    ) : (
+                      <p className="text-xs text-slate-400">No Motion Canvas layer attached to this scene.</p>
+                    );
+                  })()}
+                  {animationMessage ? <p className="text-xs text-slate-300">{animationMessage}</p> : null}
                 </div>
                 <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Narration</p>

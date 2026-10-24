@@ -8,12 +8,24 @@ describe('production run client', () => {
   });
 
   it('returns a new started run response', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       run: { runId: 'run-1' },
       reused: false
-    }), { status: 202 })));
+    }), { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
 
-    const result = await startProductionRun('project-1', { mode: 'mock' });
+    const result = await startProductionRun('project-1', {
+      mode: 'mock',
+      force: true,
+      providers: { presenter: 'mock', music: 'fake' },
+      limits: {
+        stock_select: 2,
+        html_render: 1,
+        presenter_submit: 1,
+        presenter_poll: 1,
+        final_compose: 1
+      }
+    });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -21,6 +33,24 @@ describe('production run client', () => {
       expect(result.data.reused).toBe(false);
       expect(result.data.run.runId).toBe('run-1');
     }
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/projects/project-1/production-runs',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          mode: 'mock',
+          force: true,
+          providers: { presenter: 'mock', music: 'fake' },
+          limits: {
+            stock_select: 2,
+            html_render: 1,
+            presenter_submit: 1,
+            presenter_poll: 1,
+            final_compose: 1
+          }
+        })
+      })
+    );
   });
 
   it('preserves duplicate-run reuse responses', async () => {

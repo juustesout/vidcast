@@ -153,6 +153,207 @@ describe('headless production run service', () => {
     expect(calledProvider).toBe('fake');
   });
 
+  it('executes stock, html, presenter, and compose actions through the server runner', async () => {
+    const project = createProject('project-actions');
+    const executed: string[] = [];
+    const stockModes: Array<string | undefined> = [];
+    const presenterProviders: Array<string | undefined> = [];
+
+    const service = new HeadlessProductionRunService(
+      {
+        maxConcurrentRuns: 1,
+        runner: {
+          maxIterations: 5,
+          maxActionExecutions: 10,
+          maxVideoPolls: 5,
+          limits: {
+            image_generate: 1,
+            stock_select: 1,
+            html_render: 1,
+            video_submit: 1,
+            video_poll: 1,
+            narration_generate: 1,
+            presenter_submit: 1,
+            presenter_poll: 1,
+            scene_render: 1,
+            final_compose: 1
+          }
+        },
+        registry: {
+          maxEventsPerRun: 100,
+          retentionMs: 60_000,
+          maxLogPageLimit: 100
+        },
+        policy: {
+          allowRealProviders: true,
+          defaultMode: 'mock'
+        }
+      },
+      {
+        store: {
+          async getProject(projectId: string) {
+            return projectId === project.id ? project : null;
+          }
+        },
+        selectStockImage: async (_projectId, sceneId, options) => {
+          executed.push('stock_select');
+          stockModes.push(options?.mode);
+          return {
+            sceneId,
+            status: 'selected',
+            provider: 'fake',
+            photoId: 'photo-1',
+            usagePolicy: 'download',
+            cached: false,
+            attribution: {
+              provider: 'fake',
+              providerName: 'Fake',
+              photoId: 'photo-1',
+              photographerName: 'Test',
+              sourceUrl: 'https://example.test/photo-1',
+              license: 'test'
+            }
+          };
+        },
+        renderHtmlStill: async (_projectId, sceneId) => {
+          executed.push('html_render');
+          return {
+            sceneId,
+            assetId: 'html-1',
+            localPath: '/tmp/html-1.png',
+            fingerprint: 'fp',
+            width: 1920,
+            height: 1080,
+            reused: false
+          };
+        },
+        submitPresenter: async (_projectId, sceneId, options) => {
+          executed.push('presenter_submit');
+          presenterProviders.push(options?.provider);
+          return {
+            sceneId,
+            status: 'accepted',
+            provider: 'mock',
+            generationAttemptId: 'presenter-1',
+            providerStatus: 'queued'
+          };
+        },
+        pollPresenter: async (_projectId, sceneId) => {
+          executed.push('presenter_poll');
+          return {
+            sceneId,
+            status: 'generated',
+            provider: 'mock',
+            generationAttemptId: 'presenter-1',
+            providerStatus: 'completed',
+            assetId: 'presenter-asset'
+          };
+        },
+        composeProject: async () => {
+          executed.push('final_compose');
+          return {
+            plan: {
+              projectId: project.id,
+              items: [],
+              width: 1920,
+              height: 1080,
+              fps: 30,
+              totalDuration: 3,
+              transition: { type: 'none' }
+            },
+            artifact: {
+              compositionId: 'comp-1',
+              projectId: project.id,
+              outputPath: '/tmp/out.mp4',
+              createdAt: project.createdAt,
+              sceneIds: ['scene-1'],
+              duration: 3,
+              width: 1920,
+              height: 1080,
+              fps: 30,
+              renderer: 'ffmpeg',
+              version: '1',
+              filesize: 1,
+              mimeType: 'video/mp4',
+              transition: { type: 'none' }
+            }
+          };
+        },
+        runBatch: async (input) => {
+          await input.executeAction({
+            id: 'scene:scene-1:stock_select',
+            type: 'stock_select',
+            sceneId: 'scene-1',
+            sceneOrder: 1,
+            status: 'ready',
+            execute: true,
+            dependencyActionIds: [],
+            payload: { regenerate: false }
+          });
+          await input.executeAction({
+            id: 'scene:scene-1:html_render',
+            type: 'html_render',
+            sceneId: 'scene-1',
+            sceneOrder: 1,
+            status: 'ready',
+            execute: true,
+            dependencyActionIds: [],
+            payload: { regenerate: false }
+          });
+          await input.executeAction({
+            id: 'scene:scene-1:presenter_submit',
+            type: 'presenter_submit',
+            sceneId: 'scene-1',
+            sceneOrder: 1,
+            status: 'ready',
+            execute: true,
+            dependencyActionIds: [],
+            payload: { regenerate: false }
+          });
+          await input.executeAction({
+            id: 'scene:scene-1:presenter_poll',
+            type: 'presenter_poll',
+            sceneId: 'scene-1',
+            sceneOrder: 1,
+            status: 'ready',
+            execute: true,
+            dependencyActionIds: []
+          });
+          await input.executeAction({
+            id: 'project:final_compose',
+            type: 'final_compose',
+            status: 'ready',
+            execute: true,
+            dependencyActionIds: []
+          });
+
+          return {
+            status: 'completed',
+            project: input.initialProject,
+            iterations: 1,
+            completedActionIds: [
+              'scene:scene-1:stock_select',
+              'scene:scene-1:html_render',
+              'scene:scene-1:presenter_submit',
+              'scene:scene-1:presenter_poll',
+              'project:final_compose'
+            ],
+            failedActionIds: [],
+            unresolvedActions: [],
+            events: []
+          };
+        }
+      }
+    );
+
+    const started = await service.startOrReuseRun({ projectId: project.id });
+    await waitForStatus(service, started.run.runId, ['completed', 'failed']);
+
+    expect(executed).toEqual(['stock_select', 'html_render', 'presenter_submit', 'presenter_poll', 'final_compose']);
+    expect(stockModes).toEqual(['mock']);
+    expect(presenterProviders).toEqual(['mock']);
+  });
+
   it('returns existing active run on duplicate start for the same project', async () => {
     const project = createProject('project-dup');
     let resolveRun: (() => void) | undefined;

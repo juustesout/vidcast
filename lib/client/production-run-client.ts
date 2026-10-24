@@ -1,10 +1,14 @@
+import type { ProductionActionType } from '@/lib/production/production-planner';
 import type {
   HeadlessRunLogPage,
   HeadlessRunSnapshot,
   ImageRunProvider,
+  MusicRunProvider,
   NarrationRunProvider,
-  VideoRunProvider,
-  RunMode
+  PresenterRunProvider,
+  RunMode,
+  RunMusicRequest,
+  VideoRunProvider
 } from '@/lib/production/run-types';
 
 export interface StartProductionRunRequest {
@@ -13,9 +17,13 @@ export interface StartProductionRunRequest {
     image?: ImageRunProvider;
     video?: VideoRunProvider;
     narration?: NarrationRunProvider;
+    music?: MusicRunProvider;
+    presenter?: PresenterRunProvider;
   };
+  music?: RunMusicRequest;
   maxIterations?: number;
-  limits?: Partial<Record<'image_generate' | 'video_submit' | 'video_poll' | 'narration_generate' | 'scene_render' | 'final_compose', number>>;
+  force?: boolean;
+  limits?: Partial<Record<ProductionActionType, number>>;
 }
 
 export interface ProductionRunApiError {

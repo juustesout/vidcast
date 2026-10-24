@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { ProductionRunTracker, getProductionRunPollDelayMs, isTerminalHeadlessRunStatus, mergeHeadlessRunLogItems, startServerRunFlow } from '@/lib/client/production-run-tracker';
+import { ProductionRunTracker, followServerRunFlow, getProductionRunPollDelayMs, isTerminalHeadlessRunStatus, mergeHeadlessRunLogItems, startServerRunFlow } from '@/lib/client/production-run-tracker';
 import type { HeadlessRunSnapshot } from '@/lib/production/run-types';
 
 function makeRun(status: HeadlessRunSnapshot['status'] = 'running', runId = 'run-1'): HeadlessRunSnapshot {
@@ -138,6 +138,95 @@ describe('startServerRunFlow', () => {
     if (result.ok) {
       expect(result.result.data.reused).toBe(true);
       expect(result.result.data.run.runId).toBe('run-reused');
+    }
+  });
+});
+
+describe('followServerRunFlow', () => {
+  it('polls until the run is terminal and surfaces progress', async () => {
+    let polls = 0;
+    const tracker = new ProductionRunTracker({
+      getProductionRun: async () => {
+        polls += 1;
+        return {
+          ok: true,
+          status: 200,
+          data: { run: makeRun(polls >= 2 ? 'completed' : 'running') }
+        };
+      },
+      getProductionRunLog: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          log: {
+            runId: 'run-1',
+            cursor: 0,
+            nextCursor: 1,
+            hasMore: false,
+            items: [makeLogItem(0, 'progress')]
+          }
+        }
+      })
+    });
+    const onProgress = vi.fn();
+    const sleeps: number[] = [];
+
+    const result = await followServerRunFlow({
+      run: makeRun('running'),
+      tracker,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      onProgress
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.kind).toBe('terminal');
+      expect(result.state.run?.status).toBe('completed');
+      expect(result.state.logItems).toHaveLength(1);
+    }
+    expect(polls).toBe(2);
+    expect(sleeps.length).toBeGreaterThan(0);
+    expect(onProgress).toHaveBeenCalled();
+  });
+
+  it('stops following when the run is lost after restart', async () => {
+    const tracker = new ProductionRunTracker({
+      getProductionRun: async () => ({
+        ok: false,
+        status: 404,
+        error: {
+          message: 'Run not found. It may have expired from memory or been lost after a process restart.',
+          code: 'NOT_FOUND',
+          httpStatus: 404
+        }
+      }),
+      getProductionRunLog: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          log: {
+            runId: 'run-1',
+            cursor: 0,
+            nextCursor: 0,
+            hasMore: false,
+            items: []
+          }
+        }
+      })
+    });
+
+    const result = await followServerRunFlow({
+      run: makeRun('running'),
+      tracker,
+      sleep: async () => undefined
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe('restart_lost');
+      expect(result.error?.code).toBe('NOT_FOUND');
     }
   });
 });

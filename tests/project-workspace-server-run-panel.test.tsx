@@ -10,6 +10,11 @@ describe('ProjectWorkspace production controls', () => {
     expect(source).toContain('Produce ${productionPlan.summary.ready}');
     expect(source).toContain('<ServerRunPanel projectId={draft.id} onEnsureSaved={saveProject} />');
     expect(source).toContain('Live activity');
+    expect(source).toContain('startServerRunFlow({');
+    expect(source).toContain('followServerRunFlow({');
+    expect(source).toContain('ensureSaved: saveProject');
+    expect(source).not.toContain('runProductionBatch');
+    expect(source).not.toContain('executeProductionActionRequest');
   });
 });
 

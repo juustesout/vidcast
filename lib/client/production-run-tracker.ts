@@ -111,6 +111,103 @@ export async function startServerRunFlow({ projectId, payload = {}, ensureSaved,
   };
 }
 
+export interface FollowServerRunFlowInput {
+  run: HeadlessRunSnapshot;
+  tracker?: ProductionRunTracker;
+  sleep?: (ms: number) => Promise<void>;
+  shouldContinue?: () => boolean;
+  onProgress?: (state: ProductionRunTrackerState, result: ProductionRunTrackerStepResult) => void | Promise<void>;
+}
+
+export type FollowServerRunFlowResult =
+  | {
+      ok: true;
+      kind: 'terminal';
+      state: ProductionRunTrackerState;
+    }
+  | {
+      ok: false;
+      kind: 'restart_lost' | 'stopped';
+      state: ProductionRunTrackerState;
+      error?: ProductionRunApiError;
+    };
+
+function defaultFollowSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+export async function followServerRunFlow({
+  run,
+  tracker = new ProductionRunTracker(),
+  sleep = defaultFollowSleep,
+  shouldContinue,
+  onProgress
+}: FollowServerRunFlowInput): Promise<FollowServerRunFlowResult> {
+  tracker.trackRun(run);
+
+  const catchUp = await tracker.loadAvailableLogPages();
+  await onProgress?.(catchUp.state, catchUp);
+  if (catchUp.kind === 'restart_lost') {
+    return {
+      ok: false,
+      kind: 'restart_lost',
+      state: catchUp.state,
+      error: catchUp.state.lastError ?? undefined
+    };
+  }
+
+  while (!shouldContinue || shouldContinue()) {
+    const result = await tracker.poll();
+    await onProgress?.(result.state, result);
+
+    if (result.kind === 'restart_lost') {
+      return {
+        ok: false,
+        kind: 'restart_lost',
+        state: result.state,
+        error: result.state.lastError ?? undefined
+      };
+    }
+
+    if (result.kind === 'stale' || result.kind === 'skipped') {
+      return {
+        ok: false,
+        kind: 'stopped',
+        state: result.state,
+        error: result.state.lastError ?? undefined
+      };
+    }
+
+    const runStatus = result.state.run?.status;
+    if (runStatus && isTerminalHeadlessRunStatus(runStatus)) {
+      return {
+        ok: true,
+        kind: 'terminal',
+        state: result.state
+      };
+    }
+
+    if (!result.shouldContinue) {
+      return {
+        ok: false,
+        kind: 'stopped',
+        state: result.state,
+        error: result.state.lastError ?? undefined
+      };
+    }
+
+    await sleep(result.nextDelayMs);
+  }
+
+  return {
+    ok: false,
+    kind: 'stopped',
+    state: tracker.getState()
+  };
+}
+
 export class ProductionRunTracker {
   private readonly api: ProductionRunTrackerApi;
   private state = createInitialProductionRunTrackerState();
