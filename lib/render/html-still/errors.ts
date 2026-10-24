@@ -11,7 +11,10 @@ export type HtmlStillErrorCode =
   | 'html.project.notFound'
   | 'html.scene.notFound'
   | 'html.scene.invalidVisualKind'
-  | 'html.scene.alreadyRunning';
+  | 'html.scene.alreadyRunning'
+  | 'html.image.missing'
+  | 'html.image.invalid'
+  | 'html.image.unsafe';
 
 export class HtmlStillError extends Error {
   readonly code: HtmlStillErrorCode;

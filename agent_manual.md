@@ -20,7 +20,7 @@ the finished MP4. Presenter generation is part of that production run.
 | --- | --- | --- |
 | List/read projects, scenes, validation, plan | Yes | Read-only tools |
 | Create/update project, scenes, narration, overlays | Yes | `create_project`, `update_project` |
-| Story beats to scenes | Yes | `plan_scene_intents`, `approve_scene_intents`, `materialize_scene_intents` |
+| Story beats to scenes | Plan/materialize yes; approve is human-session only | `plan_scene_intents`, `materialize_scene_intents`; `approve_scene_intents` is refused for the service token |
 | Reference images | Yes | `create_reference` (base64 JSON) |
 | Music select/generate/clear | Yes | `manage_project_music` |
 | Per-scene video submit/poll/cancel | Yes | `generate_video`, `get_generation_job`, `cancel_video` |
@@ -32,7 +32,10 @@ the finished MP4. Presenter generation is part of that production run.
 | Standalone narration generation | No | No MCP tool; use a production run |
 | Standalone image generation | No | No MCP tool; use a production run |
 | Standalone render/compose | No | No MCP tool; use a production run |
-| Asset upload/listing | REST listing; MCP import for studio stills | `GET /api/projects/{id}/assets`; `import_studio_assets` |
+| Asset upload/listing | REST listing; MCP import for PNG/JPEG/WebP stills and studio stills | `GET /api/projects/{id}/assets`; `import_asset`; `import_studio_assets` |
+| Stock photo search | Yes, discovery only | `search_stock_photos` |
+| Stock photo select | Yes, choose one search hit | `select_stock_photo` |
+| Stock photo auto-select | Production only | `stock_select` inside `run_production` |
 | Studio stills from tmp_images | Yes | `import_studio_assets` |
 | Download final MP4 | REST only | Authenticated `GET` of `downloadPath` |
 | Delete project | No | Not exposed |
@@ -130,20 +133,21 @@ text.
 
 ## 4. Tool catalog
 
-There are 23 tools: 8 read-only, 12 authoring, 3 production.
+There are 26 tools: 9 read-only, 14 authoring, 3 production.
 
 ### Read-only
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `list_projects` | `{}` | `{ projects: ProjectSummary[] }` |
-| `get_project` | `{ projectId }` | `{ project }` including assets, scenes, presenter and presenterClips |
+| `get_project` | `{ projectId }` | `{ project }` including assets, scenes, presenter and presenterClips. Compositions omit `outputPath` and use the same `downloadPath` projection as `get_project_compositions`. |
 | `get_scene` | `{ projectId, sceneId }` | `{ projectId, scene }` |
 | `get_validation_report` | `{ projectId }` | `{ projectId, report }` with blockers and warnings |
 | `get_production_plan` | `{ projectId }` | `{ projectId, report }` with action statuses and dependencies |
 | `get_project_compositions` | `{ projectId, compositionId? }` | `{ projectId, available, latest, compositions }` |
 | `get_generation_job` | `{ projectId, attemptId }` | Current video attempt state |
 | `list_animation_templates` | `{}` | `{ templates }` with id, destination, output, allowedParamKeys, paramsSchema, defaults |
+| `search_stock_photos` | `{ projectId, query, orientation?, providers?, limit?, mode? }` | `{ searchId, query, orientation?, cached, results, diagnostics, quota }` |
 
 `get_project_compositions` entries carry `compositionId`, `createdAt`,
 `duration`, `width`, `height`, `fps`, `sceneCount`, `filesize`, and
@@ -155,6 +159,17 @@ against the provider and persists the new state, exactly like a run's
 "status_unresolved"` and keeps the job resumable. Retry the same attempt; never
 resubmit a live provider job.
 
+`search_stock_photos` discovers stock candidates through
+`GET /api/projects/{id}/stock/search`. It returns `searchId`, sanitized results
+(provider, photoId, dimensions, preview/image/source URLs, photographer,
+`license`, `usagePolicy`), diagnostics, and quota. Searching is not selecting
+and not downloading: it never writes a scene, never persists a stock asset, and
+never assigns `templateData.imageAssetId`. HTML slots accept local project
+asset ids from `import_asset`, not stock CDN URLs. Mock mode is locked to the
+`fake` provider. Real mode requires a current human approval of the project
+snapshot (`explainer.humanApproval`). The call may consume provider quota and
+refresh the server-side candidate cache.
+
 ### Authoring
 
 | Tool | Arguments |
@@ -162,15 +177,17 @@ resubmit a live provider job.
 | `create_project` | `{ title?, description?, durationTarget? (<=600), aspectRatio? ("16:9"\|"1:1"\|"9:16"), fps? (<=120) }` |
 | `update_project` | `{ projectId, project }` where `project` is a partial project patch |
 | `plan_scene_intents` | `{ projectId, project? }` |
-| `approve_scene_intents` | `{ projectId, intentIds? }` |
+| `approve_scene_intents` | `{ projectId, intentIds? }` (browser user session only; service token returns FORBIDDEN) |
 | `materialize_scene_intents` | `{ projectId, project?, intentIds? }` |
 | `manage_project_music` | `{ projectId, action, ... }` |
 | `create_reference` | `{ projectId, name, contentBase64, mimeType?, fileName?, description?, tags? }` |
+| `import_asset` | `{ projectId, filename, mimeType, dataBase64 }` |
 | `import_studio_assets` | `{ projectId, fileNames }` |
 | `generate_video` | `{ projectId, sceneId, regenerate?, provider?, model?, mode? }` |
 | `cancel_video` | `{ projectId, sceneId }` |
 | `render_animation_template` | `{ projectId, templateId, params? }` |
 | `attach_animation` | `{ projectId, sceneId, assetId, destination, startSeconds?, durationSeconds?, scale?, position?, rect? }` |
+| `select_stock_photo` | `{ projectId, sceneId, searchId, photoId, query?, orientation?, regenerate?, mode? }` |
 
 `manage_project_music` accepts `action: "generate" | "regenerate" | "select" |
 "clear"`, plus `prompt`, `musicLengthMs` (3000-600000), `instrumental`, `model`,
@@ -181,6 +198,32 @@ resubmit a live provider job.
 `create_reference` takes raw base64 or a full `data:image/...;base64,...` URL.
 Accepted decoded formats are PNG, JPEG, and WebP, capped at 25 MB. Returns the
 `referenceId`, stored path, dimensions, and size.
+
+`import_asset` imports a PNG, JPEG, or WebP still into `project.assets[]` for
+later HTML-slot assignment. `filename` must be a bare name with a matching
+extension; `mimeType` must be `image/png`, `image/jpeg`, or `image/webp`;
+`dataBase64` is raw base64 image bytes (not a data URL, path, or remote URL).
+Declared MIME, extension, and actual bytes must agree. Decoded payload is
+capped at 25 MB. The server generates `assetId` and `localPath`; provenance is
+`imported`. Assign the returned `assetId` with `update_project` as
+`templateData.imageAssetId` or `products[i].imageAssetId`. This is not
+`create_reference` (video keyframes), not `import_studio_assets`, not
+`search_stock_photos`, and not `select_stock_photo`. HTML slots reject stock
+CDN URLs.
+
+`select_stock_photo` applies one candidate from a prior `search_stock_photos`
+call through `POST /api/projects/{id}/scenes/{sceneId}/select-stock-image`
+with `action: "choose"`. Required: `projectId`, `sceneId`, `searchId`, and
+`photoId` (the composite `results[].id`, e.g. `pexels:42`). The server-side
+search cache is the only candidate authority; image URLs, download URLs, file
+paths, and client-supplied asset ids are rejected. The scene must already be
+`visual.kind="stock_image"`. Download providers (Pexels, Pixabay, fake) may
+persist a local asset with provenance `stock` and set `scene.visual.assetId`;
+hotlink providers (Unsplash) keep the CDN URL and attribution without creating
+an asset. This never writes HTML-slot `imageAssetId`. Production auto-select
+for stock scenes remains the `stock_select` action inside `run_production`.
+Mock mode is locked to `fake`. Expired or unknown candidates return
+`CONFLICT` (`stock.search.expired`).
 
 `import_studio_assets` copies named files from `STUDIO_IMPORT_SOURCE_DIR`
 (the operator `tmp_images` folder) into `assets/studio/` on the project.
@@ -350,6 +393,165 @@ Set video scenes through `update_project`:
 Start and end frame ids must be part of the effective reference set
 (`scene.referenceIds`, or `generation.referenceIds` when set).
 
+### Visual source playbook
+
+`narrativeRole` and `visualIntent` are scene-intent metadata. They never
+select a visual source. `plan_scene_intents` leaves `visualIntent` empty;
+beat 1 is `hook` and the rest are `explanation`. `materialize_scene_intents`
+always creates `type: "blank"` / `visual.kind: "blank"` and copies
+`visualIntent` into `scene.notes`. The production planner then follows
+`scene.visual.kind` only: it does not infer HTML, stock, or generation from
+the story.
+
+#### Propose → Wait → Apply
+
+Do not set `visual.kind` until the user has approved a per-scene proposal.
+There is no suggest tool. During this step, only read existing project state
+with `get_project` or `get_scene` and show the proposal in chat. Do not call
+`search_stock_photos`, `select_stock_photo`, `update_project`,
+`generate_video`, or `run_production`.
+
+For each scene, output:
+
+```text
+sceneId:
+action: keep_existing | propose | ask
+proposed.kind:
+proposed.template:          // when html or graphic
+reason:
+missingInputs:              // asset ids to import, query text, or none
+permissionRequired: none | image_generate | video_submit
+```
+
+- `visual.kind` other than `blank` → `keep_existing`, even if another template
+  looks better. This includes `asset`, `html`, `text`, `graphic`,
+  `stock_image`, `generated_image`, and `generated_video`. A composition
+  layer is not a reason to replace `visual.kind`. A stock selection with
+  `selection.origin` `manual` stays pinned.
+- Empty or unclear `visualIntent`, or uncertainty → `ask`. Leave the scene
+  blank.
+- Product template that needs an image, with no suitable local asset → `ask`.
+  Name the missing product still, or ask whether a product card without
+  `imageAssetId` is acceptable. Do not import an asset and do not patch the
+  scene before approval.
+- Mood or environment on a blank scene → `propose` `stock_image` even when
+  the search query is still missing. Set `missingInputs: search query`. This
+  proposal does not call `search_stock_photos` or `select_stock_photo`. After
+  approval, ask for a query or suggest one, then follow the stock tool chain.
+- Other `propose` cases: blank scenes where the playbook has a first choice
+  and every listed input already exists on the project.
+- Template ids must be known HTML or graphic ids. Asset ids must already
+  appear in `get_project`. Do not invent `photoId` or stock CDN URLs. Stock
+  choose happens only after approval, from a later `search_stock_photos`.
+- `permissionRequired` is `none` unless the user already asked for generated
+  imagery or video. Paid generation is never a default proposal.
+
+**Stop after the proposal. Wait for explicit user approval.** Only then follow
+the playbook tool chains below. A proposal is not a patch.
+
+Choose a source first (after approval), then set `visual.kind` with
+`update_project`. Do not change an existing non-blank kind. Do not replace a
+stock selection with `origin: "manual"`. Prefer local or HTML sources. Paid
+image or video generation requires explicit user permission. If the intent is
+missing or ambiguous, leave the scene blank and ask.
+
+| Intent | First choice | Fallback | Do not do autonomously |
+| --- | --- | --- | --- |
+| Fact, statistic, chart | HTML `chart` or `stat_card` | graphic `statistic` | `image_generate` |
+| Process or system | HTML `flow_diagram`, `system_diagram`, or `decision_tree` | graphic `simple_diagram` | generated video |
+| Product with a local still | HTML `product_card` or `feature_callouts` plus `import_asset` | `visual.kind: "asset"` | stock CDN URL in an HTML slot |
+| Product without a still | `ask` (missing product photo, or confirm a card without `imageAssetId`) | — | generated product photo; do not import before approval |
+| Mood or environment | `propose` `stock_image` (`missingInputs: search query` if needed); after approval, `search_stock_photos` then `select_stock_photo`, or an existing local asset | — | `image_generate` unless asked; do not search during propose |
+| Motion or demonstration | existing video asset, or `generated_video` after permission | still plus overlay | extra `video_submit` |
+| Hook or CTA | HTML `headline` or graphic `title_card` / `end_card` | `text` | stock unless mood is requested |
+| Missing or unclear intent | leave blank and ask | `get_project` for assets and references | set a paid kind |
+
+#### Tool chains
+
+After every write, verify with `get_project` (and `get_scene` when checking
+one scene). Confirm `visual.kind`, template / `templateData`, local asset ids,
+and stock `selection.origin`.
+
+HTML fact or diagram:
+
+```text
+get_project
+update_project    // type=html, visual.kind=html, template + templateData
+get_project       // confirm template and local imageAssetId if any
+run_production    // html_render writes the PNG
+```
+
+Product with a still:
+
+```text
+import_asset
+get_project       // copy the returned assetId
+update_project    // html product_card or feature_callouts; templateData.imageAssetId
+get_project       // confirm the slot is a local asset id, not a URL
+```
+
+Mood / stock:
+
+```text
+update_project              // visual.kind=stock_image, query, optional orientation
+search_stock_photos
+select_stock_photo          // searchId + photoId; action=choose only
+get_project                 // selection.origin=manual; download may set visual.assetId
+```
+
+If `select_stock_photo` returns `CONFLICT` (`stock.search.expired`), call
+`search_stock_photos` again and choose explicitly. Do not invent `photoId`,
+do not pass image URLs or file paths, and do not write stock CDN URLs into
+HTML slots. `select_stock_photo` never assigns `templateData.imageAssetId`.
+
+Local still as the scene visual:
+
+```text
+import_asset
+update_project    // visual.kind=asset, visual.assetId
+get_project
+```
+
+Graphic card (no `html_render`):
+
+```text
+update_project    // visual.kind=graphic, template title_card|bullet_list|statistic|quote|comparison|simple_diagram|callout|end_card
+get_project
+```
+
+Generated video, only after explicit permission:
+
+```text
+create_reference              // if image-to-video frames are needed
+update_project                // visual.kind=generated_video, prompt, refs
+generate_video                // or run_production
+get_generation_job
+```
+
+There is no standalone image-generation MCP tool. Setting
+`visual.kind: "generated_image"` and calling `run_production` in real mode is
+a paid `image_generate`. Do not do that unless the user asked for generated
+imagery. Production `stock_select` still auto-selects unpinned `stock_image`
+scenes; use `select_stock_photo` when the photo must be a specific search hit.
+
+#### Safety rules
+
+- Do not treat `visualIntent` or `narrativeRole` as a source selector.
+- Set or change `visual.kind` only after a deliberate source choice.
+- Keep existing non-blank visuals. Keep stock selections with
+  `origin: "manual"`.
+- HTML `imageAssetId` and `products[i].imageAssetId` must be local project
+  asset ids from `import_asset`. Stock CDN URLs are rejected.
+- `select_stock_photo` is choose-only. Do not call production auto-select for
+  curation.
+- Expired search: re-search, then choose. Never auto-choose.
+- No paid image, video, music, or presenter call without explicit permission.
+  Use mock mode first when exploring structure.
+- Missing asset, unclear intent, mock/real provider conflict, or
+  `POLICY_DENIED`: fail closed, do not guess, ask for input.
+- `materialize_scene_intents` does not pick a visual. Author `visual.kind`
+  afterwards.
+
 ### Presenter authoring
 
 The `presenter` object is complete and replaces the previous object:
@@ -471,8 +673,12 @@ Poll `get_run_status` until `run.status` is terminal: `completed`, `partial`,
 
 Notes:
 
-- `mode: "real"` requires `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true` on the app
-  server.
+- `mode: "real"` requires a current human approval of the project snapshot
+  (`explainer.humanApproval`) plus `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true` on
+  the app server. That includes real stock search. A service token cannot grant that approval. `update_project` cannot forge intent `status: "approved"` or
+  the human-approval record.
+- Mock FFmpeg compose and `mode: "mock"` production may still be started by the
+  service token without human approval.
 - Credentials are required only for modalities the run actually executes.
 - A non-real provider for a needed modality in real mode is rejected.
 - A real provider in mock mode is rejected.
@@ -498,9 +704,10 @@ list_projects
 create_project
 update_project                  // story beats or complete scenes
 plan_scene_intents
-approve_scene_intents
+approve_scene_intents           // human browser session only; MCP/service token is FORBIDDEN
 materialize_scene_intents
-update_project                  // per-scene narration and overlays
+get_project                     // propose visual sources in chat; wait for approval
+update_project                  // visual.kind per the visual source playbook; narration and overlays
 get_validation_report
 run_production { mode: "mock" }
 get_run_status                  // poll to terminal
@@ -513,6 +720,7 @@ GET downloadPath
 ```text
 get_project                     // verify scenes, narration, presenter
 update_project                  // complete presenter object with maxCostUsd
+approve_scene_intents           // human browser session; required before real/paid execution
 get_production_plan             // confirm presenter actions are ready, not blocked
 run_production {
   mode: "real",
@@ -564,10 +772,11 @@ curl -H "Authorization: Bearer $EXPLAINER_API_TOKEN" \
 
 These have no MCP tool:
 
-- `POST /api/projects/{id}/assets` (multipart browser upload) and
-  `GET /api/projects/{id}/assets` (listing). Studio stills from the operator
-  source directory use `import_studio_assets` /
-  `POST /api/projects/{id}/studio-assets` instead.
+- Multipart browser upload `POST /api/projects/{id}/assets` and REST listing
+  `GET /api/projects/{id}/assets`. There is no `list_assets` MCP tool; discover
+  imported stills through `get_project`. JSON PNG/JPEG/WebP import uses
+  `import_asset`. Studio stills from the operator source directory use
+  `import_studio_assets` / `POST /api/projects/{id}/studio-assets`.
 - Claiming an ownerless project with the single-use token:
   `POST /api/projects/{id}/claim`.
 - Downloading a composition file:
@@ -576,6 +785,10 @@ These have no MCP tool:
   `POST /api/projects/{id}/scenes/{sceneId}/render` and
   `POST /api/projects/{id}/compose`. The production runner calls the same logic.
 - Direct presenter submit/poll: not exposed. Use `run_production`.
+- Stock photo auto-select:
+  `POST /api/projects/{id}/scenes/{sceneId}/select-stock-image` with
+  `action: "auto"`. Manual choose of a search hit uses `select_stock_photo`.
+  Production `stock_select` still runs the auto path.
 
 ## 10. Troubleshooting
 
@@ -591,6 +804,9 @@ These have no MCP tool:
 - `PROVIDER_ERROR`: inspect `get_run_log`; do not blindly resubmit a paid job.
 - `materialize_scene_intents` creates nothing: intents are still drafts. Approve
   them first.
+- Materialized scenes are blank: expected. Choose `visual.kind` with the visual
+  source playbook before `run_production`. Do not set `generated_image` just to
+  make the planner busy.
 - Presenter submit is blocked: read the action reason from
   `get_production_plan`. Common causes are stale narration, a missing
   `maxCostUsd`, missing pricing configuration, an exhausted budget, or an

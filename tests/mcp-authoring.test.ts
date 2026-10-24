@@ -44,6 +44,22 @@ function makeClient(overrides: Partial<AuthoringApiClient> = {}): AuthoringApiCl
     approveSceneIntents: async () => ({ project: makeProject() as never, approved: ['intent-1'], skipped: [] }),
     manageMusic: async () => ({ action: 'clear', status: 'cleared' }),
     createReference: async () => ({ reference: { id: 'reference-1', name: 'ref', description: '', tags: [], createdAt: '', updatedAt: '' } as never }),
+    importAsset: async () => ({
+      asset: {
+        id: 'asset_1',
+        type: 'image',
+        status: 'available',
+        provenance: 'imported',
+        filename: 'hero.png',
+        localPath: 'assets/asset_1-hero.png',
+        mimeType: 'image/png',
+        width: 1,
+        height: 1,
+        filesize: 70,
+        metadata: {},
+        createdAt: ''
+      } as never
+    }),
     importStudioAssets: async () => ({ projectId: 'project-1', assets: [] }),
     generateVideo: async () => ({
       sceneId: 'scene-1',
@@ -78,6 +94,24 @@ function makeClient(overrides: Partial<AuthoringApiClient> = {}): AuthoringApiCl
       layerId: 'studio-screen',
       rect: { x: 293, y: 98, width: 1346, height: 761 }
     }),
+    selectStockPhoto: async () => ({
+      action: 'choose',
+      sceneId: 'scene-1',
+      status: 'selected',
+      provider: 'pexels',
+      photoId: '42',
+      usagePolicy: 'download',
+      assetId: 'asset_1',
+      cached: false,
+      attribution: {
+        provider: 'pexels',
+        providerName: 'Pexels',
+        photoId: '42',
+        photographerName: 'Ada',
+        sourceUrl: 'https://pexels.local/42',
+        license: 'Pexels License'
+      }
+    }),
     ...overrides
   };
 }
@@ -103,13 +137,22 @@ describe('authoring MCP tool definitions', () => {
       'approve_scene_intents',
       'manage_project_music',
       'create_reference',
+      'import_asset',
       'import_studio_assets',
       'generate_video',
       'cancel_video',
       'render_animation_template',
-      'attach_animation'
+      'attach_animation',
+      'select_stock_photo'
     ]);
     expect(AUTHORING_TOOL_DEFINITIONS.every((entry) => entry.annotations.readOnlyHint === false)).toBe(true);
+  });
+
+  it('documents that approve_scene_intents is human-session only', () => {
+    const tool = AUTHORING_TOOL_DEFINITIONS.find((entry) => entry.name === 'approve_scene_intents');
+    expect(tool?.description).toMatch(/service token cannot approve/i);
+    expect(tool?.description).toMatch(/FORBIDDEN/);
+    expect(tool?.description).toMatch(/browser user session/);
   });
 });
 
@@ -451,6 +494,123 @@ describe('create_reference tool', () => {
     });
 
     const result = await createAuthoringToolService(client).createReference({ projectId: 'project-1', name: 'x', contentBase64: 'AAAA' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+  });
+});
+
+describe('import_asset tool', () => {
+  it('is registered as a mutating tool', () => {
+    const entry = AUTHORING_TOOL_DEFINITIONS.find((definition) => definition.name === 'import_asset');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(false);
+  });
+
+  it('forwards JSON image bytes and returns stored asset metadata', async () => {
+    const calls: Array<{ projectId: string; input: unknown }> = [];
+    const service = createAuthoringToolService(
+      makeClient({
+        importAsset: async (projectId, input) => {
+          calls.push({ projectId, input });
+          return {
+            asset: {
+              id: 'asset_imported',
+              type: 'image',
+              status: 'available',
+              provenance: 'imported',
+              filename: 'asset_imported-hero.png',
+              localPath: 'assets/asset_imported-hero.png',
+              mimeType: 'image/png',
+              width: 8,
+              height: 8,
+              filesize: 128,
+              metadata: {},
+              createdAt: ''
+            } as never
+          };
+        }
+      })
+    );
+
+    const result = await service.importAsset({
+      projectId: 'project-1',
+      filename: 'hero.png',
+      mimeType: 'image/png',
+      dataBase64: 'AAAA'
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([{
+      projectId: 'project-1',
+      input: { filename: 'hero.png', mimeType: 'image/png', dataBase64: 'AAAA' }
+    }]);
+    if (result.ok) {
+      expect(result.data).toEqual({
+        projectId: 'project-1',
+        assetId: 'asset_imported',
+        filename: 'asset_imported-hero.png',
+        localPath: 'assets/asset_imported-hero.png',
+        mimeType: 'image/png',
+        width: 8,
+        height: 8,
+        filesize: 128,
+        provenance: 'imported'
+      });
+    }
+  });
+
+  it('rejects missing mimeType without calling the API', async () => {
+    const client = makeClient();
+    const spy = vi.spyOn(client, 'importAsset');
+    const service = createAuthoringToolService(client);
+
+    const result = await service.importAsset({
+      projectId: 'project-1',
+      filename: 'hero.png',
+      dataBase64: 'AAAA'
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('maps an API asset.x error to INVALID_ARGUMENT', async () => {
+    const client = new HttpAuthoringApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: (async () => new Response(JSON.stringify({ message: 'bad image', code: 'asset.mimeMismatch' }), { status: 400 })) as unknown as typeof fetch
+    });
+
+    const result = await createAuthoringToolService(client).importAsset({
+      projectId: 'project-1',
+      filename: 'hero.png',
+      mimeType: 'image/png',
+      dataBase64: 'AAAA'
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+  });
+
+  it('maps HTTP 413 to INVALID_ARGUMENT', async () => {
+    const client = new HttpAuthoringApiClient({
+      baseUrl: 'http://127.0.0.1:5555',
+      fetchFn: (async () => new Response(JSON.stringify({ message: 'too large', code: 'asset.tooLarge' }), { status: 413 })) as unknown as typeof fetch
+    });
+
+    const result = await createAuthoringToolService(client).importAsset({
+      projectId: 'project-1',
+      filename: 'hero.png',
+      mimeType: 'image/png',
+      dataBase64: 'AAAA'
+    });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {

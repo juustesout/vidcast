@@ -453,4 +453,35 @@ describe('deriveProductionPlan', () => {
     const forced = deriveProductionPlan(project, { force: true, completedActionIds: [] }).actions.find((entry) => entry.id === id);
     expect(forced?.status).toBe('ready');
   });
+
+  it('re-runs html_render when a used imageAssetId is present without content hashes', () => {
+    const project = createProject();
+    const visual = {
+      kind: 'html' as const,
+      template: 'product_card' as const,
+      templateData: { name: 'Hub', imageAssetId: 'product-1' },
+      width: 1920,
+      height: 1080,
+      background: 'opaque' as const,
+      assetId: 'html-1',
+      fingerprint: ''
+    };
+    visual.fingerprint = createHtmlStillFingerprint(visual);
+    project.assets.push(
+      { id: 'html-1', type: 'image', status: 'available', localPath: 'assets/html-1.png' } as unknown as Project['assets'][number],
+      { id: 'product-1', type: 'image', status: 'available', localPath: 'assets/product-1.png' } as unknown as Project['assets'][number]
+    );
+    project.scenes[0].type = 'html';
+    project.scenes[0].visual = visual;
+
+    const action = deriveProductionPlan(project).actions.find((entry) => entry.id === 'scene:scene-1:html_render');
+    expect(action?.status).toBe('ready');
+    expect(action?.execute).toBe(true);
+    expect(action?.reason).toMatch(/Retry/i);
+
+    const completed = deriveProductionPlan(project, { completedActionIds: ['scene:scene-1:html_render'] })
+      .actions.find((entry) => entry.id === 'scene:scene-1:html_render');
+    expect(completed?.status).toBe('current');
+    expect(completed?.execute).toBe(false);
+  });
 });

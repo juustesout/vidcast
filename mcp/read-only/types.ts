@@ -1,14 +1,19 @@
 import type { AnimationTemplateSummary } from '@/lib/animation/types';
+import type { StockSearchResponse } from '@/lib/ai/stock/stock-search-service';
+import type { RunMode } from '@/lib/production/run-types';
 import type { Project } from '@/lib/types/render';
 import type { CompositionArtifact } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 import type { ProjectSummary } from '@/lib/storage/project-store';
+import type { StockOrientation, StockProviderId } from '@/lib/types/stock';
 import type { ProjectValidationReport } from '@/lib/validation/project-validation-report';
 import type { ProductionPlanReport } from '@/lib/production/production-plan-report';
 
 export type ReadOnlyMcpErrorCode =
   | 'INVALID_ARGUMENT'
   | 'NOT_FOUND'
+  | 'FORBIDDEN'
+  | 'RATE_LIMITED'
   | 'API_UNAVAILABLE'
   | 'API_ERROR'
   | 'INTERNAL_ERROR';
@@ -46,8 +51,12 @@ export interface ListProjectsResponse {
   projects: ReadOnlyMcpProjectSummary[];
 }
 
+export type McpProject = Omit<Project, 'compositions'> & {
+  compositions?: CompositionInfo[];
+};
+
 export interface GetProjectResponse {
-  project: Project;
+  project: McpProject;
 }
 
 export interface GetSceneResponse {
@@ -91,6 +100,16 @@ export interface ListAnimationTemplatesResponse {
   templates: AnimationTemplateSummary[];
 }
 
+export interface SearchStockPhotosInput {
+  query: string;
+  orientation?: StockOrientation;
+  providers?: StockProviderId[];
+  limit?: number;
+  mode?: RunMode;
+}
+
+export type SearchStockPhotosResponse = StockSearchResponse;
+
 // Result of polling one video generation attempt (GET /generation-jobs/{id}).
 // The call refreshes the attempt against the provider and records the latest
 // state, so repeated calls advance an in-flight job exactly like the run's
@@ -123,6 +142,18 @@ export function toCompositionInfo(projectId: string, artifact: CompositionArtifa
     sceneCount: artifact.sceneIds.length,
     filesize: artifact.filesize,
     downloadPath: `/api/projects/${encodeURIComponent(projectId)}/compositions/${encodeURIComponent(artifact.compositionId)}/file`
+  };
+}
+
+export function toMcpProject(project: Project): McpProject {
+  const { compositions, ...rest } = project;
+  if (!compositions) {
+    return rest;
+  }
+
+  return {
+    ...rest,
+    compositions: compositions.map((artifact) => toCompositionInfo(project.id, artifact))
   };
 }
 

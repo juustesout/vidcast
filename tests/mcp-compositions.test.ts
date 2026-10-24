@@ -62,7 +62,15 @@ function makeApiClient(getProject: AppApiClient['getProject']): AppApiClient {
     getValidationReport: async () => ({}) as never,
     getProductionPlan: async () => ({}) as never,
     getGenerationJob: async () => ({}) as never,
-    listAnimationTemplates: async () => []
+    listAnimationTemplates: async () => [],
+    searchStockPhotos: async () => ({
+      searchId: 'stocksearch_1',
+      query: 'mountains',
+      cached: false,
+      results: [],
+      diagnostics: [],
+      quota: []
+    })
   };
 }
 
@@ -103,6 +111,56 @@ describe('get_project_compositions tool', () => {
       expect(serialized).not.toContain('outputPath');
       expect(serialized).not.toContain('renders/composition-1.mp4');
     }
+  });
+
+  it('strips outputPath from get_project compositions and keeps download metadata', async () => {
+    const older = makeComposition({ compositionId: 'comp-old', createdAt: '2026-01-01T00:00:00.000Z' });
+    const newer = makeComposition({
+      compositionId: 'comp-new',
+      createdAt: '2026-02-01T00:00:00.000Z',
+      sceneIds: ['scene-1', 'scene-2', 'scene-3']
+    });
+    const project = makeProjectWithCompositions('project-1', [older, newer]);
+    const service = createReadOnlyToolService(makeApiClient(async () => project));
+
+    const result = await service.getProject({ projectId: 'project-1' });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.project.id).toBe('project-1');
+      expect(result.data.project.title).toBe('Project project-1');
+      expect(result.data.project.compositions).toEqual([
+        {
+          compositionId: 'comp-old',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          duration: 12,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          sceneCount: 2,
+          filesize: 123456,
+          downloadPath: '/api/projects/project-1/compositions/comp-old/file'
+        },
+        {
+          compositionId: 'comp-new',
+          createdAt: '2026-02-01T00:00:00.000Z',
+          duration: 12,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          sceneCount: 3,
+          filesize: 123456,
+          downloadPath: '/api/projects/project-1/compositions/comp-new/file'
+        }
+      ]);
+
+      const serialized = JSON.stringify(result.data);
+      expect(serialized).not.toContain('outputPath');
+      expect(serialized).not.toContain('renders/composition-1.mp4');
+    }
+
+    expect(project.compositions?.[0]?.outputPath).toBe('renders/composition-1.mp4');
+    expect(project.compositions?.[1]?.outputPath).toBe('renders/composition-1.mp4');
   });
 
   it('reports available=false when there are no compositions', async () => {
@@ -160,7 +218,8 @@ describe('single MCP server registers all tool groups', () => {
       'get_production_plan',
       'get_project_compositions',
       'get_generation_job',
-      'list_animation_templates'
+      'list_animation_templates',
+      'search_stock_photos'
     ]);
     expect(authoring.names).toEqual(AUTHORING_TOOL_DEFINITIONS.map((definition) => definition.name));
     expect(production.names).toEqual(PRODUCTION_TOOL_DEFINITIONS.map((definition) => definition.name));

@@ -24,6 +24,8 @@ import { deriveCompositionReadiness } from './render-status';
 import { resolveRenderPlan } from './scene-resolver';
 import { sceneBakesPresenter } from './scene-composition';
 import { resolveMeasuredNarrationDuration, sceneDurationMatches } from './scene-timing';
+import { HtmlStillError } from './html-still/errors';
+import { HtmlStillRefreshError, refreshHtmlStillIfStale } from './html-still/freshness';
 
 const activeCompositionLocks = new Set<string>();
 
@@ -61,6 +63,25 @@ export class CompositionServiceError extends Error {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function htmlStillCompositionError(error: HtmlStillError | HtmlStillRefreshError): CompositionServiceError {
+  if (error instanceof HtmlStillRefreshError && error.code === 'html.project.notFound') {
+    return new CompositionServiceError(error.message, 'PROJECT_NOT_FOUND', error.code);
+  }
+  const details = error instanceof HtmlStillError ? error.code : error.code;
+  return new CompositionServiceError(error.message, 'INCOMPATIBLE_RENDER', details);
+}
+
+async function ensureHtmlStillCurrent(project: Project, sceneId: string): Promise<Project> {
+  try {
+    return await refreshHtmlStillIfStale(project, sceneId);
+  } catch (error) {
+    if (error instanceof HtmlStillError || error instanceof HtmlStillRefreshError) {
+      throw htmlStillCompositionError(error);
+    }
+    throw error;
+  }
 }
 
 function asRelativeProjectPath(value: string): string {
@@ -377,8 +398,15 @@ export class VideoCompositionService {
 
   private async ensureSceneRenders(project: Project): Promise<Project> {
     let workingProject = project;
-    let readiness = deriveCompositionReadiness(workingProject, resolveRenderPlan(workingProject));
 
+    const htmlSceneIds = workingProject.scenes
+      .filter((scene) => scene.visual?.kind === 'html')
+      .map((scene) => scene.id);
+    for (const sceneId of htmlSceneIds) {
+      workingProject = await ensureHtmlStillCurrent(workingProject, sceneId);
+    }
+
+    let readiness = deriveCompositionReadiness(workingProject, resolveRenderPlan(workingProject));
     if (readiness.blockingSceneIds.length > 0) {
       throw new CompositionServiceError('Project has scenes with blocking validation issues.', 'INCOMPATIBLE_RENDER');
     }

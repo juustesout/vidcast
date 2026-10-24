@@ -9,10 +9,13 @@ import type {
   CreateProjectInput,
   CreateReferenceInput,
   GenerateVideoInput,
+  ImportAssetInput,
   ImportStudioAssetsInput,
   ManageProjectMusicInput,
   RenderAnimationTemplateInput,
-  RenderAnimationTemplateResponse
+  RenderAnimationTemplateResponse,
+  SelectStockPhotoInput,
+  SelectStockPhotoResponse
 } from './types';
 
 interface ApiErrorPayload {
@@ -21,6 +24,7 @@ interface ApiErrorPayload {
   errors?: unknown;
   warnings?: unknown;
   details?: Record<string, unknown>;
+  diagnostics?: unknown;
 }
 
 type ProjectPatch = Record<string, unknown>;
@@ -97,6 +101,10 @@ export interface CreateReferenceResult {
   reference: ReferenceImage;
 }
 
+export interface ImportAssetResult {
+  asset: Asset;
+}
+
 export interface ImportStudioAssetsResult {
   projectId: string;
   assets: Asset[];
@@ -130,11 +138,13 @@ export interface AuthoringApiClient {
   approveSceneIntents(projectId: string, intentIds?: string[]): Promise<ApproveSceneIntentsResult>;
   manageMusic(projectId: string, input: ManageProjectMusicInput): Promise<ManageMusicResult>;
   createReference(projectId: string, input: CreateReferenceInput): Promise<CreateReferenceResult>;
+  importAsset(projectId: string, input: ImportAssetInput): Promise<ImportAssetResult>;
   importStudioAssets(projectId: string, input: ImportStudioAssetsInput): Promise<ImportStudioAssetsResult>;
   generateVideo(projectId: string, sceneId: string, input: GenerateVideoInput): Promise<GenerateVideoResult>;
   cancelVideo(projectId: string, sceneId: string): Promise<CancelVideoResult>;
   renderAnimationTemplate(projectId: string, input: RenderAnimationTemplateInput): Promise<RenderAnimationTemplateResponse>;
   attachAnimation(projectId: string, sceneId: string, input: AttachAnimationInput): Promise<AttachAnimationResponse>;
+  selectStockPhoto(projectId: string, sceneId: string, input: SelectStockPhotoInput): Promise<SelectStockPhotoResponse>;
 }
 
 export interface HttpAuthoringApiClientOptions {
@@ -189,6 +199,8 @@ function mapMusicApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | u
     case 'music.project.notFound':
     case 'music.asset.notFound':
       return 'NOT_FOUND';
+    case 'music.policy.denied':
+      return 'FORBIDDEN';
     case 'music.invalid':
     case 'music.asset.invalidType':
       return 'INVALID_ARGUMENT';
@@ -205,6 +217,15 @@ function mapGenerationApiCode(apiCode: string | undefined): AuthoringMcpErrorCod
   // Reference upload codes (POST /references JSON path). All are 4xx input
   // problems surfaced as INVALID_ARGUMENT.
   if (apiCode.startsWith('reference.')) {
+    return 'INVALID_ARGUMENT';
+  }
+
+  // JSON asset import codes (POST /assets JSON path). Input and size problems
+  // stay INVALID_ARGUMENT; store failures stay API_ERROR.
+  if (apiCode.startsWith('asset.')) {
+    if (apiCode === 'asset.storeFailed') {
+      return 'API_ERROR';
+    }
     return 'INVALID_ARGUMENT';
   }
 
@@ -282,6 +303,44 @@ function mapGenerationApiCode(apiCode: string | undefined): AuthoringMcpErrorCod
   }
 }
 
+function mapStockApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | undefined {
+  if (!apiCode) {
+    return undefined;
+  }
+
+  switch (apiCode) {
+    case 'stock.search.expired':
+    case 'stock.scene.alreadyRunning':
+    case 'stock.selection.incompatible':
+      return 'CONFLICT';
+    case 'stock.project.notFound':
+    case 'stock.scene.notFound':
+      return 'NOT_FOUND';
+    case 'stock.provider.notAllowed':
+    case 'stock.policy.denied':
+      return 'FORBIDDEN';
+    case 'stock.search.missingQuery':
+    case 'stock.search.invalidOrientation':
+    case 'stock.search.invalidProvider':
+    case 'stock.search.invalidLimit':
+    case 'stock.search.invalidMode':
+    case 'stock.search.noProviders':
+    case 'stock.select.missingCandidate':
+    case 'stock.select.invalidAction':
+    case 'stock.select.invalidMode':
+    case 'stock.scene.missingQuery':
+    case 'stock.scene.invalidVisualKind':
+    case 'stock.photo.invalid':
+      return 'INVALID_ARGUMENT';
+    case 'stock.search.noProvider':
+    case 'stock.routing.failed':
+    case 'stock.download.failed':
+      return 'API_ERROR';
+    default:
+      return undefined;
+  }
+}
+
 function mapApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | undefined {
   if (!apiCode) {
     return undefined;
@@ -295,6 +354,11 @@ function mapApiCode(apiCode: string | undefined): AuthoringMcpErrorCode | undefi
   const generationCode = mapGenerationApiCode(apiCode);
   if (generationCode) {
     return generationCode;
+  }
+
+  const stockCode = mapStockApiCode(apiCode);
+  if (stockCode) {
+    return stockCode;
   }
 
   switch (apiCode) {
@@ -345,7 +409,7 @@ function mapStatusToCode(status: number, payload: unknown): AuthoringMcpErrorCod
   if (status === 429) {
     return 'RATE_LIMITED';
   }
-  if (status === 400) {
+  if (status === 400 || status === 413) {
     return 'INVALID_ARGUMENT';
   }
 
@@ -500,6 +564,15 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
     return { reference: payload.reference };
   }
 
+  async importAsset(projectId: string, input: ImportAssetInput): Promise<ImportAssetResult> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/assets`;
+    const payload = (await this.request(path, 'POST', input)) as { asset?: Asset };
+    if (!payload.asset) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid asset import response payload.', { endpoint: path, projectId });
+    }
+    return { asset: payload.asset };
+  }
+
   async importStudioAssets(projectId: string, input: ImportStudioAssetsInput): Promise<ImportStudioAssetsResult> {
     const path = `/api/projects/${encodeURIComponent(projectId)}/studio-assets`;
     const payload = (await this.request(path, 'POST', input)) as { projectId?: string; assets?: Asset[] };
@@ -544,9 +617,40 @@ export class HttpAuthoringApiClient implements AuthoringApiClient {
     }
     return payload as AttachAnimationResponse;
   }
+
+  async selectStockPhoto(projectId: string, sceneId: string, input: SelectStockPhotoInput): Promise<SelectStockPhotoResponse> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}/select-stock-image`;
+    const payload = (await this.request(path, 'POST', {
+      action: 'choose',
+      searchId: input.searchId,
+      photoId: input.photoId,
+      query: input.query,
+      orientation: input.orientation,
+      regenerate: input.regenerate,
+      mode: input.mode
+    })) as Partial<SelectStockPhotoResponse>;
+    if (
+      payload.action !== 'choose' ||
+      typeof payload.sceneId !== 'string' ||
+      (payload.status !== 'selected' && payload.status !== 'current') ||
+      typeof payload.provider !== 'string' ||
+      typeof payload.photoId !== 'string' ||
+      (payload.usagePolicy !== 'download' && payload.usagePolicy !== 'hotlink') ||
+      typeof payload.cached !== 'boolean' ||
+      !payload.attribution ||
+      typeof payload.attribution.license !== 'string'
+    ) {
+      throw new AuthoringMcpToolError('API_ERROR', 'Invalid stock selection response payload.', { endpoint: path, projectId, sceneId });
+    }
+    return payload as SelectStockPhotoResponse;
+  }
 }
 
 function parseDetails(payload: unknown): Record<string, unknown> {
   const candidate = asPayload(payload);
-  return candidate.details && typeof candidate.details === 'object' ? candidate.details : {};
+  const details = candidate.details && typeof candidate.details === 'object' ? { ...candidate.details } : {};
+  if (Array.isArray(candidate.diagnostics)) {
+    details.diagnostics = candidate.diagnostics;
+  }
+  return details;
 }

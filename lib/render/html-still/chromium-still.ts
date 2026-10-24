@@ -5,6 +5,7 @@ import path from 'node:path';
 import { ProcessExecutionError, runProcess } from '@/lib/render/ffmpeg-executor';
 import { findChromiumPath } from '@/lib/render/chromium';
 import { HtmlStillError } from './errors';
+import { injectTrustedHtmlStillImages, type ResolvedHtmlStillImage } from './image-assets';
 import { wrapHtmlStillDocument } from './sanitize';
 
 export const DEFAULT_HTML_STILL_TIMEOUT_MS = 15_000;
@@ -20,6 +21,7 @@ export interface HtmlStillRenderInput {
   background: 'opaque' | 'transparent';
   pageBackground?: string;
   timeoutMs?: number;
+  images?: readonly ResolvedHtmlStillImage[];
 }
 
 export interface HtmlStillRenderResult {
@@ -64,14 +66,14 @@ export async function renderHtmlStillPng(input: HtmlStillRenderInput): Promise<H
     throw new HtmlStillError('html.chromium.missing', 'No Chromium/Chrome binary found for HTML still render.', 503);
   }
 
-  const document = wrapHtmlStillDocument({
+  const document = injectTrustedHtmlStillImages(wrapHtmlStillDocument({
     markup: input.markup,
     css: input.css,
     width: input.width,
     height: input.height,
     background: input.background,
     pageBackground: input.pageBackground
-  });
+  }), input.images ?? []);
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'html-still-'));
   const htmlPath = path.join(workDir, 'still.html');

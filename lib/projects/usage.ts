@@ -1,3 +1,4 @@
+import { htmlStillSlotImageAssetIds } from '@/lib/projects/html-still-slot-images';
 import type { Project } from '@/lib/types/render';
 
 // Sentinel usage marker for project-level (non-scene) references such as the
@@ -21,8 +22,12 @@ export function getAssetUsage(project: Project, assetId: string): string[] {
         return visual.assetId === assetId || visual.generation.assetId === assetId;
       }
 
-      if (visual.kind === 'html' || visual.kind === 'stock_image') {
+      if (visual.kind === 'stock_image') {
         return visual.assetId === assetId;
+      }
+
+      if (visual.kind === 'html') {
+        return visual.assetId === assetId || htmlStillSlotImageAssetIds(visual).includes(assetId);
       }
 
       return false;

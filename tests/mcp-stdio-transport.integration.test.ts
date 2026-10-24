@@ -388,6 +388,8 @@ describe('stdio MCP transport integration', () => {
 
     expect(toolNames).toContain('list_projects');
     expect(toolNames).toContain('get_project_compositions');
+    expect(toolNames).toContain('search_stock_photos');
+    expect(toolNames).toContain('select_stock_photo');
     expect(toolNames).toContain('create_project');
     expect(toolNames).toContain('update_project');
     expect(toolNames).toContain('plan_scene_intents');

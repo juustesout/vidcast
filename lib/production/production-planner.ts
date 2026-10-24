@@ -404,7 +404,7 @@ export function deriveProductionPlan(project: Project, options: DeriveProduction
         actionStatus = 'failed';
         execute = false;
         reason = 'Failed earlier in this run.';
-      } else if (usable && !forceRegenerate(id)) {
+      } else if ((usable || completedActionIds.has(id)) && !forceRegenerate(id)) {
         actionStatus = 'current';
         execute = false;
         reason = 'HTML still PNG is current.';

@@ -15,6 +15,7 @@ function makeAuthoringClient(overrides: Partial<AuthoringApiClient> = {}): Autho
     approveSceneIntents: async () => ({ project: { id: 'project-1' } as never, approved: [], skipped: [] }),
     manageMusic: async () => ({ action: 'clear', status: 'cleared' }),
     createReference: async () => ({ reference: { id: 'r' } as never }),
+    importAsset: async () => ({ asset: { id: 'asset_1' } as never }),
     importStudioAssets: async () => ({ projectId: 'project-1', assets: [] }),
     generateVideo: async () => ({
       sceneId: 'scene-1',
@@ -52,6 +53,23 @@ function makeAuthoringClient(overrides: Partial<AuthoringApiClient> = {}): Autho
       startSeconds: 0,
       durationSeconds: 5
     }),
+    selectStockPhoto: async () => ({
+      action: 'choose',
+      sceneId: 'scene-1',
+      status: 'selected',
+      provider: 'pexels',
+      photoId: '42',
+      usagePolicy: 'download',
+      cached: false,
+      attribution: {
+        provider: 'pexels',
+        providerName: 'Pexels',
+        photoId: '42',
+        photographerName: 'Ada',
+        sourceUrl: 'https://pexels.local/42',
+        license: 'Pexels License'
+      }
+    }),
     ...overrides
   };
 }
@@ -81,7 +99,15 @@ describe('list_animation_templates', () => {
       getValidationReport: async () => ({}) as never,
       getProductionPlan: async () => ({}) as never,
       getGenerationJob: async () => ({}) as never,
-      listAnimationTemplates: async () => templates
+      listAnimationTemplates: async () => templates,
+      searchStockPhotos: async () => ({
+        searchId: 'stocksearch_1',
+        query: 'mountains',
+        cached: false,
+        results: [],
+        diagnostics: [],
+        quota: []
+      })
     } satisfies AppApiClient);
 
     const result = await service.listAnimationTemplates({});
@@ -98,7 +124,15 @@ describe('list_animation_templates', () => {
       getValidationReport: async () => ({}) as never,
       getProductionPlan: async () => ({}) as never,
       getGenerationJob: async () => ({}) as never,
-      listAnimationTemplates: async () => []
+      listAnimationTemplates: async () => [],
+      searchStockPhotos: async () => ({
+        searchId: 'stocksearch_1',
+        query: 'mountains',
+        cached: false,
+        results: [],
+        diagnostics: [],
+        quota: []
+      })
     } satisfies AppApiClient);
     const result = await service.listAnimationTemplates({ extra: true });
     expect(result.ok).toBe(false);

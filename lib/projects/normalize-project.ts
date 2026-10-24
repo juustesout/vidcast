@@ -11,7 +11,7 @@ import type { Asset, AssetProvenance } from '@/lib/types/asset';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project, ProjectMusicGenerationAttempt, ProjectMusicSpec, ProjectMusicStatus } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
-import type { GraphicStyleSpec, LogoOverlaySpec, MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneType, StudioOverlaySpec, TransitionPreset, VisualSpec } from '@/lib/types/scene';
+import type { GraphicStyleSpec, LogoOverlaySpec, MotionPreset, MotionSpec, NarrationGenerationAttempt, NarrationSpec, OverlaySpec, RenderSpec, Scene, SceneSourceTrace, SceneType, StudioOverlaySpec, TransitionPreset, VisualSpec } from '@/lib/types/scene';
 import type { SceneCompositionSpec } from '@/lib/types/scene-composition';
 import type { StockOrientation, StockProviderId, StockSelection } from '@/lib/types/stock';
 
@@ -20,6 +20,7 @@ type LegacyScene = {
   order?: number;
   duration?: number;
   type?: SceneType;
+  source?: SceneSourceTrace;
   narration?: string | { text?: string; voiceId?: string; audioAssetId?: string };
   visual?: Record<string, unknown>;
   assetIds?: string[];
@@ -310,6 +311,28 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
   };
 }
 
+function normalizeSceneSource(source: SceneSourceTrace | undefined): SceneSourceTrace | undefined {
+  if (!source || typeof source !== 'object') {
+    return undefined;
+  }
+
+  const sceneIntentId = typeof source.sceneIntentId === 'string' && source.sceneIntentId.trim()
+    ? source.sceneIntentId
+    : undefined;
+  const beatIds = Array.isArray(source.beatIds)
+    ? source.beatIds.filter((beatId): beatId is string => typeof beatId === 'string' && beatId.trim().length > 0)
+    : undefined;
+
+  if (!sceneIntentId && (!beatIds || beatIds.length === 0)) {
+    return undefined;
+  }
+
+  return {
+    ...(sceneIntentId ? { sceneIntentId } : {}),
+    ...(beatIds && beatIds.length > 0 ? { beatIds } : {})
+  };
+}
+
 function normalizeNarration(narration: string | NarrationSpec | undefined): NarrationSpec | undefined {
   if (!narration) {
     return undefined;
@@ -370,6 +393,7 @@ export function normalizeScene(scene: LegacyScene, project: Partial<Project>, in
     order: scene.order ?? index + 1,
     duration: scene.duration ?? 5,
     type: scene.type ?? 'image',
+    source: normalizeSceneSource(scene.source),
     narration: normalizeNarration(scene.narration as string | NarrationSpec | undefined),
     visual: normalizeLegacyVisual({ ...scene, id: sceneId }, project),
     render: {

@@ -1,9 +1,10 @@
 import type { AnimationTemplateSummary } from '@/lib/animation/types';
+import type { StockSearchResponse } from '@/lib/ai/stock/stock-search-service';
 import type { Project } from '@/lib/types/render';
 import type { ProjectSummary } from '@/lib/storage/project-store';
 import type { ProjectValidationReport } from '@/lib/validation/project-validation-report';
 import type { ProductionPlanReport } from '@/lib/production/production-plan-report';
-import type { GetGenerationJobResponse } from './types';
+import type { GetGenerationJobResponse, ReadOnlyMcpErrorCode, SearchStockPhotosInput } from './types';
 import { ReadOnlyMcpToolError } from './errors';
 
 interface ProjectsListPayload {
@@ -52,6 +53,7 @@ export interface AppApiClient {
   getProductionPlan(projectId: string): Promise<ProductionPlanReport>;
   getGenerationJob(projectId: string, attemptId: string): Promise<GetGenerationJobResponse>;
   listAnimationTemplates(): Promise<AnimationTemplateSummary[]>;
+  searchStockPhotos(projectId: string, input: SearchStockPhotosInput): Promise<StockSearchResponse>;
 }
 
 export interface HttpAppApiClientOptions {
@@ -66,6 +68,47 @@ function getMessageFromUnknown(payload: unknown): string | undefined {
 
   const candidate = payload as ApiErrorPayload;
   return typeof candidate.message === 'string' ? candidate.message : undefined;
+}
+
+function getCodeFromUnknown(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+
+  const candidate = payload as ApiErrorPayload;
+  return typeof candidate.code === 'string' ? candidate.code : undefined;
+}
+
+function getDiagnosticsFromUnknown(payload: unknown): unknown[] | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+
+  const diagnostics = (payload as { diagnostics?: unknown }).diagnostics;
+  return Array.isArray(diagnostics) ? diagnostics : undefined;
+}
+
+function mapStockSearchStatus(status: number, payload: unknown): ReadOnlyMcpErrorCode {
+  const apiCode = getCodeFromUnknown(payload);
+  if (apiCode === 'RATE_LIMITED') {
+    return 'RATE_LIMITED';
+  }
+  if (apiCode === 'stock.policy.denied') {
+    return 'FORBIDDEN';
+  }
+  if (status === 400) {
+    return 'INVALID_ARGUMENT';
+  }
+  if (status === 403) {
+    return 'FORBIDDEN';
+  }
+  if (status === 404) {
+    return 'NOT_FOUND';
+  }
+  if (status === 429) {
+    return 'RATE_LIMITED';
+  }
+  return 'API_ERROR';
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {
@@ -123,9 +166,15 @@ export class HttpAppApiClient implements AppApiClient {
         throw new ReadOnlyMcpToolError('NOT_FOUND', message, { endpoint: path, httpStatus: response.status });
       }
 
-      throw new ReadOnlyMcpToolError('API_ERROR', message, {
+      const code = path.includes('/stock/search')
+        ? mapStockSearchStatus(response.status, payload)
+        : 'API_ERROR';
+      const diagnostics = getDiagnosticsFromUnknown(payload);
+      throw new ReadOnlyMcpToolError(code, message, {
         endpoint: path,
-        httpStatus: response.status
+        httpStatus: response.status,
+        apiCode: getCodeFromUnknown(payload),
+        ...(diagnostics ? { diagnostics } : {})
       });
     }
 
@@ -209,5 +258,47 @@ export class HttpAppApiClient implements AppApiClient {
       });
     }
     return payload.templates;
+  }
+
+  async searchStockPhotos(projectId: string, input: SearchStockPhotosInput): Promise<StockSearchResponse> {
+    const params = new URLSearchParams({ query: input.query });
+    if (input.orientation) {
+      params.set('orientation', input.orientation);
+    }
+    if (input.providers && input.providers.length > 0) {
+      params.set('providers', input.providers.join(','));
+    }
+    if (input.limit !== undefined) {
+      params.set('limit', String(input.limit));
+    }
+    if (input.mode) {
+      params.set('mode', input.mode);
+    }
+
+    const path = `/api/projects/${encodeURIComponent(projectId)}/stock/search?${params.toString()}`;
+    const payload = (await this.request(path)) as Partial<StockSearchResponse>;
+    if (
+      typeof payload.searchId !== 'string' ||
+      typeof payload.query !== 'string' ||
+      typeof payload.cached !== 'boolean' ||
+      !Array.isArray(payload.results) ||
+      !Array.isArray(payload.diagnostics) ||
+      !Array.isArray(payload.quota)
+    ) {
+      throw new ReadOnlyMcpToolError('API_ERROR', 'Invalid stock search response payload.', {
+        endpoint: '/api/projects/:id/stock/search',
+        projectId
+      });
+    }
+
+    return {
+      searchId: payload.searchId,
+      query: payload.query,
+      orientation: payload.orientation,
+      cached: payload.cached,
+      results: payload.results,
+      diagnostics: payload.diagnostics,
+      quota: payload.quota
+    };
   }
 }

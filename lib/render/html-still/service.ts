@@ -10,6 +10,7 @@ import { createId } from '@/lib/utils/ids';
 import { renderHtmlStillPng } from './chromium-still';
 import { HtmlStillError } from './errors';
 import { createHtmlStillFingerprint, htmlStillAssetIsCurrent } from './fingerprint';
+import { resolveHtmlStillImages } from './image-assets';
 import { canonicalizeHtmlStillTemplateId, resolveHtmlStillTemplate } from './templates';
 
 const activeLocks = new Set<string>();
@@ -108,12 +109,13 @@ export async function renderSceneHtmlStill(
 
     const scene = getScene(project, sceneId);
     ensureHtmlScene(scene);
-    const fingerprint = createHtmlStillFingerprint(scene.visual);
     const currentAsset = scene.visual.assetId
       ? project.assets.find((entry) => entry.id === scene.visual.assetId && entry.localPath)
       : undefined;
+    const images = await resolveHtmlStillImages(project, scene.visual);
+    const fingerprint = createHtmlStillFingerprint(scene.visual, images);
 
-    if (!options.regenerate && currentAsset?.localPath && htmlStillAssetIsCurrent(scene.visual)) {
+    if (!options.regenerate && currentAsset?.localPath && htmlStillAssetIsCurrent(scene.visual, images)) {
       return {
         sceneId,
         assetId: currentAsset.id,
@@ -135,7 +137,8 @@ export async function renderSceneHtmlStill(
       width,
       height,
       background,
-      pageBackground: document.pageBackground
+      pageBackground: document.pageBackground,
+      images
     });
 
     const file = new File([new Uint8Array(still.png)], `scene-${String(scene.order).padStart(2, '0')}-html-still.png`, {

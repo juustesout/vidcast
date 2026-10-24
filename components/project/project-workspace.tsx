@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
+import { HtmlStillSlotImagePicker } from '@/components/project/html-still-slot-image-picker';
 import { ProductionWorkflow } from '@/components/project/production-workflow';
 import { ServerRunPanel } from '@/components/project/server-run-panel';
 import { ScenePreview } from '@/components/preview/scene-preview';
@@ -18,6 +19,7 @@ import { deriveGenerationTasks } from '@/lib/projects/generation-tasks';
 import { resolveVideoProviderForwarding } from '@/lib/generation/video-provider-forwarding';
 import { resolveVideoModelAuthoringHints } from '@/lib/ai/video-generation/models';
 import { deriveCompositionArtifactStatus, deriveCompositionReadiness, deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
+import { applyHtmlStillSlotImage, isHtmlStillSlotImageAsset } from '@/lib/projects/html-still-slot-images';
 import { getAssetUsage } from '@/lib/projects/usage';
 import { defaultBoxForType, defaultPositionForType } from '@/lib/render/overlay-resolve';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
@@ -172,7 +174,8 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
       description: typeof previous.description === 'string' ? previous.description : '',
       features: Array.isArray(previous.features) && previous.features.length > 0
         ? previous.features
-        : [{ label: 'Weight', value: '1.2 kg' }]
+        : [{ label: 'Weight', value: '1.2 kg' }],
+      ...(typeof previous.imageAssetId === 'string' && previous.imageAssetId ? { imageAssetId: previous.imageAssetId } : {})
     };
   }
   if (template === 'product_comparison') {
@@ -194,7 +197,8 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
         : [
             { label: 'Lens', detail: 'Wide capture', side: 'left' },
             { label: 'Mic', detail: 'Studio voice', side: 'right' }
-          ]
+          ],
+      ...(typeof previous.imageAssetId === 'string' && previous.imageAssetId ? { imageAssetId: previous.imageAssetId } : {})
     };
   }
   if (template === 'flow_diagram') {
@@ -255,7 +259,8 @@ function htmlTemplateDataFor(template: HtmlStillTemplateType, previous: Record<s
     title,
     subtitle: typeof previous.subtitle === 'string' ? previous.subtitle : '',
     source: typeof previous.source === 'string' ? previous.source : '',
-    kicker: typeof previous.kicker === 'string' ? previous.kicker : ''
+    kicker: typeof previous.kicker === 'string' ? previous.kicker : '',
+    ...(typeof previous.imageAssetId === 'string' && previous.imageAssetId ? { imageAssetId: previous.imageAssetId } : {})
   };
 }
 
@@ -480,7 +485,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   const [batchEvents, setBatchEvents] = useState<ProductionRunnerEvent[]>([]);
   const [batchLogOpen, setBatchLogOpen] = useState(false);
   const [batchCopyState, setBatchCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const [providerStatus, setProviderStatus] = useState<{ openaiConfigured: boolean; defaultProvider: string } | null>(null);
+  const [providerStatus, setProviderStatus] = useState<{ defaultProvider: string } | null>(null);
   const [stockSearching, setStockSearching] = useState(false);
   const [stockSelectingId, setStockSelectingId] = useState<string | null>(null);
   const [stockMessage, setStockMessage] = useState('');
@@ -571,7 +576,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   useEffect(() => {
     void (async () => {
       const response = await fetch('/api/image-generation/status');
-      const body = (await response.json().catch(() => null)) as { openaiConfigured: boolean; defaultProvider: string } | null;
+      const body = (await response.json().catch(() => null)) as { defaultProvider: string } | null;
       if (response.ok && body) {
         setProviderStatus(body);
       }
@@ -1421,6 +1426,61 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     if (assignToScene && selectedScene) {
       setAssetForScene(selectedScene, body.asset.id);
     }
+  }
+
+  function setHtmlStillSlotImage(sceneId: string, assetId: string | undefined, productIndex?: number): void {
+    updateScene(sceneId, (scene) => {
+      if (!scene.visual || scene.visual.kind !== 'html') {
+        return scene;
+      }
+      return {
+        ...scene,
+        visual: {
+          ...scene.visual,
+          templateData: applyHtmlStillSlotImage(scene.visual.templateData, assetId, productIndex)
+        }
+      };
+    });
+  }
+
+  async function importHtmlStillSlotImage(sceneId: string, file: File, productIndex?: number): Promise<void> {
+    const formData = new FormData();
+    formData.set('file', file);
+
+    const response = await fetch(`/api/projects/${draft.id}/assets`, {
+      method: 'POST',
+      body: formData
+    });
+    const body = (await response.json().catch(() => ({}))) as { message?: string; asset?: Project['assets'][number] };
+    if (!response.ok || !body.asset) {
+      setAssetMessage(body.message || 'Could not import asset.');
+      return;
+    }
+
+    const nextAssets = [...draft.assets, body.asset];
+    setSelectedAssetId(body.asset.id);
+    if (!isHtmlStillSlotImageAsset(body.asset)) {
+      setAssetMessage('Imported file is not a PNG, JPEG, or WebP image.');
+      updateProject({ ...draft, assets: nextAssets });
+      return;
+    }
+    setAssetMessage(`Imported ${body.asset.filename}.`);
+    updateProject({
+      ...draft,
+      assets: nextAssets,
+      scenes: draft.scenes.map((scene) => {
+        if (scene.id !== sceneId || scene.visual?.kind !== 'html') {
+          return scene;
+        }
+        return {
+          ...scene,
+          visual: {
+            ...scene.visual,
+            templateData: applyHtmlStillSlotImage(scene.visual.templateData, body.asset!.id, productIndex)
+          }
+        };
+      })
+    });
   }
 
   async function deleteSelectedAsset(): Promise<void> {
@@ -2610,6 +2670,15 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                             })
                           }
                         />
+                        <HtmlStillSlotImagePicker
+                          projectId={draft.id}
+                          assets={draft.assets}
+                          excludeAssetIds={selectedScene.visual.assetId ? [selectedScene.visual.assetId] : []}
+                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : undefined}
+                          label="Image"
+                          onSelect={(assetId) => setHtmlStillSlotImage(selectedScene.id, assetId)}
+                          onImport={(file) => void importHtmlStillSlotImage(selectedScene.id, file)}
+                        />
                       </>
                     ) : null}
                     {(selectedScene.visual.template === 'stat_card' || selectedScene.visual.template === 'stat-card') ? (
@@ -3226,23 +3295,14 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                             })
                           }
                         />
-                        <Field
-                          label="Image asset id"
-                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : ''}
-                          onChange={(value) =>
-                            updateScene(selectedScene.id, (scene) => {
-                              if (!scene.visual || scene.visual.kind !== 'html') {
-                                return scene;
-                              }
-                              const next = { ...(scene.visual.templateData ?? {}) };
-                              if (!String(value).trim()) {
-                                delete next.imageAssetId;
-                              } else {
-                                next.imageAssetId = String(value).trim();
-                              }
-                              return { ...scene, visual: { ...scene.visual, templateData: next } };
-                            })
-                          }
+                        <HtmlStillSlotImagePicker
+                          projectId={draft.id}
+                          assets={draft.assets}
+                          excludeAssetIds={selectedScene.visual.assetId ? [selectedScene.visual.assetId] : []}
+                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : undefined}
+                          label="Image"
+                          onSelect={(assetId) => setHtmlStillSlotImage(selectedScene.id, assetId)}
+                          onImport={(file) => void importHtmlStillSlotImage(selectedScene.id, file)}
                         />
                         <Field
                           label="Features (label | value)"
@@ -3298,10 +3358,10 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                           }
                         />
                         <Field
-                          label="Products (name | imageAssetId | feature:value; feature:value)"
+                          label="Products (name | feature:value; feature:value)"
                           value={Array.isArray(selectedScene.visual.templateData?.products)
-                            ? (selectedScene.visual.templateData.products as Array<{ name?: string; imageAssetId?: string; features?: Array<{ label?: string; value?: string }> }>)
-                              .map((product) => `${product.name ?? ''} | ${product.imageAssetId ?? ''} | ${(product.features ?? []).map((feature) => `${feature.label ?? ''}:${feature.value ?? ''}`).join('; ')}`)
+                            ? (selectedScene.visual.templateData.products as Array<{ name?: string; features?: Array<{ label?: string; value?: string }> }>)
+                              .map((product) => `${product.name ?? ''} | ${(product.features ?? []).map((feature) => `${feature.label ?? ''}:${feature.value ?? ''}`).join('; ')}`)
                               .join('\n')
                             : ''}
                           asTextArea
@@ -3310,13 +3370,16 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                               if (!scene.visual || scene.visual.kind !== 'html') {
                                 return scene;
                               }
+                              const existing = Array.isArray(scene.visual.templateData?.products)
+                                ? (scene.visual.templateData.products as Array<{ imageAssetId?: string }>)
+                                : [];
                               const products = String(value)
                                 .split('\n')
                                 .map((line) => line.trim())
                                 .filter((line) => line.length > 0)
-                                .map((line) => {
+                                .map((line, index) => {
                                   const parts = line.split('|').map((part) => part.trim());
-                                  const featurePart = parts.slice(2).join('|');
+                                  const featurePart = parts.slice(1).join('|');
                                   const features = featurePart
                                     .split(';')
                                     .map((entry) => entry.trim())
@@ -3329,8 +3392,8 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                                     name: parts[0] ?? '',
                                     features
                                   };
-                                  if (parts[1]) {
-                                    product.imageAssetId = parts[1];
+                                  if (existing[index]?.imageAssetId) {
+                                    product.imageAssetId = existing[index].imageAssetId;
                                   }
                                   return product;
                                 });
@@ -3344,6 +3407,21 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                             })
                           }
                         />
+                        {(Array.isArray(selectedScene.visual.templateData?.products)
+                          ? (selectedScene.visual.templateData.products as Array<{ name?: string; imageAssetId?: string }>)
+                          : []
+                        ).map((product, index) => (
+                          <HtmlStillSlotImagePicker
+                            key={`product-image-${index}`}
+                            projectId={draft.id}
+                            assets={draft.assets}
+                            excludeAssetIds={selectedScene.visual?.kind === 'html' && selectedScene.visual.assetId ? [selectedScene.visual.assetId] : []}
+                            value={typeof product.imageAssetId === 'string' ? product.imageAssetId : undefined}
+                            label={`${product.name?.trim() || `Product ${index + 1}`} image`}
+                            onSelect={(assetId) => setHtmlStillSlotImage(selectedScene.id, assetId, index)}
+                            onImport={(file) => void importHtmlStillSlotImage(selectedScene.id, file, index)}
+                          />
+                        ))}
                       </>
                     ) : null}
                     {selectedScene.visual.template === 'feature_callouts' ? (
@@ -3366,23 +3444,14 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                             })
                           }
                         />
-                        <Field
-                          label="Image asset id"
-                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : ''}
-                          onChange={(value) =>
-                            updateScene(selectedScene.id, (scene) => {
-                              if (!scene.visual || scene.visual.kind !== 'html') {
-                                return scene;
-                              }
-                              const next = { ...(scene.visual.templateData ?? {}) };
-                              if (!String(value).trim()) {
-                                delete next.imageAssetId;
-                              } else {
-                                next.imageAssetId = String(value).trim();
-                              }
-                              return { ...scene, visual: { ...scene.visual, templateData: next } };
-                            })
-                          }
+                        <HtmlStillSlotImagePicker
+                          projectId={draft.id}
+                          assets={draft.assets}
+                          excludeAssetIds={selectedScene.visual.assetId ? [selectedScene.visual.assetId] : []}
+                          value={typeof selectedScene.visual.templateData?.imageAssetId === 'string' ? selectedScene.visual.templateData.imageAssetId : undefined}
+                          label="Image"
+                          onSelect={(assetId) => setHtmlStillSlotImage(selectedScene.id, assetId)}
+                          onImport={(file) => void importHtmlStillSlotImage(selectedScene.id, file)}
                         />
                         <Field
                           label="Callouts (side | label | detail)"
@@ -3900,7 +3969,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
           <h2 className="text-xl font-semibold text-white">Generation Tasks</h2>
           <p className="mt-1 text-sm text-slate-400">Generate AI images and videos from scene specs. Video jobs run async and are resumed from persisted state.</p>
           <p className="mt-2 text-xs text-slate-300">
-            AI Image Generation: {providerStatus ? providerStatus.openaiConfigured ? 'OpenAI configured' : 'OpenAI not configured. Set OPENAI_API_KEY on the server.' : 'Checking configuration...'}
+            AI Image Generation: {providerStatus ? `Default provider ${providerStatus.defaultProvider}` : 'Checking configuration...'}
           </p>
           <div className="mt-4 grid gap-3">
             {generationTasks.length === 0 ? (

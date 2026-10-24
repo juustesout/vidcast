@@ -12,11 +12,13 @@ import type {
   CreateProjectResponse,
   CreateReferenceResponse,
   GenerateVideoResponse,
+  ImportAssetResponse,
   ImportStudioAssetsResponse,
   ManageProjectMusicResponse,
   MaterializeSceneIntentsResponse,
   PlanSceneIntentsResponse,
   RenderAnimationTemplateResponse,
+  SelectStockPhotoResponse,
   UpdateProjectResponse
 } from './types';
 
@@ -80,6 +82,13 @@ export const createReferenceInputSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(100)).max(50).optional()
 });
 
+export const importAssetInputSchema = z.object({
+  projectId: projectIdSchema,
+  filename: z.string().trim().min(1).max(200),
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+  dataBase64: z.string().min(1).max(40_000_000)
+});
+
 export const importStudioAssetsInputSchema = z.object({
   projectId: projectIdSchema,
   fileNames: z.array(z.string().trim().min(1).max(200)).min(1).max(20)
@@ -123,6 +132,26 @@ export const attachAnimationInputSchema = z.object({
     width: z.number().min(1).max(1920),
     height: z.number().min(1).max(1080)
   }).strict().optional()
+}).strict();
+
+const stockOpaqueIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((value) => !value.includes('/') && !value.includes('\\') && !value.includes('://'), {
+    message: 'Must be a server search or photo id, not a URL or file path.'
+  });
+
+export const selectStockPhotoInputSchema = z.object({
+  projectId: projectIdSchema,
+  sceneId: sceneIdSchema,
+  searchId: stockOpaqueIdSchema,
+  photoId: stockOpaqueIdSchema,
+  query: z.string().trim().min(1).max(500).optional(),
+  orientation: z.enum(['landscape', 'portrait', 'squarish']).optional(),
+  regenerate: z.boolean().optional(),
+  mode: z.enum(['mock', 'real']).optional()
 }).strict();
 
 export const AUTHORING_TOOL_DEFINITIONS = [
@@ -173,7 +202,7 @@ export const AUTHORING_TOOL_DEFINITIONS = [
   {
     name: 'approve_scene_intents',
     description:
-      'Approve drafted scene intents so they can be materialized via POST /api/projects/{id}/scene-intents/approve. Optionally pass explicit intentIds; when omitted, every not-yet-approved intent is approved. Already-approved intents are reported under skipped. An unknown intent id returns NOT_FOUND. This only changes intent status; it never creates scenes. Approval is required before materialize_scene_intents can turn drafts into scenes.',
+      'Request human approval of drafted scene intents via POST /api/projects/{id}/scene-intents/approve. A service token cannot approve; the call requires a browser user session and returns FORBIDDEN for MCP/service identity. Optionally pass explicit intentIds; when omitted, every not-yet-approved intent is approved. Already-approved intents are reported under skipped. An unknown intent id returns NOT_FOUND. This only changes intent status; it never creates scenes. Approval is required before materialize_scene_intents can turn drafts into scenes. Real/paid production also requires this human snapshot approval.',
     inputSchema: approveSceneIntentsInputSchema,
     annotations: {
       title: 'Approve Scene Intents',
@@ -199,6 +228,17 @@ export const AUTHORING_TOOL_DEFINITIONS = [
     inputSchema: createReferenceInputSchema,
     annotations: {
       title: 'Create Reference Image',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
+  },
+  {
+    name: 'import_asset',
+    description:
+      'Import a local PNG, JPEG, or WebP image into a project via POST /api/projects/{id}/assets (JSON, base64 content). Use this to add slot-eligible stills that later `update_project` calls can assign as templateData.imageAssetId or products[i].imageAssetId. Requires projectId, a bare filename with a matching extension (.png/.jpg/.jpeg/.webp), mimeType (image/png|image/jpeg|image/webp), and raw dataBase64 — not a data URL, file path, or remote URL. Declared MIME, filename extension, and actual image bytes must agree. Decoded payload is capped at 25 MB. The server generates assetId and localPath; provenance is imported. Returns assetId plus stored filename, localPath, mimeType, dimensions, and filesize. Invalid content, MIME mismatch, or oversized payloads return INVALID_ARGUMENT; a bad project id returns NOT_FOUND. This is not create_reference (video keyframes) and not import_studio_assets (operator studio-set files).',
+    inputSchema: importAssetInputSchema,
+    annotations: {
+      title: 'Import Project Asset',
       readOnlyHint: false,
       openWorldHint: false
     }
@@ -257,6 +297,17 @@ export const AUTHORING_TOOL_DEFINITIONS = [
       readOnlyHint: false,
       openWorldHint: false
     }
+  },
+  {
+    name: 'select_stock_photo',
+    description:
+      'Apply one stock candidate from a prior search_stock_photos call via POST /api/projects/{id}/scenes/{sceneId}/select-stock-image with action=choose. Requires projectId, sceneId, searchId, and photoId (the composite results[].id such as pexels:42). The server-side search cache is the only candidate authority: image URLs, download URLs, file paths, and client-supplied asset ids are rejected. The scene must already be visual.kind=stock_image. Download providers (pexels, pixabay, fake) may persist a local asset with provenance stock and set scene.visual.assetId; hotlink providers (unsplash) keep the CDN URL and attribution without creating an asset. This never writes HTML-slot imageAssetId. This is not search_stock_photos (discovery), not import_asset (local bytes), and not the production stock_select auto path. Mock mode is locked to the fake provider. Expired or unknown candidates return CONFLICT (stock.search.expired).',
+    inputSchema: selectStockPhotoInputSchema,
+    annotations: {
+      title: 'Select Stock Photo',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
   }
 ] as const;
 export interface AuthoringToolService {
@@ -267,11 +318,13 @@ export interface AuthoringToolService {
   approveSceneIntents(args: unknown): Promise<AuthoringMcpResult<ApproveSceneIntentsResponse>>;
   manageProjectMusic(args: unknown): Promise<AuthoringMcpResult<ManageProjectMusicResponse>>;
   createReference(args: unknown): Promise<AuthoringMcpResult<CreateReferenceResponse>>;
+  importAsset(args: unknown): Promise<AuthoringMcpResult<ImportAssetResponse>>;
   importStudioAssets(args: unknown): Promise<AuthoringMcpResult<ImportStudioAssetsResponse>>;
   generateVideo(args: unknown): Promise<AuthoringMcpResult<GenerateVideoResponse>>;
   cancelVideo(args: unknown): Promise<AuthoringMcpResult<CancelVideoResponse>>;
   renderAnimationTemplate(args: unknown): Promise<AuthoringMcpResult<RenderAnimationTemplateResponse>>;
   attachAnimation(args: unknown): Promise<AuthoringMcpResult<AttachAnimationResponse>>;
+  selectStockPhoto(args: unknown): Promise<AuthoringMcpResult<SelectStockPhotoResponse>>;
 }
 
 export function createAuthoringToolService(apiClient: AuthoringApiClient = new HttpAuthoringApiClient()): AuthoringToolService {
@@ -405,6 +458,31 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
       }
     },
 
+    async importAsset(args: unknown) {
+      try {
+        const parsed = importAssetInputSchema.parse(args ?? {});
+        const result = await apiClient.importAsset(parsed.projectId, {
+          filename: parsed.filename,
+          mimeType: parsed.mimeType,
+          dataBase64: parsed.dataBase64
+        });
+        const asset = result.asset;
+        return toSuccess({
+          projectId: parsed.projectId,
+          assetId: asset.id,
+          filename: asset.filename,
+          localPath: asset.localPath,
+          mimeType: asset.mimeType,
+          width: asset.width,
+          height: asset.height,
+          filesize: asset.filesize,
+          provenance: 'imported' as const
+        });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
     async importStudioAssets(args: unknown) {
       try {
         const parsed = importStudioAssetsInputSchema.parse(args ?? {});
@@ -493,6 +571,23 @@ export function createAuthoringToolService(apiClient: AuthoringApiClient = new H
           scale: parsed.scale,
           position: parsed.position,
           rect: parsed.rect
+        });
+        return toSuccess(result);
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async selectStockPhoto(args: unknown) {
+      try {
+        const parsed = selectStockPhotoInputSchema.parse(args ?? {});
+        const result = await apiClient.selectStockPhoto(parsed.projectId, parsed.sceneId, {
+          searchId: parsed.searchId,
+          photoId: parsed.photoId,
+          query: parsed.query,
+          orientation: parsed.orientation,
+          regenerate: parsed.regenerate,
+          mode: parsed.mode
         });
         return toSuccess(result);
       } catch (error) {
@@ -618,7 +713,7 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       inputSchema: AUTHORING_TOOL_DEFINITIONS[7].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[7].annotations
     },
-    async (args) => asToolResponse(await service.importStudioAssets(args))
+    async (args) => asToolResponse(await service.importAsset(args))
   );
 
   server.registerTool(
@@ -628,7 +723,7 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       inputSchema: AUTHORING_TOOL_DEFINITIONS[8].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[8].annotations
     },
-    async (args) => asToolResponse(await service.generateVideo(args))
+    async (args) => asToolResponse(await service.importStudioAssets(args))
   );
 
   server.registerTool(
@@ -638,7 +733,7 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       inputSchema: AUTHORING_TOOL_DEFINITIONS[9].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[9].annotations
     },
-    async (args) => asToolResponse(await service.cancelVideo(args))
+    async (args) => asToolResponse(await service.generateVideo(args))
   );
 
   server.registerTool(
@@ -648,7 +743,7 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       inputSchema: AUTHORING_TOOL_DEFINITIONS[10].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[10].annotations
     },
-    async (args) => asToolResponse(await service.renderAnimationTemplate(args))
+    async (args) => asToolResponse(await service.cancelVideo(args))
   );
 
   server.registerTool(
@@ -658,6 +753,26 @@ export function registerAuthoringTools(server: McpServer, service: AuthoringTool
       inputSchema: AUTHORING_TOOL_DEFINITIONS[11].inputSchema,
       annotations: AUTHORING_TOOL_DEFINITIONS[11].annotations
     },
+    async (args) => asToolResponse(await service.renderAnimationTemplate(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[12].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[12].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[12].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[12].annotations
+    },
     async (args) => asToolResponse(await service.attachAnimation(args))
+  );
+
+  server.registerTool(
+    AUTHORING_TOOL_DEFINITIONS[13].name,
+    {
+      description: AUTHORING_TOOL_DEFINITIONS[13].description,
+      inputSchema: AUTHORING_TOOL_DEFINITIONS[13].inputSchema,
+      annotations: AUTHORING_TOOL_DEFINITIONS[13].annotations
+    },
+    async (args) => asToolResponse(await service.selectStockPhoto(args))
   );
 }

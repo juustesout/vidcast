@@ -110,6 +110,24 @@ export interface CreateReferenceInput {
   tags?: string[];
 }
 
+export interface ImportAssetInput {
+  filename: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  dataBase64: string;
+}
+
+export interface ImportAssetResponse {
+  projectId: string;
+  assetId: string;
+  filename: string;
+  localPath?: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  filesize?: number;
+  provenance: 'imported';
+}
+
 export interface CreateReferenceResponse {
   projectId: string;
   referenceId: string;
@@ -210,6 +228,37 @@ export interface AttachAnimationResponse {
   rect: { x: number; y: number; width: number; height: number };
   startSeconds?: number;
   durationSeconds?: number;
+}
+
+export interface SelectStockPhotoInput {
+  searchId: string;
+  photoId: string;
+  query?: string;
+  orientation?: 'landscape' | 'portrait' | 'squarish';
+  regenerate?: boolean;
+  mode?: 'mock' | 'real';
+}
+
+export interface SelectStockPhotoAttribution {
+  provider: 'unsplash' | 'pexels' | 'pixabay' | 'fake';
+  providerName: string;
+  photoId: string;
+  photographerName: string;
+  photographerUrl?: string;
+  sourceUrl: string;
+  license: string;
+}
+
+export interface SelectStockPhotoResponse {
+  action: 'choose';
+  sceneId: string;
+  status: 'selected' | 'current';
+  provider: 'unsplash' | 'pexels' | 'pixabay' | 'fake';
+  photoId: string;
+  usagePolicy: 'download' | 'hotlink';
+  assetId?: string;
+  cached: boolean;
+  attribution: SelectStockPhotoAttribution;
 }
 
 

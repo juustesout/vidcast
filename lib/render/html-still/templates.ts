@@ -991,10 +991,11 @@ export function buildHeadlineCardMarkup(data: HtmlHeadlineTemplateData): { marku
 .subtitle{font-size:36px;line-height:1.35;opacity:0.92;max-width:28ch;overflow:hidden;}
 .source{font-size:24px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.78;}
 .rule{width:120px;height:8px;background:${accent};border-radius:999px;flex:0 0 auto;}
-.image{width:420px;flex:0 0 420px;border:4px solid ${accent};border-radius:28px;display:${hasImage ? 'flex' : 'none'};align-items:center;justify-content:center;background:rgba(0,0,0,0.18);}
+.image{width:420px;flex:0 0 420px;border:4px solid ${accent};border-radius:28px;display:${hasImage ? 'flex' : 'none'};align-items:center;justify-content:center;background:rgba(0,0,0,0.18);overflow:hidden;}
 .image span{font-size:22px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.7;}
+.image img{width:100%;height:100%;object-fit:cover;display:block;}
 `,
-    markup: `<div class="card"><div class="copy">${kicker ? `<div class="kicker">${kicker}</div>` : ''}<div class="title">${title}</div><div class="rule"></div>${subtitle ? `<div class="subtitle">${subtitle}</div>` : ''}${source ? `<div class="source">${source}</div>` : ''}</div>${hasImage ? '<div class="image"><span>Still</span></div>' : ''}</div>`
+    markup: `<div class="card"><div class="copy">${kicker ? `<div class="kicker">${kicker}</div>` : ''}<div class="title">${title}</div><div class="rule"></div>${subtitle ? `<div class="subtitle">${subtitle}</div>` : ''}${source ? `<div class="source">${source}</div>` : ''}</div>${hasImage && data.imageAssetId ? `<div class="image" data-html-still-image="${escapeHtml(data.imageAssetId)}"><span>Still</span></div>` : ''}</div>`
   };
 }
 
@@ -1286,10 +1287,11 @@ function formatPrice(value: number, currency?: string): string {
   return currency ? `${escapeHtml(currency)} ${amount}` : amount;
 }
 
-function productImageBlock(hasImage: boolean): string {
-  return hasImage
-    ? `<div class="image image-present"><span>Asset</span></div>`
-    : `<div class="image image-missing"><span>No image</span></div>`;
+function productImageBlock(hasImage: boolean, assetId?: string): string {
+  if (hasImage && assetId) {
+    return `<div class="image image-present" data-html-still-image="${escapeHtml(assetId)}"><span>Asset</span></div>`;
+  }
+  return `<div class="image image-missing"><span>No image</span></div>`;
 }
 
 export function buildProductCardMarkup(data: HtmlProductCardTemplateData): { markup: string; css: string; background: string } {
@@ -1310,11 +1312,12 @@ export function buildProductCardMarkup(data: HtmlProductCardTemplateData): { mar
 .features{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px;}
 .features li{display:flex;justify-content:space-between;gap:16px;font-size:28px;}
 .features span{opacity:0.76;}
-.image{width:460px;flex:0 0 460px;border:4px solid ${accent};border-radius:32px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);}
+.image{width:460px;flex:0 0 460px;border:4px solid ${accent};border-radius:32px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);overflow:hidden;}
 .image span{font-size:24px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.72;}
+.image img{width:100%;height:100%;object-fit:cover;display:block;}
 .image-missing{border-style:dashed;}
 `,
-    markup: `<div class="card"><div class="copy">${data.subtitle ? `<div class="subtitle">${escapeHtml(data.subtitle)}</div>` : ''}<div class="name">${escapeHtml(data.name)}</div><div class="rule"></div>${data.description ? `<div class="description">${escapeHtml(data.description)}</div>` : ''}${data.price !== undefined ? `<div class="price">${formatPrice(data.price, data.currency)}</div>` : ''}${features ? `<ul class="features">${features}</ul>` : ''}</div>${productImageBlock(Boolean(data.imageAssetId))}</div>`
+    markup: `<div class="card"><div class="copy">${data.subtitle ? `<div class="subtitle">${escapeHtml(data.subtitle)}</div>` : ''}<div class="name">${escapeHtml(data.name)}</div><div class="rule"></div>${data.description ? `<div class="description">${escapeHtml(data.description)}</div>` : ''}${data.price !== undefined ? `<div class="price">${formatPrice(data.price, data.currency)}</div>` : ''}${features ? `<ul class="features">${features}</ul>` : ''}</div>${productImageBlock(Boolean(data.imageAssetId), data.imageAssetId)}</div>`
   };
 }
 
@@ -1324,7 +1327,7 @@ export function buildProductComparisonMarkup(data: HtmlProductComparisonTemplate
   const textColor = hexOr(data.textColor, '#f8fafc');
   const columns = data.products.map((product) => {
     const features = product.features.map((feature) => `<li><span>${escapeHtml(feature.label)}</span><strong>${escapeHtml(feature.value)}</strong></li>`).join('');
-    return `<section class="item">${productImageBlock(Boolean(product.imageAssetId))}<h2>${escapeHtml(product.name)}</h2><ul>${features}</ul></section>`;
+    return `<section class="item">${productImageBlock(Boolean(product.imageAssetId), product.imageAssetId)}<h2>${escapeHtml(product.name)}</h2><ul>${features}</ul></section>`;
   }).join('');
   return {
     background,
@@ -1338,8 +1341,9 @@ export function buildProductComparisonMarkup(data: HtmlProductComparisonTemplate
 .item ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px;}
 .item li{display:flex;justify-content:space-between;gap:12px;font-size:24px;}
 .item span{opacity:0.72;}
-.image{height:160px;width:100%;border:3px solid ${accent};border-radius:20px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);}
+.image{height:160px;width:100%;border:3px solid ${accent};border-radius:20px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);overflow:hidden;}
 .image span{font-size:18px;letter-spacing:0.16em;text-transform:uppercase;opacity:0.7;}
+.image img{width:100%;height:100%;object-fit:cover;display:block;}
 .image-missing{border-style:dashed;}
 `,
     markup: `<div class="card"><div class="title">${escapeHtml(data.title)}</div><div class="rule"></div><div class="grid">${columns}</div></div>`
@@ -1354,8 +1358,6 @@ function buildFeatureCalloutsSvg(data: HtmlFeatureCalloutsTemplateData, accent: 
   const width = 1480;
   const height = 720;
   const centerX = width / 2;
-  const centerY = height / 2;
-  const image = `<rect x="${centerX - 210}" y="${centerY - 230}" width="420" height="460" rx="36" fill="none" stroke="${accent}" stroke-width="6"${data.imageAssetId ? '' : ' stroke-dasharray="18 14"'}/><text x="${centerX}" y="${centerY + 8}" text-anchor="middle" fill="${textColor}" font-size="28" font-family="DejaVu Sans,Arial,sans-serif">${data.imageAssetId ? 'Asset' : 'No image'}</text>`;
   const left = data.callouts.map((callout, index) => ({ callout, index })).filter((entry) => calloutSide(entry.callout, entry.index) === 'left');
   const right = data.callouts.map((callout, index) => ({ callout, index })).filter((entry) => calloutSide(entry.callout, entry.index) === 'right');
   const place = (entries: Array<{ callout: HtmlFeatureCallout; index: number }>, side: HtmlCalloutSide) => entries.map((entry, slot) => {
@@ -1366,7 +1368,7 @@ function buildFeatureCalloutsSvg(data: HtmlFeatureCalloutsTemplateData, accent: 
     const markerX = side === 'left' ? centerX - 170 : centerX + 170;
     return `<line x1="${x + (side === 'left' ? 320 : -320)}" y1="${y + 18}" x2="${lineX}" y2="${y + 18}" stroke="${accent}" stroke-width="4"/><circle cx="${markerX}" cy="${y + 18}" r="10" fill="${accent}"/><text x="${x}" y="${y}" text-anchor="${anchor}" fill="${accent}" font-size="26" font-weight="700" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(entry.callout.label)}</text><text x="${x}" y="${y + 40}" text-anchor="${anchor}" fill="${textColor}" font-size="24" font-family="DejaVu Sans,Arial,sans-serif">${escapeHtml(entry.callout.detail)}</text>`;
   }).join('');
-  return `<svg class="callouts" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${image}${place(left, 'left')}${place(right, 'right')}</svg>`;
+  return `<svg class="callouts" viewBox="0 0 ${width} ${height}" width="100%" height="100%">${place(left, 'left')}${place(right, 'right')}</svg>`;
 }
 
 export function buildFeatureCalloutsMarkup(data: HtmlFeatureCalloutsTemplateData): { markup: string; css: string; background: string } {
@@ -1379,10 +1381,14 @@ export function buildFeatureCalloutsMarkup(data: HtmlFeatureCalloutsTemplateData
 .card{box-sizing:border-box;width:100%;height:100%;padding:64px 80px 48px;display:flex;flex-direction:column;gap:20px;font-family:DejaVu Sans,Arial,sans-serif;color:${textColor};}
 .name{font-size:56px;font-weight:800;overflow:hidden;max-width:22ch;}
 .rule{width:96px;height:6px;background:${accent};border-radius:999px;}
-.plot{flex:1;min-height:0;}
+.plot{flex:1;min-height:0;position:relative;}
 .callouts{display:block;}
+.image{position:absolute;left:35.81%;top:18.06%;width:28.38%;height:63.89%;border:6px solid ${accent};border-radius:36px;display:flex;align-items:center;justify-content:center;overflow:hidden;box-sizing:border-box;background:rgba(0,0,0,0.18);}
+.image span{font-size:28px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.7;}
+.image img{width:100%;height:100%;object-fit:cover;display:block;}
+.image-missing{border-style:dashed;}
 `,
-    markup: `<div class="card"><div class="name">${escapeHtml(data.name)}</div><div class="rule"></div><div class="plot">${buildFeatureCalloutsSvg(data, accent, textColor)}</div></div>`
+    markup: `<div class="card"><div class="name">${escapeHtml(data.name)}</div><div class="rule"></div><div class="plot">${buildFeatureCalloutsSvg(data, accent, textColor)}${productImageBlock(Boolean(data.imageAssetId), data.imageAssetId)}</div></div>`
   };
 }
 

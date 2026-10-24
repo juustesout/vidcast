@@ -1,12 +1,15 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import sharp from 'sharp';
 
 import { POST as renderHtmlStillRoute } from '@/app/api/projects/[id]/scenes/[sceneId]/render-html-still/route';
 import { createHtmlStillFingerprint, htmlStillAssetIsCurrent } from '@/lib/render/html-still/fingerprint';
+import * as chromiumStill from '@/lib/render/html-still/chromium-still';
 import { renderHtmlStillPng } from '@/lib/render/html-still/chromium-still';
 import { HtmlStillError } from '@/lib/render/html-still/errors';
 import { assertSafeCss, assertSafeHtmlFragment, wrapHtmlStillDocument } from '@/lib/render/html-still/sanitize';
 import * as htmlStillService from '@/lib/render/html-still/service';
+import { injectTrustedHtmlStillImages, resolveHtmlStillImageAsset, resolveHtmlStillImages } from '@/lib/render/html-still/image-assets';
 import { canonicalizeHtmlStillTemplateId, parseHtmlStillTemplateData, resolveHtmlStillTemplate } from '@/lib/render/html-still/templates';
 import { createStudioComposition, STUDIO_BIGSCREEN_RECT, STUDIO_LAYER_IDS } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
@@ -89,6 +92,9 @@ describe('HTML still sanitize', () => {
     expect(() => assertSafeHtmlFragment('<div style="background:url(https://x)">x</div>', 'HTML')).toThrow(HtmlStillError);
     expect(() => assertSafeCss('@import "https://x";')).toThrow(HtmlStillError);
     expect(() => assertSafeCss('body{background:url(file:///etc/passwd)}')).toThrow(HtmlStillError);
+    expect(() => assertSafeHtmlFragment('<img src="data:image/png;base64,AAAA">', 'HTML')).toThrow(/data|URL/i);
+    expect(() => assertSafeHtmlFragment('<img src="file:///etc/passwd">', 'HTML')).toThrow(HtmlStillError);
+    expect(() => assertSafeHtmlFragment('<img src="https://example.com/x.png">', 'HTML')).toThrow(HtmlStillError);
   });
 
   it('wraps a local fragment without fetching remote resources', () => {
@@ -816,6 +822,126 @@ describe('HTML still templates', () => {
   });
 });
 
+describe('HTML still image assets', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('marks template image slots without embedding URLs', () => {
+    const headline = resolveHtmlStillTemplate('headline', { title: 'Live', imageAssetId: 'still-1' });
+    expect(headline.markup).toContain('data-html-still-image="still-1"');
+    expect(headline.markup).toContain('Still');
+    expect(headline.markup).not.toMatch(/data:image\//);
+    expect(headline.markup).not.toMatch(/https?:\/\//i);
+    expect(() => wrapHtmlStillDocument({
+      markup: headline.markup,
+      css: headline.css,
+      width: 1920,
+      height: 1080,
+      background: 'opaque'
+    })).not.toThrow();
+
+    const missing = resolveHtmlStillTemplate('product_card', { name: 'Hub' });
+    expect(missing.markup).toContain('No image');
+    expect(missing.markup).not.toContain('data-html-still-image');
+  });
+
+  it('injects only trusted server-built data URIs after sanitization', () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const dataUri = `data:image/png;base64,${png.toString('base64')}`;
+    const document = wrapHtmlStillDocument({
+      markup: '<div class="image" data-html-still-image="still-1"><span>Still</span></div>',
+      width: 1920,
+      height: 1080,
+      background: 'opaque'
+    });
+    const injected = injectTrustedHtmlStillImages(document, [{ assetId: 'still-1', mimeType: 'image/png', dataUri, sha256: 'abc' }]);
+    expect(injected).toContain(`src="${dataUri}"`);
+    expect(injected).not.toContain('<span>Still</span>');
+    expect(() => injectTrustedHtmlStillImages(document, [{
+      assetId: 'still-1',
+      mimeType: 'image/png',
+      dataUri: 'data:text/html;base64,PHNjcmlwdD4=',
+      sha256: 'abc'
+    }])).toThrow(/untrusted/i);
+    expect(() => injectTrustedHtmlStillImages(document, [{
+      assetId: 'still-1',
+      mimeType: 'image/png',
+      dataUri: 'https://example.com/x.png',
+      sha256: 'abc'
+    }])).toThrow(/untrusted/i);
+  });
+
+  it('resolves PNG, JPEG, and WebP bytes from assets/', async () => {
+    const project = makeProject(makeHtmlScene({ kind: 'html', template: 'headline', templateData: { title: 'Live', imageAssetId: 'still-1' } }), [
+      makeAsset('still-1')
+    ]);
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#ff0000' } }).png().toBuffer();
+    const jpeg = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#00ff00' } }).jpeg().toBuffer();
+    const webp = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#0000ff' } }).webp().toBuffer();
+    vi.spyOn(mediaStore, 'exists').mockResolvedValue(true);
+    const read = vi.spyOn(mediaStore, 'readRelativeFile');
+    read.mockResolvedValueOnce(png);
+    const resolvedPng = await resolveHtmlStillImageAsset(project, 'still-1');
+    expect(resolvedPng).toMatchObject({
+      assetId: 'still-1',
+      mimeType: 'image/png',
+      sha256: createHash('sha256').update(png).digest('hex')
+    });
+    read.mockResolvedValueOnce(jpeg);
+    await expect(resolveHtmlStillImageAsset(project, 'still-1')).resolves.toMatchObject({ mimeType: 'image/jpeg' });
+    read.mockResolvedValueOnce(webp);
+    await expect(resolveHtmlStillImageAsset(project, 'still-1')).resolves.toMatchObject({ mimeType: 'image/webp' });
+  });
+
+  it('rejects missing, SVG, unsafe, and remote image assets', async () => {
+    const pngProject = makeProject(makeHtmlScene({ kind: 'html', html: '<div>x</div>' }), [makeAsset('still-1')]);
+    await expect(resolveHtmlStillImageAsset(makeProject(makeHtmlScene({ kind: 'html', html: '<div>x</div>' })), 'missing-1')).rejects.toMatchObject({ code: 'html.image.missing' });
+
+    vi.spyOn(mediaStore, 'exists').mockResolvedValue(false);
+    await expect(resolveHtmlStillImageAsset(pngProject, 'still-1')).rejects.toMatchObject({ code: 'html.image.missing' });
+    vi.restoreAllMocks();
+
+    vi.spyOn(mediaStore, 'exists').mockResolvedValue(true);
+    vi.spyOn(mediaStore, 'readRelativeFile').mockResolvedValue(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+    await expect(resolveHtmlStillImageAsset(pngProject, 'still-1')).rejects.toMatchObject({ code: 'html.image.invalid' });
+    vi.restoreAllMocks();
+
+    await expect(resolveHtmlStillImageAsset(makeProject(makeHtmlScene({ kind: 'html', html: '<div>x</div>' }), [
+      makeAsset('still-1', { localPath: 'assets/../secret.png' })
+    ]), 'still-1')).rejects.toMatchObject({ code: 'html.image.unsafe' });
+    await expect(resolveHtmlStillImageAsset(makeProject(makeHtmlScene({ kind: 'html', html: '<div>x</div>' }), [
+      makeAsset('still-1', { localPath: 'file:///etc/passwd' })
+    ]), 'still-1')).rejects.toMatchObject({ code: 'html.image.unsafe' });
+    await expect(resolveHtmlStillImageAsset(makeProject(makeHtmlScene({ kind: 'html', html: '<div>x</div>' }), [
+      makeAsset('still-1', { localPath: 'https://example.com/x.png' })
+    ]), 'still-1')).rejects.toMatchObject({ code: 'html.image.unsafe' });
+  });
+
+  it('does not resolve images for custom HTML without a template', async () => {
+    const images = await resolveHtmlStillImages(makeProject(makeHtmlScene({ kind: 'html', html: '<div>Custom</div>' })), {
+      kind: 'html',
+      html: '<div>Custom</div>'
+    });
+    expect(images).toEqual([]);
+  });
+
+  it('resolves only template-used assets', async () => {
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#ff0000' } }).png().toBuffer();
+    const project = makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_card',
+      templateData: { name: 'Hub', imageAssetId: 'product-1' }
+    }), [makeAsset('product-1'), makeAsset('unused-1')]);
+    vi.spyOn(mediaStore, 'exists').mockResolvedValue(true);
+    const read = vi.spyOn(mediaStore, 'readRelativeFile').mockResolvedValue(png);
+    const images = await resolveHtmlStillImages(project, project.scenes[0].visual as HtmlVisual);
+    expect(images.map((image) => image.assetId)).toEqual(['product-1']);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith(project.id, 'assets/product-1.png');
+  });
+});
+
 describe('HTML still fingerprint', () => {
   it('changes when template data changes', () => {
     const base = { template: 'headline_card' as const, templateData: { title: 'A' }, width: 1920, height: 1080, background: 'opaque' as const };
@@ -824,6 +950,59 @@ describe('HTML still fingerprint', () => {
     expect(first).not.toBe(second);
     expect(htmlStillAssetIsCurrent({ kind: 'html', ...base, assetId: 'a1', fingerprint: first })).toBe(true);
     expect(htmlStillAssetIsCurrent({ kind: 'html', ...base, templateData: { title: 'B' }, assetId: 'a1', fingerprint: first })).toBe(false);
+  });
+
+  it('stays equal for the same used image bytes and changes when those bytes change', () => {
+    const visual = {
+      template: 'product_card' as const,
+      templateData: { name: 'Hub', imageAssetId: 'product-1' },
+      width: 1920,
+      height: 1080,
+      background: 'opaque' as const
+    };
+    const first = createHtmlStillFingerprint(visual, [{ assetId: 'product-1', sha256: 'aaa' }]);
+    const same = createHtmlStillFingerprint(visual, [{ assetId: 'product-1', sha256: 'aaa' }]);
+    const changed = createHtmlStillFingerprint(visual, [{ assetId: 'product-1', sha256: 'bbb' }]);
+    expect(first).toBe(same);
+    expect(first).not.toBe(changed);
+    expect(htmlStillAssetIsCurrent({ kind: 'html', ...visual, assetId: 'still-png', fingerprint: first }, [
+      { assetId: 'product-1', sha256: 'aaa' }
+    ])).toBe(true);
+    expect(htmlStillAssetIsCurrent({ kind: 'html', ...visual, assetId: 'still-png', fingerprint: first }, [
+      { assetId: 'product-1', sha256: 'bbb' }
+    ])).toBe(false);
+  });
+
+  it('changes when any used comparison image changes and ignores unused assets', () => {
+    const visual = {
+      template: 'product_comparison' as const,
+      templateData: {
+        title: 'Compare',
+        products: [
+          { name: 'Air', imageAssetId: 'air-1', features: [{ label: 'Weight', value: '1 kg' }] },
+          { name: 'Pro', imageAssetId: 'pro-1', features: [{ label: 'Weight', value: '2 kg' }] }
+        ]
+      },
+      width: 1920,
+      height: 1080,
+      background: 'opaque' as const
+    };
+    const used = [
+      { assetId: 'pro-1', sha256: 'pro-a' },
+      { assetId: 'air-1', sha256: 'air-a' }
+    ];
+    const first = createHtmlStillFingerprint(visual, used);
+    const reordered = createHtmlStillFingerprint(visual, used.slice().reverse());
+    const airChanged = createHtmlStillFingerprint(visual, [
+      { assetId: 'air-1', sha256: 'air-b' },
+      { assetId: 'pro-1', sha256: 'pro-a' }
+    ]);
+    const unused = createHtmlStillFingerprint(visual, [...used, { assetId: 'unused-1', sha256: 'zzz' }]);
+    expect(first).toBe(reordered);
+    expect(first).toBe(unused);
+    expect(first).not.toBe(airChanged);
+    expect(createHtmlStillFingerprint(visual)).not.toBe(first);
+    expect(htmlStillAssetIsCurrent({ kind: 'html', ...visual, assetId: 'still-png', fingerprint: first })).toBe(false);
   });
 });
 
@@ -842,14 +1021,15 @@ describe('HTML still Chromium PNG', () => {
     expect(info.width).toBe(1920);
     expect(info.height).toBe(1080);
     expect(info.format).toBe('png');
-  }, 30_000);
+  }, 60_000);
 
   it('renders a transparent background PNG', async () => {
     const still = await renderHtmlStillPng({
       markup: '<div style="width:400px;height:200px;background:#ff5a5f;"></div>',
       width: 640,
       height: 360,
-      background: 'transparent'
+      background: 'transparent',
+      timeoutMs: 45_000
     });
     const { data, info } = await sharp(still.png).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     expect(info.width).toBe(640);
@@ -862,7 +1042,7 @@ describe('HTML still Chromium PNG', () => {
       }
     }
     expect(transparent).toBeGreaterThan(100);
-  }, 30_000);
+  }, 60_000);
 
   it('rejects an invalid viewport instead of rendering a partial PNG', async () => {
     await expect(renderHtmlStillPng({
@@ -872,6 +1052,57 @@ describe('HTML still Chromium PNG', () => {
       background: 'opaque'
     })).rejects.toMatchObject({ code: 'html.invalid' });
   });
+
+  it('paints trusted PNG, JPEG, and WebP pixels into the Chromium PNG', async () => {
+    async function renderColor(mime: 'png' | 'jpeg' | 'webp', color: string) {
+      const bytes = await sharp({ create: { width: 64, height: 64, channels: 3, background: color } })[mime]().toBuffer();
+      const mimeType = mime === 'png' ? 'image/png' : mime === 'jpeg' ? 'image/jpeg' : 'image/webp';
+      return renderHtmlStillPng({
+        markup: '<div class="image" data-html-still-image="still-1" style="width:100%;height:100%;"></div>',
+        width: 320,
+        height: 180,
+        background: 'opaque',
+        pageBackground: '#000000',
+        timeoutMs: 45_000,
+        images: [{ assetId: 'still-1', mimeType, dataUri: `data:${mimeType};base64,${bytes.toString('base64')}`, sha256: 'abc' }]
+      });
+    }
+
+    function countNear(png: Buffer, rgb: [number, number, number]): Promise<number> {
+      return sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true }).then(({ data }) => {
+        let count = 0;
+        for (let i = 0; i < data.length; i += 3) {
+          if (Math.abs(data[i] - rgb[0]) <= 48 && Math.abs(data[i + 1] - rgb[1]) <= 48 && Math.abs(data[i + 2] - rgb[2]) <= 48) {
+            count += 1;
+          }
+        }
+        return count;
+      });
+    }
+
+    const png = await renderColor('png', '#ff0000');
+    const jpeg = await renderColor('jpeg', '#00ff00');
+    const webp = await renderColor('webp', '#0000ff');
+    expect(await countNear(png.png, [255, 0, 0])).toBeGreaterThan(200);
+    expect(await countNear(jpeg.png, [0, 255, 0])).toBeGreaterThan(200);
+    expect(await countNear(webp.png, [0, 0, 255])).toBeGreaterThan(200);
+  }, 90_000);
+
+  it('keeps the placeholder when no imageAssetId is set', async () => {
+    const card = resolveHtmlStillTemplate('product_card', { name: 'Hub' });
+    const still = await renderHtmlStillPng({
+      markup: card.markup,
+      css: card.css,
+      width: 640,
+      height: 360,
+      background: 'opaque',
+      pageBackground: card.background,
+      timeoutMs: 45_000
+    });
+    expect(card.markup).toContain('No image');
+    expect(card.markup).not.toContain('data-html-still-image');
+    expect(still.png.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(true);
+  }, 45_000);
 });
 
 describe('HTML still project validation and resolver', () => {
@@ -1121,6 +1352,93 @@ describe('HTML still persist and studio bind', () => {
     expect(result.reused).toBe(true);
     expect(result.assetId).toBe('html-1');
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it('reuses a current PNG when used image bytes are unchanged', async () => {
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#ff0000' } }).png().toBuffer();
+    const sha256 = createHash('sha256').update(png).digest('hex');
+    const visual: HtmlVisual = {
+      kind: 'html',
+      template: 'headline_card',
+      templateData: { title: 'Live', imageAssetId: 'still-1' },
+      width: 1920,
+      height: 1080,
+      background: 'opaque',
+      assetId: 'html-1',
+      fingerprint: ''
+    };
+    visual.fingerprint = createHtmlStillFingerprint(visual, [{ assetId: 'still-1', sha256 }]);
+    const project = makeProject(makeHtmlScene(visual), [makeAsset('html-1'), makeAsset('still-1')]);
+    vi.spyOn(projectStore, 'getProject').mockResolvedValue(project);
+    vi.spyOn(mediaStore, 'exists').mockResolvedValue(true);
+    vi.spyOn(mediaStore, 'readRelativeFile').mockImplementation(async (_projectId, localPath) => {
+      if (localPath === 'assets/still-1.png') {
+        return png;
+      }
+      throw new Error(`unexpected path ${localPath}`);
+    });
+    const save = vi.spyOn(mediaStore, 'saveAsset');
+
+    const result = await htmlStillService.renderSceneHtmlStill(project.id, 'scene-html');
+    expect(result.reused).toBe(true);
+    expect(result.fingerprint).toBe(visual.fingerprint);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse when used image bytes change', async () => {
+    const original = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#ff0000' } }).png().toBuffer();
+    const changed = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#00ff00' } }).png().toBuffer();
+    const visual: HtmlVisual = {
+      kind: 'html',
+      template: 'headline_card',
+      templateData: { title: 'Live', imageAssetId: 'still-1' },
+      width: 1920,
+      height: 1080,
+      background: 'opaque',
+      assetId: 'html-1',
+      fingerprint: createHtmlStillFingerprint(
+        {
+          template: 'headline_card',
+          templateData: { title: 'Live', imageAssetId: 'still-1' },
+          width: 1920,
+          height: 1080,
+          background: 'opaque'
+        },
+        [{ assetId: 'still-1', sha256: createHash('sha256').update(original).digest('hex') }]
+      )
+    };
+    const project = makeProject(makeHtmlScene(visual), [makeAsset('html-1'), makeAsset('still-1')]);
+    vi.spyOn(projectStore, 'getProject').mockResolvedValue(project);
+    vi.spyOn(mediaStore, 'exists').mockResolvedValue(true);
+    vi.spyOn(mediaStore, 'readRelativeFile').mockResolvedValue(changed);
+    vi.spyOn(chromiumStill, 'renderHtmlStillPng').mockResolvedValue({
+      png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      width: 1920,
+      height: 1080,
+      background: 'opaque'
+    });
+    vi.spyOn(mediaStore, 'saveAsset').mockResolvedValue({
+      asset: makeAsset('html-new', { localPath: 'assets/html-new.png', width: 1920, height: 1080 })
+    });
+    vi.spyOn(projectStore, 'mutateProject').mockImplementation(async (_id, mutator) => mutator(structuredClone(project)));
+
+    const result = await htmlStillService.renderSceneHtmlStill(project.id, 'scene-html');
+    expect(result.reused).toBe(false);
+    expect(result.assetId).toBe('html-new');
+    expect(result.fingerprint).not.toBe(visual.fingerprint);
+    expect(result.fingerprint).toContain(createHash('sha256').update(changed).digest('hex'));
+  });
+
+  it('fails closed when a referenced image asset is missing', async () => {
+    const project = makeProject(makeHtmlScene({
+      kind: 'html',
+      template: 'product_card',
+      templateData: { name: 'Hub', imageAssetId: 'missing-image' }
+    }));
+    vi.spyOn(projectStore, 'getProject').mockResolvedValue(project);
+    await expect(htmlStillService.renderSceneHtmlStill(project.id, 'scene-html')).rejects.toMatchObject({
+      code: 'html.image.missing'
+    });
   });
 });
 

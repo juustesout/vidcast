@@ -4,18 +4,41 @@ import path from 'node:path';
 import { resolveRenderPlan } from './scene-resolver';
 import { validateRenderPlan } from './render-plan-validator';
 import { createSceneRenderPaths } from './render-artifacts';
-import { LocalFFmpegRenderer, type Renderer } from './renderer';
+import { LocalFFmpegRenderer, type Renderer, SceneRenderError } from './renderer';
 import { projectStore } from '@/lib/storage/project-store';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
-import type { SceneRenderResult } from '@/lib/types/render';
+import type { Project, SceneRenderResult } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
-import { SceneRenderError } from './renderer';
 import { createSceneRenderFingerprint } from './render-fingerprint';
+import { HtmlStillError } from './html-still/errors';
+import { HtmlStillRefreshError, refreshHtmlStillIfStale } from './html-still/freshness';
 
 export interface SceneRenderServiceResult {
   projectId: string;
   sceneId: string;
   render: SceneRenderResult;
+}
+
+function htmlStillRenderError(error: HtmlStillError | HtmlStillRefreshError): SceneRenderError {
+  if (error instanceof HtmlStillError && (error.code === 'html.image.missing' || error.code === 'html.project.notFound' || error.code === 'html.scene.notFound')) {
+    return new SceneRenderError(error.message, 'MISSING_ASSET', error.code);
+  }
+  if (error instanceof HtmlStillRefreshError && error.code === 'html.project.notFound') {
+    return new SceneRenderError(error.message, 'INVALID_PLAN', error.code);
+  }
+  const details = error instanceof HtmlStillError ? error.code : error.code;
+  return new SceneRenderError(error.message, 'INVALID_PLAN', details);
+}
+
+async function ensureHtmlStillCurrent(project: Project, sceneId: string): Promise<Project> {
+  try {
+    return await refreshHtmlStillIfStale(project, sceneId);
+  } catch (error) {
+    if (error instanceof HtmlStillError || error instanceof HtmlStillRefreshError) {
+      throw htmlStillRenderError(error);
+    }
+    throw error;
+  }
 }
 
 export class SceneRenderService {
@@ -26,10 +49,12 @@ export class SceneRenderService {
   }
 
   async renderScene(projectId: string, sceneId: string): Promise<SceneRenderServiceResult> {
-    const project = await projectStore.getProject(projectId);
-    if (!project) {
+    const loaded = await projectStore.getProject(projectId);
+    if (!loaded) {
       throw new SceneRenderError(`Project ${projectId} not found.`, 'INVALID_PLAN');
     }
+
+    const project = await ensureHtmlStillCurrent(loaded, sceneId);
 
     const resolved = resolveRenderPlan(project);
     const scenePlan = resolved.scenes.find((entry) => entry.sceneId === sceneId);

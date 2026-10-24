@@ -13,9 +13,10 @@ import type {
   GetValidationReportResponse,
   ListAnimationTemplatesResponse,
   ListProjectsResponse,
-  ReadOnlyMcpResult
+  ReadOnlyMcpResult,
+  SearchStockPhotosResponse
 } from './types';
-import { toCompositionInfo, toProjectSummary } from './types';
+import { toCompositionInfo, toMcpProject, toProjectSummary } from './types';
 
 const projectIdSchema = z.string().trim().min(1).max(200);
 const sceneIdSchema = z.string().trim().min(1).max(200);
@@ -43,6 +44,14 @@ export const getGenerationJobInputSchema = z.object({
   attemptId: z.string().trim().min(1).max(200)
 });
 export const listAnimationTemplatesInputSchema = z.object({}).strict();
+export const searchStockPhotosInputSchema = z.object({
+  projectId: projectIdSchema,
+  query: z.string().trim().min(1).max(500),
+  orientation: z.enum(['landscape', 'portrait', 'squarish']).optional(),
+  providers: z.array(z.enum(['unsplash', 'pexels', 'pixabay', 'fake'])).min(1).max(4).optional(),
+  limit: z.number().int().min(1).max(24).optional(),
+  mode: z.enum(['mock', 'real']).optional()
+});
 
 export const READ_ONLY_TOOL_DEFINITIONS = [
   {
@@ -56,8 +65,9 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
     }
   },
   {
-    name: 'get_project',
-    description: 'Get one project by projectId.',
+     name: 'get_project',
+     description:
+       'Get one project by projectId. Compositions are projected without outputPath; use downloadPath or get_project_compositions to fetch the MP4.',
     inputSchema: getProjectInputSchema,
     annotations: {
       title: 'Get Project',
@@ -130,6 +140,17 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
       readOnlyHint: true,
       openWorldHint: false
     }
+  },
+  {
+    name: 'search_stock_photos',
+    description:
+      'Search stock photo candidates via GET /api/projects/{id}/stock/search. Returns searchId, sanitized results (provider, photoId, dimensions, preview/image/source URLs, photographer, license, usagePolicy), diagnostics, and quota. This is discovery only: it never selects a photo, never downloads bytes, never writes a scene, and never assigns HTML-slot imageAssetId. Stock CDN URLs are not slot-eligible; import local PNG/JPEG/WebP with import_asset, then assign the returned assetId. Production stock scenes still use the stock_select action. Mock mode is locked to the fake provider. Real mode requires a current human approval of the project snapshot and may consume provider quota. Searching refreshes the server-side candidate cache, so it is not a pure read.',
+    inputSchema: searchStockPhotosInputSchema,
+    annotations: {
+      title: 'Search Stock Photos',
+      readOnlyHint: false,
+      openWorldHint: false
+    }
   }
 ] as const;
 
@@ -142,6 +163,7 @@ export interface ReadOnlyToolService {
   getProjectCompositions(args: unknown): Promise<ReadOnlyMcpResult<GetProjectCompositionsResponse>>;
   getGenerationJob(args: unknown): Promise<ReadOnlyMcpResult<GetGenerationJobResponse>>;
   listAnimationTemplates(args: unknown): Promise<ReadOnlyMcpResult<ListAnimationTemplatesResponse>>;
+  searchStockPhotos(args: unknown): Promise<ReadOnlyMcpResult<SearchStockPhotosResponse>>;
 }
 
 export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppApiClient()): ReadOnlyToolService {
@@ -162,7 +184,7 @@ export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppA
       try {
         const parsed = getProjectInputSchema.parse(args ?? {});
         const project = await apiClient.getProject(parsed.projectId);
-        return toSuccess({ project });
+        return toSuccess({ project: toMcpProject(project) });
       } catch (error) {
         return toFailure(fromValidationError(error));
       }
@@ -258,6 +280,22 @@ export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppA
         listAnimationTemplatesInputSchema.parse(args ?? {});
         const templates = await apiClient.listAnimationTemplates();
         return toSuccess({ templates });
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async searchStockPhotos(args: unknown) {
+      try {
+        const parsed = searchStockPhotosInputSchema.parse(args ?? {});
+        const result = await apiClient.searchStockPhotos(parsed.projectId, {
+          query: parsed.query,
+          orientation: parsed.orientation,
+          providers: parsed.providers,
+          limit: parsed.limit,
+          mode: parsed.mode
+        });
+        return toSuccess(result);
       } catch (error) {
         return toFailure(fromValidationError(error));
       }
@@ -382,5 +420,15 @@ export function registerReadOnlyTools(server: McpServer, service: ReadOnlyToolSe
       annotations: READ_ONLY_TOOL_DEFINITIONS[7].annotations
     },
     async (args) => asToolResponse(await service.listAnimationTemplates(args))
+  );
+
+  server.registerTool(
+    'search_stock_photos',
+    {
+      description: READ_ONLY_TOOL_DEFINITIONS[8].description,
+      inputSchema: READ_ONLY_TOOL_DEFINITIONS[8].inputSchema,
+      annotations: READ_ONLY_TOOL_DEFINITIONS[8].annotations
+    },
+    async (args) => asToolResponse(await service.searchStockPhotos(args))
   );
 }
