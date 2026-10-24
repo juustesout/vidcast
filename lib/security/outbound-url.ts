@@ -1,10 +1,18 @@
-import { isIP } from 'node:net';
-
 export class OutboundUrlError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'OutboundUrlError';
   }
+}
+
+const IPV4_PATTERN = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+function isIpHostname(hostname: string): boolean {
+  const host = hostname.replace(/\.$/, '');
+  if (IPV4_PATTERN.test(host)) {
+    return true;
+  }
+  return host.includes(':');
 }
 
 export const STOCK_HOTLINK_ALLOWED_HOSTS = ['images.unsplash.com'] as const;
@@ -46,7 +54,7 @@ export function assertAllowedHttpsUrl(raw: string, allowedHosts: readonly string
     throw new OutboundUrlError('Outbound URL host is not allowed.');
   }
 
-  if (isIP(hostname)) {
+  if (isIpHostname(hostname)) {
     throw new OutboundUrlError('Outbound URL host must not be an IP address.');
   }
 

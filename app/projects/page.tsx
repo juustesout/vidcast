@@ -1,5 +1,4 @@
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
 
 import { ClaimProjectForm } from '@/components/project/claim-project-form';
 import { listProjectsForIdentity } from '@/lib/security/page-access';
@@ -7,11 +6,7 @@ import { getServerIdentity } from '@/lib/security/server-identity';
 
 export default async function ProjectsPage() {
   const identity = await getServerIdentity();
-  if (!identity) {
-    redirect('/');
-  }
-
-  const projects = await listProjectsForIdentity(identity);
+  const projects = identity ? await listProjectsForIdentity(identity) : [];
 
   return (
     <main className="min-h-screen px-6 py-8 text-slate-100 lg:px-10">
@@ -31,23 +26,33 @@ export default async function ProjectsPage() {
         <ClaimProjectForm />
 
         <div className="grid gap-4">
-          {projects.map((project) => (
-            <Link
-              key={project.id}
-              href={`/projects/${project.id}`}
-              className="studio-panel rounded-[24px] p-5 transition hover:border-slate-400/60 hover:bg-slate-900/80"
-            >
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <h2 className="text-xl font-semibold text-white">{project.title}</h2>
-                  <p className="mt-1 max-w-3xl text-sm text-slate-400">{project.description}</p>
+          {!identity ? (
+            <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-950/30 p-8 text-center text-slate-400">
+              Establishing a local session. Project data appears once your identity is ready.
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-950/30 p-8 text-center text-slate-400">
+              No projects yet. Claim a project above or create one from home.
+            </div>
+          ) : (
+            projects.map((project) => (
+              <Link
+                key={project.id}
+                href={`/projects/${project.id}`}
+                className="studio-panel rounded-[24px] p-5 transition hover:border-slate-400/60 hover:bg-slate-900/80"
+              >
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <h2 className="text-xl font-semibold text-white">{project.title}</h2>
+                    <p className="mt-1 max-w-3xl text-sm text-slate-400">{project.description}</p>
+                  </div>
+                  <div className="text-sm text-slate-300">
+                    {project.sceneCount} scenes · {project.assetCount} assets · {project.referenceCount} references
+                  </div>
                 </div>
-                <div className="text-sm text-slate-300">
-                  {project.sceneCount} scenes · {project.assetCount} assets · {project.referenceCount} references
-                </div>
-              </div>
-            </Link>
-          ))}
+              </Link>
+            ))
+          )}
         </div>
       </section>
     </main>

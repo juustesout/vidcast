@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 import { createProjectAction } from '@/app/actions';
+import { ClaimProjectForm } from '@/components/project/claim-project-form';
 import { listProjectsForIdentity } from '@/lib/security/page-access';
 import { getServerIdentity } from '@/lib/security/server-identity';
 import { formatSeconds } from '@/lib/utils/duration';
@@ -30,6 +31,8 @@ export default async function HomePage() {
             </div>
           </div>
         </div>
+
+        <ClaimProjectForm />
 
         <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
           <section className="studio-panel rounded-[28px] p-6 shadow-panel">

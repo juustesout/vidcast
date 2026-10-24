@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -36,11 +39,20 @@ describe('assertAllowedHttpsUrl', () => {
     'https://192.168.1.20/secret',
     'https://169.254.1.1/secret',
     'https://[::1]/secret',
+    'https://2001:db8::1/secret',
+    'https://8.8.8.8/secret',
     'file:///etc/passwd',
     'ftp://images.unsplash.com/abc'
   ])('rejects %s', (url) => {
     expect(() => assertAllowedHttpsUrl(url, STOCK_HOTLINK_ALLOWED_HOSTS)).toThrow(OutboundUrlError);
     expect(isAllowedHttpsUrl(url, STOCK_HOTLINK_ALLOWED_HOSTS)).toBe(false);
+  });
+
+  it('does not import Node builtins, so client pages can compile', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'lib/security/outbound-url.ts'), 'utf8');
+    expect(source).not.toContain("from 'node:");
+    expect(source).not.toContain('from "node:');
+    expect(source).not.toContain("from 'net'");
   });
 
   it('rejects an unknown hostname even over HTTPS', () => {

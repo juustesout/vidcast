@@ -467,7 +467,7 @@ Still no paid providers. Unsplash is forbidden here.
 This is the second half of the test. Hermes cannot click the browser.
 
 1. Operator claims the project with `projectId` + `claimToken` in the claim
-   form. Never put the token in a query string.
+   form on `/` or `/projects`. Never put the token in a query string.
 2. Open the project in the Web UI. Confirm:
    - composition preview plays the MP4
    - scene inspector shows **Presenter layout** (`full_canvas` / `pip`)
