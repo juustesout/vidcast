@@ -1,4 +1,5 @@
 import { mediaMetadataReader } from '@/lib/media/metadata-reader';
+import { logProviderError, publicMessageForProviderCode } from '@/lib/security/safe-error';
 
 import { MusicProviderError, type MusicGenerationRequest, type MusicGenerationResult, type MusicProvider } from './provider';
 
@@ -63,44 +64,24 @@ function resolveModel(value?: string): string {
   throw new MusicProviderError(`Unsupported music model: ${value}.`, 400, 'INVALID_REQUEST');
 }
 
-// ElevenLabs returns validation problems as `detail: [{ msg }]`, while other
-// errors use `detail: string` or `detail.message`. Normalize all shapes.
-function parseErrorMessage(payload: unknown): string {
-  if (payload && typeof payload === 'object') {
-    const maybe = payload as {
-      detail?: string | { message?: string } | Array<{ msg?: string }>;
-      error?: { message?: string };
-    };
-    if (typeof maybe.detail === 'string' && maybe.detail) {
-      return maybe.detail;
-    }
-    if (Array.isArray(maybe.detail)) {
-      const messages = maybe.detail.map((entry) => entry?.msg).filter((msg): msg is string => Boolean(msg));
-      if (messages.length > 0) {
-        return messages.join('; ');
-      }
-    }
-    if (maybe.detail && typeof maybe.detail === 'object' && !Array.isArray(maybe.detail) && maybe.detail.message) {
-      return maybe.detail.message;
-    }
-    if (maybe.error?.message) {
-      return maybe.error.message;
-    }
-  }
-  return 'ElevenLabs music generation request failed.';
-}
-
 function mapHttpError(status: number, payload: unknown): MusicProviderError {
+  let code: MusicProviderError['code'];
+  let mappedStatus: number;
   if (status === 401 || status === 403) {
-    return new MusicProviderError(parseErrorMessage(payload), 502, 'PROVIDER_AUTH');
+    code = 'PROVIDER_AUTH';
+    mappedStatus = 502;
+  } else if (status === 429) {
+    code = 'PROVIDER_RATE_LIMIT';
+    mappedStatus = 429;
+  } else if (status >= 400 && status < 500) {
+    code = 'PROVIDER_REJECTED';
+    mappedStatus = 422;
+  } else {
+    code = 'PROVIDER_FAILED';
+    mappedStatus = 502;
   }
-  if (status === 429) {
-    return new MusicProviderError(parseErrorMessage(payload), 429, 'PROVIDER_RATE_LIMIT');
-  }
-  if (status >= 400 && status < 500) {
-    return new MusicProviderError(parseErrorMessage(payload), 422, 'PROVIDER_REJECTED');
-  }
-  return new MusicProviderError(parseErrorMessage(payload), 502, 'PROVIDER_FAILED');
+  logProviderError('elevenlabs-music', { code, status, body: payload });
+  return new MusicProviderError(publicMessageForProviderCode(code), mappedStatus, code);
 }
 
 function mapTransportError(error: unknown): MusicProviderError {

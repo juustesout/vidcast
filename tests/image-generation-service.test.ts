@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 
 import { FakeImageGenerationProvider } from '@/lib/ai/image-generation/fake-provider';
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
@@ -7,6 +9,7 @@ import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spe
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
+import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 function createProject(): Project {
   const now = new Date().toISOString();
@@ -90,7 +93,7 @@ function createProject(): Project {
   };
 }
 
-function createInMemoryDependencies(project: Project, providerBehavior?: { throwError?: boolean }) {
+function createInMemoryDependencies(project: Project, providerBehavior?: { throwError?: boolean; generateGate?: () => Promise<void> }) {
   const state = { project: structuredClone(project) as Project };
   const fakeProvider = new FakeImageGenerationProvider();
 
@@ -157,6 +160,9 @@ function createInMemoryDependencies(project: Project, providerBehavior?: { throw
           providerId: 'fake',
           async generateImage() {
             generateImageCalls += 1;
+            if (providerBehavior.generateGate) {
+              await providerBehavior.generateGate();
+            }
             throw new Error('provider failed');
           }
         };
@@ -165,13 +171,32 @@ function createInMemoryDependencies(project: Project, providerBehavior?: { throw
         providerId: fakeProvider.providerId,
         async generateImage(request: Parameters<FakeImageGenerationProvider['generateImage']>[0]) {
           generateImageCalls += 1;
+          if (providerBehavior?.generateGate) {
+            await providerBehavior.generateGate();
+          }
           return fakeProvider.generateImage(request);
         }
       };
     }
   };
 
-  return { state, store, media, registry, generateImageCalls: () => generateImageCalls };
+  return {
+    state,
+    store,
+    media,
+    registry,
+    submitLocks: new InMemoryExclusiveLock(),
+    generateImageCalls: () => generateImageCalls
+  };
+}
+
+function imageServiceDeps(deps: ReturnType<typeof createInMemoryDependencies>) {
+  return {
+    store: deps.store,
+    media: deps.media,
+    registry: deps.registry as never,
+    submitLocks: deps.submitLocks
+  };
 }
 
 afterEach(() => {
@@ -198,11 +223,7 @@ describe('image generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
-    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(deps));
 
     expect(result.status).toBe('generated');
     expect(result.assetId).toBeDefined();
@@ -226,11 +247,7 @@ describe('image generation service', () => {
     deps.media.exists = async () => false;
 
     await expect(
-      generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(deps))
     ).rejects.toThrow(SceneImageGenerationError);
   });
 
@@ -239,18 +256,15 @@ describe('image generation service', () => {
     const deps = createInMemoryDependencies(project, { throwError: true });
 
     await expect(
-      generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(deps))
     ).rejects.toThrow(SceneImageGenerationError);
 
     const scene = deps.state.project.scenes[0];
     if (scene.visual && scene.visual.kind === 'generated_image') {
       expect(scene.visual.assetId).toBe('asset-old');
       expect(scene.visual.generation.status).toBe('failed');
-      expect(scene.visual.generation.errorMessage).toBe('provider failed');
+      expect(scene.visual.generation.errorMessage).toBe('Image generation failed.');
+      expect(scene.visual.generation.errorMessage).not.toContain('provider failed');
       expect(scene.visual.generation.errorCode).toBe('INTERNAL');
     }
 
@@ -295,11 +309,7 @@ describe('image generation service', () => {
     const deps = createInMemoryDependencies(project);
 
     await expect(
-      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps))
     ).rejects.toMatchObject({
       status: 403,
       code: 'generation.approval.required'
@@ -309,16 +319,63 @@ describe('image generation service', () => {
   it('allows real image generation after a matching human approval', async () => {
     vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    enablePaidSpendCap();
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
     const project = withHumanApproval(createProject());
     const deps = createInMemoryDependencies(project);
 
-    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps));
 
     expect(result.status).toBe('generated');
+  });
+
+  it('blocks a service token from real image generation even with human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneImage(
+        project.id,
+        'scene-1',
+        {
+          regenerate: true,
+          mode: 'real',
+          provider: 'openai',
+          identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+        },
+        imageServiceDeps(deps)
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'generation.policy.denied'
+    });
+    expect(deps.generateImageCalls()).toBe(0);
+  });
+
+  it('allows a user identity to submit real image generation after approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    enablePaidSpendCap();
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    const result = await generateSceneImage(
+      project.id,
+      'scene-1',
+      {
+        regenerate: true,
+        mode: 'real',
+        provider: 'openai',
+        identity: { kind: 'user', subject: 'user_test', authType: 'session' }
+      },
+      imageServiceDeps(deps)
+    );
+
+    expect(result.status).toBe('generated');
+    expect(deps.generateImageCalls()).toBe(1);
   });
 
   it('blocks a real image submit when the host cap is exhausted', async () => {
@@ -330,11 +387,7 @@ describe('image generation service', () => {
     const deps = createInMemoryDependencies(project);
 
     await expect(
-      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps))
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.exceeded'
@@ -350,11 +403,7 @@ describe('image generation service', () => {
     const project = withHumanApproval(createProject());
     const deps = createInMemoryDependencies(project);
 
-    const first = await generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const first = await generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps));
     expect(first.status).toBe('generated');
     expect(deps.generateImageCalls()).toBe(1);
 
@@ -363,11 +412,7 @@ describe('image generation service', () => {
     const secondDeps = createInMemoryDependencies(secondProject);
 
     await expect(
-      generateSceneImage(secondProject.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
-        store: secondDeps.store,
-        media: secondDeps.media,
-        registry: secondDeps.registry as never
-      })
+      generateSceneImage(secondProject.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(secondDeps))
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.exceeded'
@@ -388,13 +433,25 @@ describe('image generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
-    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(deps));
     expect(result.status).toBe('generated');
     expect(reserveCalls).toBe(0);
+  });
+
+  it('fails closed when the spend cap is disabled', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(deps.generateImageCalls()).toBe(0);
   });
 
   it('fails closed when the spend cap is enabled without limit env', async () => {
@@ -406,15 +463,97 @@ describe('image generation service', () => {
     const deps = createInMemoryDependencies(project);
 
     await expect(
-      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps))
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.invalid'
     });
     expect(deps.generateImageCalls()).toBe(0);
+  });
+
+  describe('concurrent scene submit reservation', () => {
+    it('lets only one of two overlapping submits reach the provider', async () => {
+      const project = createProject();
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredGenerate: () => void = () => {};
+      const generateEntered = new Promise<void>((resolve) => {
+        enteredGenerate = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        generateGate: async () => {
+          enteredGenerate();
+          await gate;
+        }
+      });
+
+      const first = generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(deps));
+      await generateEntered;
+
+      await expect(
+        generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(deps))
+      ).rejects.toMatchObject({ code: 'generation.scene.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.generateImageCalls()).toBe(1);
+    });
+
+    it('lets only one of two independent file locks reach the provider', async () => {
+      const project = createProject();
+      const dir = path.join(os.tmpdir(), `image-submit-lock-${process.pid}-${Date.now()}`);
+      const resolvePath = (key: string) => path.join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, '_')}.lock`);
+      const holder = new FileExclusiveLock({ resolvePath });
+      const challenger = new FileExclusiveLock({ resolvePath });
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredGenerate: () => void = () => {};
+      const generateEntered = new Promise<void>((resolve) => {
+        enteredGenerate = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        generateGate: async () => {
+          enteredGenerate();
+          await gate;
+        }
+      });
+
+      const first = generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
+        ...imageServiceDeps(deps),
+        submitLocks: holder
+      });
+      await generateEntered;
+
+      await expect(
+        generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
+          ...imageServiceDeps(deps),
+          submitLocks: challenger
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.generateImageCalls()).toBe(1);
+    });
+
+    it('releases the lock after a provider failure so a retry can run', async () => {
+      const project = createProject();
+      const failing = createInMemoryDependencies(project, { throwError: true });
+      await expect(
+        generateSceneImage(project.id, 'scene-1', { regenerate: true }, imageServiceDeps(failing))
+      ).rejects.toThrow(SceneImageGenerationError);
+
+      const retry = createInMemoryDependencies(failing.state.project);
+      const result = await generateSceneImage(project.id, 'scene-1', { regenerate: true }, {
+        ...imageServiceDeps(retry),
+        submitLocks: failing.submitLocks
+      });
+      expect(result.status).toBe('generated');
+      expect(retry.generateImageCalls()).toBe(1);
+    });
   });
 });

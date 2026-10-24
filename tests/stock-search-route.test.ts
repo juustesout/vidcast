@@ -76,7 +76,9 @@ describe('stock search route', () => {
       orientation: 'landscape',
       providers: undefined,
       limit: 6,
-      mode: null
+      mode: null,
+      project: expect.objectContaining({ id: 'project-1', ownerId: 'user-a' }),
+      identity: expect.objectContaining({ kind: 'user', subject: 'user-a', authType: 'session' })
     });
   });
 

@@ -133,4 +133,14 @@ describe('approveSceneIntents', () => {
     const result = approveSceneIntents(buildProject());
     expect(result.project.scenes).toHaveLength(0);
   });
+
+  it('binds approval to a human actor and the current intent content', () => {
+    const result = approveSceneIntents(buildProject(), ['intent-1'], { subject: 'user_owner' });
+    const intent = result.project.explainer?.sceneIntents[0];
+
+    expect(intent?.status).toBe('approved');
+    expect(intent?.approval?.approvedBy).toBe('user_owner');
+    expect(intent?.approval?.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.project.explainer?.humanApproval?.approvedBy).toBe('user_owner');
+  });
 });

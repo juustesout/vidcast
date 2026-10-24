@@ -120,7 +120,7 @@ describe('assertAndReservePaidSubmit', () => {
     expect((await ledger.snapshot()).entries).toHaveLength(0);
   });
 
-  it('does not consult the ledger when the cap is disabled', async () => {
+  it('fails closed for a real submit when the cap is disabled', async () => {
     const ledger = new InMemoryPaidSubmitLedger();
     let reserveCalls = 0;
     const original = ledger.reserve.bind(ledger);
@@ -130,8 +130,21 @@ describe('assertAndReservePaidSubmit', () => {
     };
     setPaidSubmitLedgerForTests(ledger);
 
-    await expect(assertAndReservePaidSubmit(realImage())).resolves.toBeUndefined();
+    await expect(assertAndReservePaidSubmit(realImage())).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
     expect(reserveCalls).toBe(0);
+  });
+
+  it('fails closed for a real submit when the enabled flag is invalid', async () => {
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'maybe');
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+
+    await expect(assertAndReservePaidSubmit(realImage())).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
   });
 
   it('denies a real submit when the host cap is 0', async () => {

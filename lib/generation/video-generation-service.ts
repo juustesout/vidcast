@@ -8,17 +8,30 @@ import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import { RunPolicyError } from '@/lib/production/run-policy';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
+import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { GenerationAttempt, GenerationErrorCode, GenerationRecord, GenerationStatus } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { Scene } from '@/lib/types/scene';
+import { FileExclusiveLock, type ExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 import { createId } from '@/lib/utils/ids';
 
-const activeSceneSubmitLocks = new Set<string>();
-const activeAttemptPollLocks = new Set<string>();
+const defaultSceneSubmitLocks = new FileExclusiveLock({
+  resolvePath: (key) => {
+    const separator = key.indexOf(':');
+    const projectId = separator === -1 ? key : key.slice(0, separator);
+    const sceneId = separator === -1 ? 'scene' : key.slice(separator + 1);
+    const safeSceneId = sceneId.replace(/[^A-Za-z0-9._-]+/g, '_');
+    return path.join(getProjectRoot(projectId), 'locks', `video-submit-${safeSceneId}.lock`);
+  }
+});
+const defaultAttemptPollLocks = new InMemoryExclusiveLock();
 
 function sceneLockKey(projectId: string, sceneId: string): string {
   return `${projectId}:${sceneId}`;
@@ -72,13 +85,25 @@ interface VideoGenerationServiceDependencies {
   store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'exists' | 'readRelativeFile' | 'saveGeneratedVideo'>;
   registry: ReturnType<typeof createVideoGenerationRegistry>;
+  sceneSubmitLocks?: ExclusiveLock;
+  attemptPollLocks?: ExclusiveLock;
 }
 
 const defaultDependencies: VideoGenerationServiceDependencies = {
   store: projectStore,
   media: mediaStore,
-  registry: createVideoGenerationRegistry()
+  registry: createVideoGenerationRegistry(),
+  sceneSubmitLocks: defaultSceneSubmitLocks,
+  attemptPollLocks: defaultAttemptPollLocks
 };
+
+function sceneSubmitLocksOf(dependencies: VideoGenerationServiceDependencies): ExclusiveLock {
+  return dependencies.sceneSubmitLocks ?? defaultSceneSubmitLocks;
+}
+
+function attemptPollLocksOf(dependencies: VideoGenerationServiceDependencies): ExclusiveLock {
+  return dependencies.attemptPollLocks ?? defaultAttemptPollLocks;
+}
 
 function getScene(project: Project, sceneId: string): Scene {
   const scene = project.scenes.find((entry) => entry.id === sceneId);
@@ -103,19 +128,14 @@ function updateScene(project: Project, sceneId: string, updater: (scene: Scene) 
 
 function sanitizeProviderError(error: unknown): { message: string; errorCode: GenerationRecord['errorCode'] } {
   if (error instanceof VideoGenerationProviderError) {
+    logProviderError('video-generation', { code: error.code, status: error.status, error });
     return {
-      message: error.message,
+      message: publicErrorMessage(error, 'Video generation failed.'),
       errorCode: error.code
     };
   }
 
-  if (error instanceof Error) {
-    return {
-      message: error.message,
-      errorCode: 'PROVIDER_FAILED'
-    };
-  }
-
+  logProviderError('video-generation', { code: 'PROVIDER_FAILED', error });
   return {
     message: 'Video generation failed.',
     errorCode: 'PROVIDER_FAILED'
@@ -134,7 +154,8 @@ function mapRunPolicyError(error: RunPolicyError): SceneVideoGenerationError {
 }
 
 function mapProviderError(error: VideoGenerationProviderError): SceneVideoGenerationError {
-  return new SceneVideoGenerationError(error.message, error.status, error.code);
+  logProviderError('video-generation', { code: error.code, status: error.status, error });
+  return new SceneVideoGenerationError(publicErrorMessage(error, 'Video generation failed.'), error.status, error.code);
 }
 
 function resolveAttemptProvider(
@@ -347,15 +368,14 @@ function submitFailureIsAmbiguous(error: unknown, providerKey: string): boolean 
 export async function submitSceneVideoGeneration(
   projectId: string,
   sceneId: string,
-  options: { regenerate?: boolean; provider?: string; model?: string; mode?: RunMode } = {},
+  options: { regenerate?: boolean; provider?: string; model?: string; mode?: RunMode; identity?: RequestIdentity } = {},
   dependencies: VideoGenerationServiceDependencies = defaultDependencies
 ): Promise<SceneVideoGenerationSubmissionResult> {
   const key = sceneLockKey(projectId, sceneId);
-  if (activeSceneSubmitLocks.has(key)) {
+  const sceneLocks = sceneSubmitLocksOf(dependencies);
+  if (!(await sceneLocks.tryAcquire(key))) {
     throw new SceneVideoGenerationError('Video generation submit is already running for this scene.', 409, 'generation.scene.alreadyRunning');
   }
-
-  activeSceneSubmitLocks.add(key);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -437,9 +457,13 @@ export async function submitSceneVideoGeneration(
 
     try {
       requireHumanApprovalForMode(project, resolved.mode);
+      assertHumanActorForRealMode(resolved.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new SceneVideoGenerationError(error.message, error.status, `generation.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new SceneVideoGenerationError(error.message, error.status, 'generation.policy.denied');
       }
       throw error;
     }
@@ -468,6 +492,7 @@ export async function submitSceneVideoGeneration(
     delete previousMetadata.pollUnresolved;
     delete previousMetadata.lastPollErrorCode;
     delete previousMetadata.cancelFailed;
+    delete previousMetadata.downloadFailed;
 
     const queuedAttempt: GenerationAttempt = {
       ...current,
@@ -579,7 +604,7 @@ export async function submitSceneVideoGeneration(
       await dependencies.store.mutateProject(projectId, withFailed);
 
       if (error instanceof VideoGenerationProviderError) {
-        throw new SceneVideoGenerationError(error.message, error.status, error.code);
+        throw mapProviderError(error);
       }
       throw new SceneVideoGenerationError('Provider call failed while submitting video generation.', 502, 'generation.provider.failed');
     }
@@ -618,7 +643,7 @@ export async function submitSceneVideoGeneration(
       providerStatus: updatedAttempt.providerStatus
     };
   } finally {
-    activeSceneSubmitLocks.delete(key);
+    await sceneLocks.release(key);
   }
 }
 
@@ -651,11 +676,12 @@ export async function cancelSceneVideoGeneration(
   dependencies: VideoGenerationServiceDependencies = defaultDependencies
 ): Promise<SceneVideoGenerationCancellationResult> {
   const sceneKey = sceneLockKey(projectId, sceneId);
-  if (activeSceneSubmitLocks.has(sceneKey)) {
+  const sceneLocks = sceneSubmitLocksOf(dependencies);
+  const pollLocks = attemptPollLocksOf(dependencies);
+  if (!(await sceneLocks.tryAcquire(sceneKey))) {
     throw new SceneVideoGenerationError('Video generation submit is already running for this scene.', 409, 'generation.scene.alreadyRunning');
   }
 
-  activeSceneSubmitLocks.add(sceneKey);
   let attemptKey: string | undefined;
 
   try {
@@ -678,15 +704,15 @@ export async function cancelSceneVideoGeneration(
     // Serialize against an in-flight status poll for this attempt. Without this
     // the poll could observe `generated` and write it concurrently with the
     // cancellation, and the later write would clobber the other's result.
-    attemptKey = attemptLockKey(projectId, observed.id);
-    if (activeAttemptPollLocks.has(attemptKey)) {
+    const nextAttemptKey = attemptLockKey(projectId, observed.id);
+    if (!(await pollLocks.tryAcquire(nextAttemptKey))) {
       throw new SceneVideoGenerationError(
         'A status poll is currently running for this attempt; retry the cancellation once it finishes.',
         409,
         'generation.attempt.pollBusy'
       );
     }
-    activeAttemptPollLocks.add(attemptKey);
+    attemptKey = nextAttemptKey;
 
     // Re-read under both locks so the freshest attempt is used. A poll that
     // finished between the first read and lock acquisition cannot be cancelled
@@ -805,9 +831,9 @@ export async function cancelSceneVideoGeneration(
     };
   } finally {
     if (attemptKey) {
-      activeAttemptPollLocks.delete(attemptKey);
+      await pollLocks.release(attemptKey);
     }
-    activeSceneSubmitLocks.delete(sceneKey);
+    await sceneLocks.release(sceneKey);
   }
 }
 
@@ -818,11 +844,10 @@ export async function refreshVideoGenerationAttempt(
   options: { mode?: RunMode } = {}
 ): Promise<SceneVideoGenerationJobResult> {
   const key = attemptLockKey(projectId, attemptId);
-  if (activeAttemptPollLocks.has(key)) {
+  const pollLocks = attemptPollLocksOf(dependencies);
+  if (!(await pollLocks.tryAcquire(key))) {
     throw new SceneVideoGenerationError('Generation job poll is already running for this attempt.', 409, 'generation.attempt.pollBusy');
   }
-
-  activeAttemptPollLocks.add(key);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -958,7 +983,7 @@ export async function refreshVideoGenerationAttempt(
       await dependencies.store.mutateProject(projectId, withFailed);
 
       if (error instanceof VideoGenerationProviderError) {
-        throw new SceneVideoGenerationError(error.message, error.status, error.code);
+        throw mapProviderError(error);
       }
       throw new SceneVideoGenerationError('Provider status call failed for generation job.', 502, 'generation.provider.failed');
     }
@@ -1001,6 +1026,12 @@ export async function refreshVideoGenerationAttempt(
           }
         });
 
+        const completedMetadata = {
+          ...(nextAttempt.metadata ?? {}),
+          ...(download.metadata ?? {})
+        };
+        delete completedMetadata.downloadFailed;
+
         nextAttempt = {
           ...nextAttempt,
           status: 'generated',
@@ -1010,10 +1041,7 @@ export async function refreshVideoGenerationAttempt(
           error: undefined,
           errorCode: undefined,
           errorMessage: undefined,
-          metadata: {
-            ...(nextAttempt.metadata ?? {}),
-            ...(download.metadata ?? {})
-          }
+          metadata: completedMetadata
         };
 
         assetIdMode = 'explicit';
@@ -1021,13 +1049,22 @@ export async function refreshVideoGenerationAttempt(
         appendedAsset = generatedAsset;
       } catch (error) {
         const normalized = sanitizeProviderError(error);
+        // The remote job already completed. Failing the attempt would drop the
+        // busy-guard and let the planner start a second paid `video_submit`.
+        // Keep the attempt active with the same job id so a later poll retries
+        // download only.
         nextAttempt = {
           ...nextAttempt,
-          status: 'failed',
-          completedAt: nowIso(),
+          status: 'generating',
+          providerStatus: 'download_failed',
+          completedAt: undefined,
           error: normalized.message,
-          errorCode: normalized.errorCode || 'DOWNLOAD_FAILED',
-          errorMessage: normalized.message
+          errorCode: 'DOWNLOAD_FAILED',
+          errorMessage: normalized.message,
+          metadata: {
+            ...(nextAttempt.metadata ?? {}),
+            downloadFailed: true
+          }
         };
         assetIdMode = 'fallback';
       }
@@ -1083,6 +1120,6 @@ export async function refreshVideoGenerationAttempt(
       lastPolledAt: attempt.lastPolledAt
     };
   } finally {
-    activeAttemptPollLocks.delete(key);
+    await pollLocks.release(key);
   }
 }

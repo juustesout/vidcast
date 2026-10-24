@@ -9,7 +9,9 @@ import {
   searchStockPhotos,
   StockSearchError
 } from '@/lib/ai/stock/stock-search-service';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { InMemoryStockStateStore } from '@/lib/ai/stock/stock-state-store';
+import type { Project } from '@/lib/types/render';
 import type { StockPhoto, StockProviderId, StockSearchResult } from '@/lib/types/stock';
 
 function photo(provider: StockProviderId, index: number): StockPhoto {
@@ -69,6 +71,65 @@ function registry(providers: Record<string, StockProvider>): StockProviderRegist
     listProviders: () => Object.values(providers),
     configurationStatus: () => []
   };
+}
+
+function createProject(): Project {
+  const now = new Date().toISOString();
+  return {
+    id: 'project-stock-search',
+    title: 'Stock search',
+    description: '',
+    durationTarget: 15,
+    aspectRatio: '16:9',
+    fps: 30,
+    createdAt: now,
+    updatedAt: now,
+    narration: { text: '', segments: [] },
+    renderSettings: {
+      aspectRatio: '16:9',
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      background: { type: 'color', value: '#000000' },
+      audio: { narrationVolume: 1, musicVolume: 0.35, effectsVolume: 0.2 },
+      subtitlesEnabled: true
+    },
+    assets: [],
+    references: [],
+    compositions: [],
+    scenes: []
+  };
+}
+
+function withHumanApproval(project: Project): Project {
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
 }
 
 function deps(providers: Record<string, { provider: StockProvider }>) {
@@ -154,16 +215,112 @@ describe('searchStockPhotos', () => {
     });
   });
 
-  it('searches real providers when explicitly allowed', async () => {
+  it('refuses real search without a project snapshot to approve', async () => {
     vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
-    vi.stubEnv('PRODUCTION_RUN_DEFAULT_MODE', 'real');
     const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
 
-    const result = await searchStockPhotos({ query: 'sunset', mode: 'real' }, deps({ pexels }));
+    await expect(searchStockPhotos({ query: 'sunset', mode: 'real' }, deps({ pexels }))).rejects.toMatchObject({
+      status: 403,
+      code: 'stock.approval.required'
+    });
+    expect(pexels.searchPhotos).not.toHaveBeenCalled();
+  });
+
+  it('refuses real search without human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
+
+    await expect(
+      searchStockPhotos({ query: 'sunset', mode: 'real', project: createProject() }, deps({ pexels }))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'stock.approval.required'
+    });
+    expect(pexels.searchPhotos).not.toHaveBeenCalled();
+  });
+
+  it('searches real providers after a matching human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('PRODUCTION_RUN_DEFAULT_MODE', 'real');
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+    vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '10');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '4');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '2');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '4');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+    const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
+
+    const result = await searchStockPhotos(
+      { query: 'sunset', mode: 'real', project: withHumanApproval(createProject()) },
+      deps({ pexels })
+    );
 
     expect(result.results[0].provider).toBe('pexels');
     expect(result.results[0].previewUrl).toBe('https://cdn.local/pexels-0.jpg');
     expect(pexels.searchPhotos).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed for a real search when the spend cap is disabled', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
+
+    await expect(
+      searchStockPhotos(
+        { query: 'sunset', mode: 'real', project: withHumanApproval(createProject()) },
+        deps({ pexels })
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(pexels.searchPhotos).not.toHaveBeenCalled();
+  });
+
+  it('refuses a service token for real search even with human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
+
+    await expect(
+      searchStockPhotos(
+        {
+          query: 'sunset',
+          mode: 'real',
+          project: withHumanApproval(createProject()),
+          identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+        },
+        deps({ pexels })
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'stock.policy.denied'
+    });
+    expect(pexels.searchPhotos).not.toHaveBeenCalled();
+  });
+
+  it('refuses real search when human approval is stale', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
+    const approved = withHumanApproval(createProject());
+    const stale: Project = {
+      ...approved,
+      explainer: {
+        ...approved.explainer!,
+        humanApproval: {
+          ...approved.explainer!.humanApproval!,
+          contentHash: 'stale'
+        }
+      }
+    };
+
+    await expect(
+      searchStockPhotos({ query: 'sunset', mode: 'real', project: stale }, deps({ pexels }))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'stock.approval.stale'
+    });
+    expect(pexels.searchPhotos).not.toHaveBeenCalled();
   });
 
   it('exposes quota feedback without leaking configuration secrets', async () => {

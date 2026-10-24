@@ -18,8 +18,10 @@ const MODES: RunMode[] = ['mock', 'real'];
 export async function POST(request: Request, context: RouteContext) {
   const { id, sceneId } = await context.params;
 
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'stock_select');
   } catch (error) {
     if (error instanceof AccessControlError) {
@@ -57,7 +59,8 @@ export async function POST(request: Request, context: RouteContext) {
         query: body.query ?? query,
         orientation: body.orientation ?? orientation,
         regenerate: Boolean(body.regenerate),
-        mode: body.mode
+        mode: body.mode,
+        identity
       });
       return NextResponse.json({ action, ...result }, { status: 200 });
     }
@@ -68,7 +71,8 @@ export async function POST(request: Request, context: RouteContext) {
 
     const result = await selectSceneStockImage(id, sceneId, {
       regenerate: Boolean(body.regenerate),
-      mode: body.mode
+      mode: body.mode,
+      identity
     });
     return NextResponse.json({ action, ...result }, { status: 200 });
   } catch (error) {

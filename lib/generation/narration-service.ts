@@ -1,19 +1,34 @@
+import path from 'node:path';
+
 import { AudioIntegrityError, validateGeneratedAudio, type AudioIntegrityResult } from '@/lib/ai/audio/audio-integrity';
 import { resolveRealNarrationPilotGate } from '@/lib/ai/text-to-speech/real-narration-pilot';
 import { createTextToSpeechRegistry } from '@/lib/ai/text-to-speech/registry';
 import { TextToSpeechProviderError, type TextToSpeechFormat } from '@/lib/ai/text-to-speech/provider';
 import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
+import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { Project } from '@/lib/types/render';
 import type { NarrationGenerationAttempt, Scene } from '@/lib/types/scene';
+import { FileExclusiveLock, type ExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 import { createId } from '@/lib/utils/ids';
 
-const activeNarrationLocks = new Set<string>();
+const defaultSubmitLocks = new FileExclusiveLock({
+  resolvePath: (key) => {
+    const separator = key.indexOf(':');
+    const projectId = separator === -1 ? key : key.slice(0, separator);
+    const sceneId = separator === -1 ? 'scene' : key.slice(separator + 1);
+    const safeSceneId = sceneId.replace(/[^A-Za-z0-9._-]+/g, '_');
+    return path.join(getProjectRoot(projectId), 'locks', `narration-submit-${safeSceneId}.lock`);
+  }
+});
 
 function lockKey(projectId: string, sceneId: string): string {
   return `${projectId}:${sceneId}`;
@@ -52,6 +67,7 @@ export class SceneNarrationGenerationError extends Error {
      | 'narration.scene.alreadyGenerated'
       | 'narration.approval.required'
      | 'narration.approval.stale'
+     | 'narration.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
@@ -71,6 +87,7 @@ export class SceneNarrationGenerationError extends Error {
        | 'narration.scene.alreadyGenerated'
        | 'narration.approval.required'
        | 'narration.approval.stale'
+       | 'narration.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
@@ -99,13 +116,19 @@ interface NarrationServiceDependencies {
   store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedAudio'>;
   registry: ReturnType<typeof createTextToSpeechRegistry>;
+  submitLocks?: ExclusiveLock;
 }
 
 const defaultDependencies: NarrationServiceDependencies = {
   store: projectStore,
   media: mediaStore,
-  registry: createTextToSpeechRegistry()
+  registry: createTextToSpeechRegistry(),
+  submitLocks: defaultSubmitLocks
 };
+
+function submitLocksOf(dependencies: NarrationServiceDependencies): ExclusiveLock {
+  return dependencies.submitLocks ?? defaultSubmitLocks;
+}
 
 function getScene(project: Project, sceneId: string): Scene {
   const scene = project.scenes.find((entry) => entry.id === sceneId);
@@ -123,13 +146,15 @@ function updateScene(project: Project, sceneId: string, updater: (scene: Scene) 
 }
 
 function mapProviderError(error: TextToSpeechProviderError): SceneNarrationGenerationError {
+  logProviderError('narration', { code: error.code, status: error.status, error });
+  const message = publicErrorMessage(error, 'Narration provider call failed.');
   if (error.code === 'NOT_CONFIGURED') {
-    return new SceneNarrationGenerationError(error.message, 409, 'narration.provider.notConfigured');
+    return new SceneNarrationGenerationError(message, 409, 'narration.provider.notConfigured');
   }
   if (error.code === 'UNSUPPORTED' || error.code === 'INVALID_REQUEST') {
-    return new SceneNarrationGenerationError(error.message, 422, 'narration.provider.unsupported');
+    return new SceneNarrationGenerationError(message, 422, 'narration.provider.unsupported');
   }
-  return new SceneNarrationGenerationError(error.message, 502, 'narration.provider.failed');
+  return new SceneNarrationGenerationError(message, 502, 'narration.provider.failed');
 }
 
 function mapRunPolicyError(error: RunPolicyError): SceneNarrationGenerationError {
@@ -165,6 +190,7 @@ export async function generateSceneNarration(
     provider?: string;
     regenerate?: boolean;
     mode?: RunMode;
+    identity?: RequestIdentity;
     settings?: {
       stability?: number;
       similarityBoost?: number;
@@ -175,11 +201,10 @@ export async function generateSceneNarration(
   dependencies: NarrationServiceDependencies = defaultDependencies
 ): Promise<SceneNarrationGenerationResult> {
   const key = lockKey(projectId, sceneId);
-  if (activeNarrationLocks.has(key)) {
+  const submitLocks = submitLocksOf(dependencies);
+  if (!(await submitLocks.tryAcquire(key))) {
     throw new SceneNarrationGenerationError('Narration generation is already running for this scene.', 409, 'narration.scene.alreadyRunning');
   }
-
-  activeNarrationLocks.add(key);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -205,9 +230,13 @@ export async function generateSceneNarration(
     const resolution = resolveNarrationProvider(options.provider, options.mode);
     try {
       requireHumanApprovalForMode(project, resolution.mode);
+      assertHumanActorForRealMode(resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new SceneNarrationGenerationError(error.message, error.status, `narration.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new SceneNarrationGenerationError(error.message, error.status, 'narration.policy.denied');
       }
       throw error;
     }
@@ -294,7 +323,7 @@ export async function generateSceneNarration(
       });
     } catch (error) {
       await finalizePaidSubmit(paidSubmit, 'failed');
-      const message = error instanceof Error ? error.message : 'Narration provider call failed.';
+      const message = publicErrorMessage(error, 'Narration provider call failed.');
       const failed = (fresh: Project) => updateScene(fresh, sceneId, (entry) => ({
         ...entry,
         narration: {
@@ -424,6 +453,6 @@ export async function generateSceneNarration(
       duration: generatedAsset.duration
     };
   } finally {
-    activeNarrationLocks.delete(key);
+    await submitLocks.release(key);
   }
 }

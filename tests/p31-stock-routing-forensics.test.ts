@@ -6,6 +6,7 @@ import { InMemoryStockStateStore } from '@/lib/ai/stock/stock-state-store';
 import { StockProviderError, type StockProvider } from '@/lib/ai/stock/stock-provider';
 import { StockRouter } from '@/lib/ai/stock/stock-router';
 import { STOCK_PROVIDER_IDS } from '@/lib/ai/stock/catalog';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { buildStockSelectionDependencies, selectSceneStockImage, selectSceneStockPhoto } from '@/lib/generation/stock-image-service';
 import { deriveProductionPlan } from '@/lib/production/production-planner';
 import { normalizeProject } from '@/lib/projects/normalize-project';
@@ -13,6 +14,7 @@ import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 import type { Scene, StockImageVisual } from '@/lib/types/scene';
 import type { StockPhoto, StockProviderId, StockSelection } from '@/lib/types/stock';
+import { InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 const NOW = 1_000_000;
 
@@ -122,7 +124,7 @@ function makeScene(visual: StockImageVisual): Scene {
 }
 
 function makeProject(visual: StockImageVisual, assets: Asset[] = []): Project {
-  return normalizeProject({
+  const project = normalizeProject({
     id: 'project-1',
     title: 'P31 forensics',
     description: '',
@@ -137,6 +139,13 @@ function makeProject(visual: StockImageVisual, assets: Asset[] = []): Project {
     references: [],
     compositions: []
   } as unknown as Project);
+  return {
+    ...project,
+    explainer: {
+      ...project.explainer!,
+      humanApproval: stampHumanApproval(project, { subject: 'user_test' })
+    }
+  };
 }
 
 function fakeAsset(): Asset {
@@ -175,7 +184,8 @@ function createServiceHarness(visual: StockImageVisual, assets: Asset[] = []) {
     media: { saveStockImage },
     registry,
     stateStore,
-    now: () => NOW
+    now: () => NOW,
+    submitLocks: new InMemoryExclusiveLock()
   });
 
   return {
@@ -186,9 +196,24 @@ function createServiceHarness(visual: StockImageVisual, assets: Asset[] = []) {
   };
 }
 
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '10');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
+}
+
 beforeEach(() => {
   vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
   vi.stubEnv('STOCK_IMAGE_PROVIDER_ORDER', 'pixabay,pexels,unsplash');
+  enablePaidSpendCap();
 });
 
 afterEach(() => {
@@ -408,6 +433,69 @@ describe('P31.1 stock routing forensics', () => {
 
     expect(result.selection.provider).toBe('fake');
     expect(realCalls.count).toBe(0);
+  });
+
+  it('fails closed for real auto-select when the spend cap is disabled', async () => {
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'false');
+    const harness = createServiceHarness({
+      kind: 'stock_image',
+      query: 'forest path',
+      orientation: 'landscape'
+    });
+
+    await expect(
+      selectSceneStockImage('project-1', 'scene-1', { mode: 'real' }, harness.dependencies)
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(harness.saveStockImage).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a real download choose when the spend cap is disabled', async () => {
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'false');
+    const harness = createServiceHarness({
+      kind: 'stock_image',
+      query: 'forest path',
+      orientation: 'landscape'
+    });
+
+    await expect(
+      selectSceneStockPhoto(
+        'project-1',
+        'scene-1',
+        stockPhoto('pixabay', 'pixabay-1'),
+        { query: 'forest path', mode: 'real' },
+        harness.dependencies
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(harness.saveStockImage).not.toHaveBeenCalled();
+  });
+
+  it('allows a real Unsplash hotlink choose when the spend cap is disabled', async () => {
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'false');
+    const harness = createServiceHarness({
+      kind: 'stock_image',
+      query: 'forest path',
+      orientation: 'landscape'
+    });
+
+    const result = await selectSceneStockPhoto(
+      'project-1',
+      'scene-1',
+      stockPhoto('unsplash', 'unsplash-1'),
+      { query: 'forest path', mode: 'real' },
+      harness.dependencies
+    );
+
+    expect(result.status).toBe('selected');
+    expect(result.provider).toBe('unsplash');
+    expect(result.usagePolicy).toBe('hotlink');
+    expect(result.assetId).toBeUndefined();
+    expect(harness.saveStockImage).not.toHaveBeenCalled();
   });
 
   it('rejects an explicit fake photo in real mode', async () => {

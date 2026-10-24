@@ -6,9 +6,12 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { resolveRealNarrationPilotGate } from '@/lib/ai/text-to-speech/real-narration-pilot';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { generateSceneNarration } from '@/lib/generation/narration-service';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import { sceneRenderService } from '@/lib/render/scene-render-service';
 import { projectStore } from '@/lib/storage/project-store';
+import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 
 let PILOT_MP3: Buffer;
@@ -85,25 +88,35 @@ afterAll(async () => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  setPaidSubmitLedgerForTests(undefined);
 });
 
 async function createNarrationProject(): Promise<{ projectId: string; sceneId: string }> {
   const project = await projectStore.createProject({ title: 'Real narration pilot test' });
   const sceneId = 'scene-narration';
-  await projectStore.mutateProject(project.id, (current) => ({
-    ...current,
-    assets: [],
-    references: [],
-    renderSettings: {
-      ...current.renderSettings,
-      aspectRatio: '16:9',
-      width: 640,
-      height: 360,
-      fps: 30,
-      subtitlesEnabled: false
-    },
-    scenes: [blankSceneWithNarration(sceneId, 1)]
-  }));
+  await projectStore.mutateProject(project.id, (current) => {
+    const next: Project = {
+      ...current,
+      assets: [],
+      references: [],
+      renderSettings: {
+        ...current.renderSettings,
+        aspectRatio: '16:9',
+        width: 640,
+        height: 360,
+        fps: 30,
+        subtitlesEnabled: false
+      },
+      scenes: [blankSceneWithNarration(sceneId, 1)]
+    };
+    return {
+      ...next,
+      explainer: {
+        ...next.explainer!,
+        humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+      }
+    };
+  });
   return { projectId: project.id, sceneId };
 }
 
@@ -111,6 +124,15 @@ function enablePilot(): void {
   vi.stubEnv('RUN_REAL_NARRATION_PILOT', 'true');
   vi.stubEnv('CONFIRM_REAL_NARRATION_PILOT', 'YES');
   vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '10');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '2');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
 }
 
 describe('real narration pilot service path', () => {

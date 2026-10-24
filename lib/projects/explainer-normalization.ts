@@ -1,4 +1,4 @@
-import type { ExplainerSpec, SceneIntentNarrativeRole, SceneIntentStatus, StoryBeat, StoryScriptVersion } from '@/lib/types/explainer';
+import type { ExplainerSpec, HumanProductionApproval, SceneIntentApproval, SceneIntentNarrativeRole, SceneIntentStatus, StoryBeat, StoryScriptVersion } from '@/lib/types/explainer';
 import type { Project, ProjectNarration } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
 
@@ -82,6 +82,29 @@ function normalizeIntentStatus(value: unknown): SceneIntentStatus {
   return value === 'approved' ? 'approved' : 'draft';
 }
 
+function normalizeApprovalRecord(value: unknown): SceneIntentApproval | HumanProductionApproval | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as { approvedBy?: unknown; approvedAt?: unknown; contentHash?: unknown };
+  if (typeof record.approvedBy !== 'string' || !record.approvedBy.trim()) {
+    return undefined;
+  }
+  if (typeof record.approvedAt !== 'string' || !record.approvedAt.trim()) {
+    return undefined;
+  }
+  if (typeof record.contentHash !== 'string' || !record.contentHash.trim()) {
+    return undefined;
+  }
+
+  return {
+    approvedBy: record.approvedBy,
+    approvedAt: record.approvedAt,
+    contentHash: record.contentHash
+  };
+}
+
 export function normalizeExplainer(project: Project): ExplainerSpec {
   const legacyNarrationText = project.narration?.text ?? '';
   const current = project.explainer;
@@ -127,10 +150,12 @@ export function normalizeExplainer(project: Project): ExplainerSpec {
             },
             notes: typeof (entry as { notes?: unknown }).notes === 'string' ? (entry as { notes: string }).notes : undefined,
             status: normalizeIntentStatus((entry as { status?: unknown }).status),
+            approval: normalizeApprovalRecord((entry as { approval?: unknown }).approval),
             materializedSceneId: typeof (entry as { materializedSceneId?: unknown }).materializedSceneId === 'string' ? (entry as { materializedSceneId: string }).materializedSceneId : undefined
           }))
           .sort((a, b) => a.order - b.order)
           .map((entry, index) => ({ ...entry, order: index + 1 }))
-      : []
+      : [],
+    humanApproval: normalizeApprovalRecord(current?.humanApproval)
   };
 }

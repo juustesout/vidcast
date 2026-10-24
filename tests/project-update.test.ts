@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { approveSceneIntents } from '@/lib/explainer/scene-intent-approval';
 import { applyProjectUpdate } from '@/lib/projects/project-update';
 import { normalizeProject } from '@/lib/projects/normalize-project';
 import type { Project } from '@/lib/types/render';
@@ -292,5 +293,88 @@ describe('applyProjectUpdate ownership immutability', () => {
 
     expect(result.project.ownerId).toBe('user_owner');
     expect(result.project.title).toBe('Only the title changes');
+  });
+});
+
+describe('applyProjectUpdate approval immutability', () => {
+  function projectWithDraftIntent(): Project {
+    const existing = baseProject();
+    return {
+      ...existing,
+      explainer: {
+        ...existing.explainer!,
+        story: {
+          ...existing.explainer!.story,
+          beats: [{ id: 'beat-1', order: 1, text: 'Beat' }]
+        },
+        sceneIntents: [
+          {
+            id: 'intent-1',
+            order: 1,
+            beatIds: ['beat-1'],
+            narrativeRole: 'hook',
+            visualIntent: 'Show it',
+            narrationDraft: 'Say it',
+            timing: { durationSeconds: 5 },
+            status: 'draft'
+          }
+        ]
+      }
+    };
+  }
+
+  it('does not let a client forge scene-intent approved status or humanApproval', () => {
+    const existing = projectWithDraftIntent();
+    const result = applyProjectUpdate(existing, {
+      ...existing,
+      explainer: {
+        ...existing.explainer,
+        sceneIntents: [
+          {
+            ...existing.explainer!.sceneIntents[0],
+            status: 'approved'
+          }
+        ],
+        humanApproval: {
+          approvedBy: 'service:api_token',
+          approvedAt: '2026-01-01T00:00:00.000Z',
+          contentHash: 'forged'
+        }
+      }
+    });
+
+    expect(result.validation.valid).toBe(true);
+    expect(result.project.explainer?.sceneIntents[0].status).toBe('draft');
+    expect(result.project.explainer?.humanApproval).toBeUndefined();
+  });
+
+  it('preserves a server-owned approval when content is unchanged', () => {
+    const approved = approveSceneIntents(projectWithDraftIntent(), ['intent-1'], { subject: 'user_owner' }).project;
+    const result = applyProjectUpdate(approved, { title: 'Retitled' });
+
+    expect(result.project.title).toBe('Retitled');
+    expect(result.project.explainer?.sceneIntents[0].status).toBe('approved');
+    expect(result.project.explainer?.sceneIntents[0].approval?.approvedBy).toBe('user_owner');
+    expect(result.project.explainer?.humanApproval?.approvedBy).toBe('user_owner');
+  });
+
+  it('invalidates a prior approval when intent content changes', () => {
+    const approved = approveSceneIntents(projectWithDraftIntent(), ['intent-1'], { subject: 'user_owner' }).project;
+    const result = applyProjectUpdate(approved, {
+      explainer: {
+        ...approved.explainer,
+        sceneIntents: [
+          {
+            ...approved.explainer!.sceneIntents[0],
+            visualIntent: 'Changed after approval',
+            status: 'approved'
+          }
+        ]
+      }
+    });
+
+    expect(result.project.explainer?.sceneIntents[0].status).toBe('draft');
+    expect(result.project.explainer?.sceneIntents[0].approval).toBeUndefined();
+    expect(result.project.explainer?.humanApproval).toBeUndefined();
   });
 });

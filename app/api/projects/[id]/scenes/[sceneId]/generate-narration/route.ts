@@ -12,8 +12,10 @@ interface RouteContext {
 export async function POST(request: Request, context: RouteContext) {
   const { id, sceneId } = await context.params;
 
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'generate_narration');
   } catch (error) {
     if (error instanceof AccessControlError) {
@@ -46,7 +48,8 @@ export async function POST(request: Request, context: RouteContext) {
       format: body.format,
       provider: body.provider,
       regenerate: Boolean(body.regenerate || body.retry),
-      settings: body.settings
+      settings: body.settings,
+      identity
     });
 
     return NextResponse.json(result, { status: 200 });

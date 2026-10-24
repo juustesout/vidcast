@@ -1,5 +1,6 @@
 import { mediaMetadataReader } from '@/lib/media/metadata-reader';
 import { resolveProviderConcurrencyLimit, withKeyedLimit } from '@/lib/concurrency/keyed-limiter';
+import { logProviderError, publicMessageForProviderCode } from '@/lib/security/safe-error';
 import { buildPersistedNarrationAlignment, parseCharacterAlignment } from './alignment';
 import { TextToSpeechProviderError, type TextToSpeechFormat, type TextToSpeechProvider, type TextToSpeechRequest, type TextToSpeechResult } from './provider';
 
@@ -31,36 +32,24 @@ function resolveOutputFormat(): ResolvedOutputFormat {
   return { outputFormat: 'mp3_44100_128', mimeType: 'audio/mpeg', format: 'mp3' };
 }
 
-function parseErrorMessage(payload: unknown): string {
-  if (payload && typeof payload === 'object') {
-    const maybe = payload as { detail?: { message?: string } | string; error?: { message?: string } };
-    if (typeof maybe.detail === 'string') {
-      return maybe.detail;
-    }
-    if (maybe.detail && typeof maybe.detail === 'object' && maybe.detail.message) {
-      return maybe.detail.message;
-    }
-    if (maybe.error?.message) {
-      return maybe.error.message;
-    }
-  }
-  return 'Text-to-speech provider request failed.';
-}
-
-// Classifies non-2xx HTTP responses without ever echoing credentials. Auth and
-// rate-limit failures are surfaced distinctly so callers can react (and so a
-// retry is never issued automatically by this adapter).
-function classifyHttpError(status: number, message: string): TextToSpeechProviderError {
+function classifyHttpError(status: number, payload: unknown): TextToSpeechProviderError {
+  let code: TextToSpeechProviderError['code'];
+  let mappedStatus: number;
   if (status === 401 || status === 403) {
-    return new TextToSpeechProviderError(message, 502, 'PROVIDER_AUTH');
+    code = 'PROVIDER_AUTH';
+    mappedStatus = 502;
+  } else if (status === 429) {
+    code = 'PROVIDER_RATE_LIMIT';
+    mappedStatus = 429;
+  } else if (status >= 400 && status < 500) {
+    code = 'PROVIDER_REJECTED';
+    mappedStatus = 422;
+  } else {
+    code = 'PROVIDER_FAILED';
+    mappedStatus = 502;
   }
-  if (status === 429) {
-    return new TextToSpeechProviderError(message, 429, 'PROVIDER_RATE_LIMIT');
-  }
-  if (status >= 400 && status < 500) {
-    return new TextToSpeechProviderError(message, 422, 'PROVIDER_REJECTED');
-  }
-  return new TextToSpeechProviderError(message, 502, 'PROVIDER_FAILED');
+  logProviderError('elevenlabs-tts', { code, status, body: payload });
+  return new TextToSpeechProviderError(publicMessageForProviderCode(code), mappedStatus, code);
 }
 
 function mapTransportError(error: unknown): TextToSpeechProviderError {
@@ -176,7 +165,7 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => ({}))) as unknown;
-      throw classifyHttpError(response.status, parseErrorMessage(payload));
+      throw classifyHttpError(response.status, payload);
     }
 
     const providerRequestId = response.headers.get('request-id') || response.headers.get('x-request-id') || undefined;

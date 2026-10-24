@@ -1,5 +1,8 @@
 import type { AspectRatio } from '@/lib/types/render';
 
+import { logProviderError, publicMessageForProviderCode } from '@/lib/security/safe-error';
+import type { GenerationErrorCode } from '@/lib/types/generation';
+
 import {
   VideoGenerationProviderError,
   type VideoGenerationCapabilities,
@@ -308,34 +311,9 @@ function mapFalStatus(status: unknown): VideoGenerationStatusResult {
   return { status: 'generating', providerStatus: value || 'UNKNOWN' };
 }
 
-function parseFalErrorMessage(payload: unknown): string {
-  if (payload && typeof payload === 'object') {
-    const maybe = payload as {
-      error?: string | { message?: string };
-      error_type?: string;
-      detail?: string | Array<{ msg?: string }>;
-      message?: string;
-    };
-    if (typeof maybe.error === 'string' && maybe.error) {
-      return maybe.error;
-    }
-    if (maybe.error && typeof maybe.error === 'object' && typeof maybe.error.message === 'string') {
-      return maybe.error.message;
-    }
-    if (typeof maybe.detail === 'string' && maybe.detail) {
-      return maybe.detail;
-    }
-    if (Array.isArray(maybe.detail)) {
-      const messages = maybe.detail.map((entry) => entry?.msg).filter((msg): msg is string => Boolean(msg));
-      if (messages.length > 0) {
-        return messages.join('; ');
-      }
-    }
-    if (typeof maybe.message === 'string' && maybe.message) {
-      return maybe.message;
-    }
-  }
-  return 'FAL video generation request failed.';
+function falPublicError(code: GenerationErrorCode, status: number | undefined, payload: unknown): VideoGenerationProviderError {
+  logProviderError('fal-video', { code, status, body: payload });
+  return new VideoGenerationProviderError(publicMessageForProviderCode(code), status ?? 502, code);
 }
 
 function hasFalError(payload: unknown): boolean {
@@ -348,15 +326,15 @@ function hasFalError(payload: unknown): boolean {
 
 function mapHttpError(status: number, payload: unknown): VideoGenerationProviderError {
   if (status === 401 || status === 403) {
-    return new VideoGenerationProviderError(parseFalErrorMessage(payload), 502, 'PROVIDER_AUTH');
+    return falPublicError('PROVIDER_AUTH', 502, payload);
   }
   if (status === 429) {
-    return new VideoGenerationProviderError(parseFalErrorMessage(payload), 429, 'PROVIDER_RATE_LIMIT');
+    return falPublicError('PROVIDER_RATE_LIMIT', 429, payload);
   }
   if (status >= 400 && status < 500) {
-    return new VideoGenerationProviderError(parseFalErrorMessage(payload), 422, 'PROVIDER_REJECTED');
+    return falPublicError('PROVIDER_REJECTED', 422, payload);
   }
-  return new VideoGenerationProviderError(parseFalErrorMessage(payload), 502, 'PROVIDER_FAILED');
+  return falPublicError('PROVIDER_FAILED', 502, payload);
 }
 
 function mapTransportError(error: unknown): VideoGenerationProviderError {
@@ -566,11 +544,12 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
       }
 
       if (hasFalError(body)) {
+        logProviderError('fal-video', { code: 'PROVIDER_FAILED', body });
         return {
           status: 'failed',
           providerStatus: typeof body.status === 'string' ? body.status : 'COMPLETED',
           errorCode: 'PROVIDER_FAILED',
-          errorMessage: parseFalErrorMessage(body)
+          errorMessage: publicMessageForProviderCode('PROVIDER_FAILED')
         };
       }
 
@@ -611,7 +590,7 @@ export class FalVideoGenerationProvider implements VideoGenerationProvider {
       }
 
       if (hasFalError(body)) {
-        throw new VideoGenerationProviderError(parseFalErrorMessage(body), 502, 'PROVIDER_FAILED');
+        throw falPublicError('PROVIDER_FAILED', 502, body);
       }
 
       const videoUrl = body.video && typeof body.video.url === 'string' ? body.video.url : '';

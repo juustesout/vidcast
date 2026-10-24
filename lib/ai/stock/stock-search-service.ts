@@ -1,5 +1,10 @@
+import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveStockMode, StockImageSelectionError } from '@/lib/generation/stock-image-service';
 import type { RunMode } from '@/lib/production/run-types';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { PaidSubmitCapError, requireEnabledPaidSubmitCapForRealMode } from '@/lib/spend/paid-submit-cap';
+import type { Project } from '@/lib/types/render';
 import type { StockOrientation, StockPhoto, StockProviderId, StockUsagePolicy } from '@/lib/types/stock';
 import { createId } from '@/lib/utils/ids';
 
@@ -50,6 +55,8 @@ export interface StockSearchRequest {
   providers?: StockProviderId[];
   limit?: number;
   mode?: RunMode;
+  project?: Project;
+  identity?: RequestIdentity;
 }
 
 export interface StockPhotoResolution {
@@ -215,6 +222,30 @@ export async function searchStockPhotos(
     throw error;
   }
 
+  try {
+    if (mode.mode === 'real' && !request.project) {
+      throw new HumanApprovalError(
+        'A human must approve the current project snapshot before real or paid execution.'
+      );
+    }
+    if (request.project) {
+      requireHumanApprovalForMode(request.project, mode.mode);
+    }
+    assertHumanActorForRealMode(mode.mode, request.identity);
+  } catch (error) {
+    if (error instanceof HumanApprovalError) {
+      throw new StockSearchError(
+        error.message,
+        error.status,
+        `stock.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`
+      );
+    }
+    if (error instanceof AccessControlError) {
+      throw new StockSearchError(error.message, error.status, 'stock.policy.denied');
+    }
+    throw error;
+  }
+
   const allowed = new Set(mode.allowedProviders);
   const requestedProviders = (request.providers ?? []).filter((provider) => allowed.has(provider));
   if ((request.providers?.length ?? 0) > 0 && requestedProviders.length === 0) {
@@ -246,6 +277,15 @@ export async function searchStockPhotos(
       });
     }
     return { ...cached.response, cached: true };
+  }
+
+  try {
+    requireEnabledPaidSubmitCapForRealMode(mode.mode);
+  } catch (error) {
+    if (error instanceof PaidSubmitCapError) {
+      throw new StockSearchError(error.message, error.status, error.code);
+    }
+    throw error;
   }
 
   const router = new StockRouter({

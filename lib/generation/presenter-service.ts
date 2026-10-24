@@ -23,6 +23,9 @@ import {
 } from '@/lib/presenter/pricing';
 import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
@@ -33,9 +36,18 @@ import type { Asset } from '@/lib/types/asset';
 import type { PresenterClipAttempt, PresenterClipSpec, PresenterCostRecord, PresenterOutputFormat } from '@/lib/types/presenter';
 import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
+import { FileExclusiveLock, type ExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 import { createId } from '@/lib/utils/ids';
 
-const activePresenterLocks = new Set<string>();
+const defaultSubmitLocks = new FileExclusiveLock({
+  resolvePath: (key) => {
+    const separator = key.indexOf(':');
+    const projectId = separator === -1 ? key : key.slice(0, separator);
+    const sceneId = separator === -1 ? 'scene' : key.slice(separator + 1);
+    const safeSceneId = sceneId.replace(/[^A-Za-z0-9._-]+/g, '_');
+    return path.join(getProjectRoot(projectId), 'locks', `presenter-submit-${safeSceneId}.lock`);
+  }
+});
 
 function lockKey(projectId: string, sceneId: string): string {
   return `${projectId}:${sceneId}`;
@@ -64,6 +76,7 @@ export class PresenterGenerationError extends Error {
      | 'presenter.budget.exceeded'
      | 'presenter.approval.required'
      | 'presenter.approval.stale'
+     | 'presenter.policy.denied'
       | 'paid.spend.cap.exceeded'
       | 'paid.spend.cap.invalid'
       | 'paid.spend.cap.unavailable'
@@ -90,6 +103,7 @@ export class PresenterGenerationError extends Error {
        | 'presenter.budget.exceeded'
        | 'presenter.approval.required'
        | 'presenter.approval.stale'
+       | 'presenter.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
@@ -119,13 +133,19 @@ interface PresenterServiceDependencies {
   store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedPresenter'>;
   registry: ReturnType<typeof createPresenterProviderRegistry>;
+  submitLocks?: ExclusiveLock;
 }
 
 const defaultDependencies: PresenterServiceDependencies = {
   store: projectStore,
   media: mediaStore,
-  registry: createPresenterProviderRegistry()
+  registry: createPresenterProviderRegistry(),
+  submitLocks: defaultSubmitLocks
 };
+
+function submitLocksOf(dependencies: PresenterServiceDependencies): ExclusiveLock {
+  return dependencies.submitLocks ?? defaultSubmitLocks;
+}
 
 function getScene(project: Project, sceneId: string): Scene {
   const scene = project.scenes.find((entry) => entry.id === sceneId);
@@ -155,13 +175,15 @@ function updateClip(project: Project, sceneId: string, updater: (clip: Presenter
 }
 
 function mapProviderError(error: PresenterProviderError): PresenterGenerationError {
+  logProviderError('presenter', { code: error.code, status: error.status, error });
+  const message = publicErrorMessage(error, 'Presenter provider call failed.');
   if (error.code === 'NOT_CONFIGURED') {
-    return new PresenterGenerationError(error.message, 409, 'presenter.provider.notConfigured');
+    return new PresenterGenerationError(message, 409, 'presenter.provider.notConfigured');
   }
   if (error.code === 'UNSUPPORTED' || error.code === 'INVALID_REQUEST') {
-    return new PresenterGenerationError(error.message, 422, 'presenter.provider.unsupported');
+    return new PresenterGenerationError(message, 422, 'presenter.provider.unsupported');
   }
-  return new PresenterGenerationError(error.message, 502, 'presenter.provider.failed');
+  return new PresenterGenerationError(message, 502, 'presenter.provider.failed');
 }
 
 function mapRunPolicyError(error: RunPolicyError): PresenterGenerationError {
@@ -316,14 +338,14 @@ function upsertAttempt(attempts: PresenterClipAttempt[] | undefined, attempt: Pr
 export async function submitPresenterClip(
   projectId: string,
   sceneId: string,
-  options: { provider?: string; mode?: RunMode; regenerate?: boolean; avatarId?: string } = {},
+  options: { provider?: string; mode?: RunMode; regenerate?: boolean; avatarId?: string; identity?: RequestIdentity } = {},
   dependencies: PresenterServiceDependencies = defaultDependencies
 ): Promise<PresenterGenerationResult> {
   const key = lockKey(projectId, sceneId);
-  if (activePresenterLocks.has(key)) {
+  const submitLocks = submitLocksOf(dependencies);
+  if (!(await submitLocks.tryAcquire(key))) {
     throw new PresenterGenerationError('Presenter generation is already running for this scene.', 409, 'presenter.scene.alreadyRunning');
   }
-  activePresenterLocks.add(key);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -353,9 +375,13 @@ export async function submitPresenterClip(
     const resolution = resolvePresenterProvider(project, options.provider, options.mode);
     try {
       requireHumanApprovalForMode(project, resolution.mode);
+      assertHumanActorForRealMode(resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new PresenterGenerationError(error.message, error.status, `presenter.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new PresenterGenerationError(error.message, error.status, 'presenter.policy.denied');
       }
       throw error;
     }
@@ -454,7 +480,7 @@ export async function submitPresenterClip(
         title: `Presenter ${project.title} scene ${scene.order}`
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Presenter provider call failed.';
+      const message = publicErrorMessage(error, 'Presenter provider call failed.');
       const failedCost = cost
         ? await observeProviderCost(provider, cost, walletBalanceBeforeUsd)
         : undefined;
@@ -517,7 +543,7 @@ export async function submitPresenterClip(
       duration
     };
   } finally {
-    activePresenterLocks.delete(key);
+    await submitLocks.release(key);
   }
 }
 
@@ -527,171 +553,162 @@ export async function pollPresenterClip(
   options: { mode?: RunMode } = {},
   dependencies: PresenterServiceDependencies = defaultDependencies
 ): Promise<PresenterGenerationResult> {
-  const key = lockKey(projectId, sceneId);
-  if (activePresenterLocks.has(key)) {
-    throw new PresenterGenerationError('Presenter generation is already running for this scene.', 409, 'presenter.scene.alreadyRunning');
+  const project = await dependencies.store.getProject(projectId);
+  if (!project) {
+    throw new PresenterGenerationError(`Project ${projectId} not found.`, 404, 'presenter.project.notFound');
   }
-  activePresenterLocks.add(key);
 
-  try {
-    const project = await dependencies.store.getProject(projectId);
-    if (!project) {
-      throw new PresenterGenerationError(`Project ${projectId} not found.`, 404, 'presenter.project.notFound');
-    }
-
-    const scene = getScene(project, sceneId);
-    const clip = getPresenterClip(project, sceneId);
-    if (!clip) {
-      throw new PresenterGenerationError('No presenter clip exists for this scene.', 409, 'presenter.invalid');
-    }
-    if (clip.status === 'generated' && clip.assetId) {
-      return {
-        sceneId,
-        status: 'generated',
-        provider: clip.provider,
-        assetId: clip.assetId,
-        duration: clip.duration
-      };
-    }
-    if (clip.status === 'submitting') {
-      throw new PresenterGenerationError(
-        'Presenter submission was interrupted before a provider job id was stored. Verify the provider dashboard before retrying; automatic retry is disabled.',
-        409,
-        'presenter.scene.submissionUnknown'
-      );
-    }
-
-    const attempt = clip.attempts?.find((entry) => entry.id === clip.lastAttemptId);
-    if (!attempt?.providerJobId) {
-      throw new PresenterGenerationError('Presenter clip has no provider job id to poll.', 409, 'presenter.invalid');
-    }
-    if (options.mode === 'mock' && isRealPresenterProviderKey(attempt.provider)) {
-      throw new PresenterGenerationError('Mock mode cannot poll a real presenter job.', 403, 'presenter.provider.unsupported');
-    }
-
-    let provider: PresenterProvider;
-    try {
-      provider = dependencies.registry.getProvider(attempt.provider);
-    } catch {
-      throw new PresenterGenerationError(`Unknown presenter provider: ${attempt.provider}`, 422, 'presenter.provider.unsupported');
-    }
-
-    let providerStatus: PresenterJobStatus;
-    try {
-      providerStatus = await provider.getStatus(attempt.providerJobId);
-    } catch (error) {
-      if (error instanceof PresenterProviderError) {
-        throw mapProviderError(error);
-      }
-      throw new PresenterGenerationError('Presenter provider status call failed.', 502, 'presenter.provider.failed');
-    }
-
-    if (providerStatus.status === 'failed') {
-      const message = providerStatus.error || 'Presenter generation failed.';
-      const failedAttempt: PresenterClipAttempt = {
-        ...attempt,
-        status: 'failed',
-        providerStatus: providerStatus.providerStatus,
-        cost: attempt.cost
-          ? await observeProviderCost(provider, attempt.cost, attempt.walletBalanceBeforeUsd)
-          : undefined,
-        completedAt: nowIso(),
-        error: message
-      };
-      await dependencies.store.mutateProject(projectId, (fresh) => updateClip(fresh, sceneId, (current) => ({
-        ...current,
-        status: 'failed',
-        error: message,
-        attempts: upsertAttempt(current.attempts, failedAttempt)
-      })));
-      throw new PresenterGenerationError(message, 502, 'presenter.provider.failed');
-    }
-
-    if (providerStatus.status !== 'generated') {
-      const pendingAttempt: PresenterClipAttempt = {
-        ...attempt,
-        providerStatus: providerStatus.providerStatus
-      };
-      await dependencies.store.mutateProject(projectId, (fresh) => updateClip(fresh, sceneId, (current) => ({
-        ...current,
-        status: 'generating',
-        attempts: upsertAttempt(current.attempts, pendingAttempt)
-      })));
-      return {
-        sceneId,
-        status: 'generating',
-        provider: provider.providerId,
-        providerJobId: attempt.providerJobId,
-        providerStatus: providerStatus.providerStatus
-      };
-    }
-
-    let downloaded: PresenterDownloadResult;
-    try {
-      downloaded = await provider.download(providerStatus);
-    } catch (error) {
-      if (error instanceof PresenterProviderError) {
-        throw mapProviderError(error);
-      }
-      throw new PresenterGenerationError('Presenter provider download failed.', 502, 'presenter.provider.failed');
-    }
-
-    const asset = await dependencies.media.saveGeneratedPresenter({
-      projectId,
-      sceneOrder: scene.order,
-      attemptId: attempt.id,
-      mimeType: downloaded.mimeType,
-      data: downloaded.data,
-      layout: getPresenterSetting(project, sceneId)?.layout,
-      generation: {
-        generationId: attempt.id,
-        provider: provider.providerId,
-        prompt: scene.narration?.text ?? '',
-        referenceIds: [],
-        providerJobId: attempt.providerJobId
-      }
-    });
-
-    const completedAttempt: PresenterClipAttempt = {
-      ...attempt,
-      status: 'generated',
-      providerStatus: providerStatus.providerStatus,
-      videoAssetId: asset.id,
-      mimeType: asset.mimeType,
-      width: asset.width,
-      height: asset.height,
-      duration: downloaded.durationSeconds ?? asset.duration ?? attempt.duration,
-      cost: attempt.cost
-        ? await observeProviderCost(provider, attempt.cost, attempt.walletBalanceBeforeUsd)
-        : undefined,
-      completedAt: nowIso()
-    };
-
-    await dependencies.store.mutateProject(projectId, (fresh) => {
-      const withClip = updateClip(fresh, sceneId, (current) => ({
-        ...current,
-        status: 'generated',
-        assetId: asset.id,
-        duration: completedAttempt.duration,
-        error: undefined,
-        attempts: upsertAttempt(current.attempts, completedAttempt)
-      }));
-      return { ...withClip, assets: [...withClip.assets, asset] };
-    });
-
+  const scene = getScene(project, sceneId);
+  const clip = getPresenterClip(project, sceneId);
+  if (!clip) {
+    throw new PresenterGenerationError('No presenter clip exists for this scene.', 409, 'presenter.invalid');
+  }
+  if (clip.status === 'generated' && clip.assetId) {
     return {
       sceneId,
       status: 'generated',
+      provider: clip.provider,
+      assetId: clip.assetId,
+      duration: clip.duration
+    };
+  }
+  if (clip.status === 'submitting') {
+    throw new PresenterGenerationError(
+      'Presenter submission was interrupted before a provider job id was stored. Verify the provider dashboard before retrying; automatic retry is disabled.',
+      409,
+      'presenter.scene.submissionUnknown'
+    );
+  }
+
+  const attempt = clip.attempts?.find((entry) => entry.id === clip.lastAttemptId);
+  if (!attempt?.providerJobId) {
+    throw new PresenterGenerationError('Presenter clip has no provider job id to poll.', 409, 'presenter.invalid');
+  }
+  if (options.mode === 'mock' && isRealPresenterProviderKey(attempt.provider)) {
+    throw new PresenterGenerationError('Mock mode cannot poll a real presenter job.', 403, 'presenter.provider.unsupported');
+  }
+
+  let provider: PresenterProvider;
+  try {
+    provider = dependencies.registry.getProvider(attempt.provider);
+  } catch {
+    throw new PresenterGenerationError(`Unknown presenter provider: ${attempt.provider}`, 422, 'presenter.provider.unsupported');
+  }
+
+  let providerStatus: PresenterJobStatus;
+  try {
+    providerStatus = await provider.getStatus(attempt.providerJobId);
+  } catch (error) {
+    if (error instanceof PresenterProviderError) {
+      throw mapProviderError(error);
+    }
+    throw new PresenterGenerationError('Presenter provider status call failed.', 502, 'presenter.provider.failed');
+  }
+
+  if (providerStatus.status === 'failed') {
+    logProviderError('presenter', { code: 'PROVIDER_ERROR', body: providerStatus.error });
+    const message = publicErrorMessage({ code: 'PROVIDER_ERROR', message: providerStatus.error }, 'Presenter generation failed.');
+    const failedAttempt: PresenterClipAttempt = {
+      ...attempt,
+      status: 'failed',
+      providerStatus: providerStatus.providerStatus,
+      cost: attempt.cost
+        ? await observeProviderCost(provider, attempt.cost, attempt.walletBalanceBeforeUsd)
+        : undefined,
+      completedAt: nowIso(),
+      error: message
+    };
+    await dependencies.store.mutateProject(projectId, (fresh) => updateClip(fresh, sceneId, (current) => ({
+      ...current,
+      status: 'failed',
+      error: message,
+      attempts: upsertAttempt(current.attempts, failedAttempt)
+    })));
+    throw new PresenterGenerationError(message, 502, 'presenter.provider.failed');
+  }
+
+  if (providerStatus.status !== 'generated') {
+    const pendingAttempt: PresenterClipAttempt = {
+      ...attempt,
+      providerStatus: providerStatus.providerStatus
+    };
+    await dependencies.store.mutateProject(projectId, (fresh) => updateClip(fresh, sceneId, (current) => ({
+      ...current,
+      status: 'generating',
+      attempts: upsertAttempt(current.attempts, pendingAttempt)
+    })));
+    return {
+      sceneId,
+      status: 'generating',
       provider: provider.providerId,
       providerJobId: attempt.providerJobId,
-      providerStatus: providerStatus.providerStatus,
-      assetId: asset.id,
-      generationAttemptId: attempt.id,
-      duration: completedAttempt.duration
+      providerStatus: providerStatus.providerStatus
     };
-  } finally {
-    activePresenterLocks.delete(key);
   }
+
+  let downloaded: PresenterDownloadResult;
+  try {
+    downloaded = await provider.download(providerStatus);
+  } catch (error) {
+    if (error instanceof PresenterProviderError) {
+      throw mapProviderError(error);
+    }
+    throw new PresenterGenerationError('Presenter provider download failed.', 502, 'presenter.provider.failed');
+  }
+
+  const asset = await dependencies.media.saveGeneratedPresenter({
+    projectId,
+    sceneOrder: scene.order,
+    attemptId: attempt.id,
+    mimeType: downloaded.mimeType,
+    data: downloaded.data,
+    layout: getPresenterSetting(project, sceneId)?.layout,
+    generation: {
+      generationId: attempt.id,
+      provider: provider.providerId,
+      prompt: scene.narration?.text ?? '',
+      referenceIds: [],
+      providerJobId: attempt.providerJobId
+    }
+  });
+
+  const completedAttempt: PresenterClipAttempt = {
+    ...attempt,
+    status: 'generated',
+    providerStatus: providerStatus.providerStatus,
+    videoAssetId: asset.id,
+    mimeType: asset.mimeType,
+    width: asset.width,
+    height: asset.height,
+    duration: downloaded.durationSeconds ?? asset.duration ?? attempt.duration,
+    cost: attempt.cost
+      ? await observeProviderCost(provider, attempt.cost, attempt.walletBalanceBeforeUsd)
+      : undefined,
+    completedAt: nowIso()
+  };
+
+  await dependencies.store.mutateProject(projectId, (fresh) => {
+    const withClip = updateClip(fresh, sceneId, (current) => ({
+      ...current,
+      status: 'generated',
+      assetId: asset.id,
+      duration: completedAttempt.duration,
+      error: undefined,
+      attempts: upsertAttempt(current.attempts, completedAttempt)
+    }));
+    return { ...withClip, assets: [...withClip.assets, asset] };
+  });
+
+  return {
+    sceneId,
+    status: 'generated',
+    provider: provider.providerId,
+    providerJobId: attempt.providerJobId,
+    providerStatus: providerStatus.providerStatus,
+    assetId: asset.id,
+    generationAttemptId: attempt.id,
+    duration: completedAttempt.duration
+  };
 }
 
 export function resolvePresenterPlacementPip(project: Project, sceneId: string) {

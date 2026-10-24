@@ -1,4 +1,4 @@
-import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanCompositionLayer, RenderPlanLogoOverlay, RenderPlanScene, RenderPlanSceneComposition, RenderPlanSceneStateIssue, RenderPlanSceneStatus } from '@/lib/types/render';
+import type { Project, RenderFit, RenderIssue, RenderPlan, RenderPlanCompositionLayer, RenderPlanLogoOverlay, RenderPlanScene, RenderPlanSceneComposition, RenderPlanSceneStateIssue, RenderPlanSceneStatus, VisualScene, VisualSceneBind } from '@/lib/types/render';
 import type { Asset } from '@/lib/types/asset';
 import type { Scene, VisualSpec } from '@/lib/types/scene';
 import { normalizeAudioMix } from './audio-mix';
@@ -7,8 +7,9 @@ import { formatSceneTiming, resolveMeasuredNarrationDuration, resolveSceneTiming
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
 import { mergeGraphicStyles } from './graphic-style';
 import { resolveStudioOverlay } from './studio-overlay';
-import { isSafeAssetPath, sortCompositionLayers, STUDIO_COMPOSITION_CANVAS } from './scene-composition';
+import { isSafeAssetPath, sortCompositionLayers, STUDIO_COMPOSITION_CANVAS, STUDIO_LAYER_IDS } from './scene-composition';
 import { applyStudioPresetAssets } from './studio-asset-resolver';
+import { isAllowedHttpsUrl, STOCK_HOTLINK_ALLOWED_HOSTS } from '@/lib/security/outbound-url';
 
 function findAsset(project: Project, assetId?: string): Asset | undefined {
   if (!assetId) {
@@ -50,7 +51,7 @@ function resolveFitIssues(project: Project, source: RenderPlanScene['source'], f
   return warning ? [createSceneIssue('scene.visual.fit.crop', warning, 'warning')] : [];
 }
 
-function resolveVisualSource(project: Project, scene: Scene): {
+export function resolveVisualSource(project: Project, scene: Scene): {
   status: RenderPlanSceneStatus;
   source: RenderPlanScene['source'];
   issues: RenderPlanSceneStateIssue[];
@@ -174,8 +175,17 @@ function resolveVisualSource(project: Project, scene: Scene): {
       }
 
       // Hotlink-policy selections (e.g. Unsplash) must be referenced by URL, not
-      // stored locally; the render step fetches the bytes transiently.
+      // stored locally; the render step fetches the bytes transiently. The URL is
+      // only trusted after the shared HTTPS allowlist check; client-supplied
+      // localhost/private/non-HTTPS values must never become a fetch target.
       if (selection && selection.usagePolicy === 'hotlink') {
+        if (!isAllowedHttpsUrl(selection.imageUrl, STOCK_HOTLINK_ALLOWED_HOSTS)) {
+          return {
+            status: 'invalid',
+            source: { kind: scene.type },
+            issues: [createSceneIssue('scene.visual.stock.remoteUrl.untrusted', 'Stock hotlink URL is not an allowed HTTPS CDN host.')]
+          };
+        }
         return {
           status: 'renderable',
           source: {
@@ -276,6 +286,35 @@ function resolveVisualSource(project: Project, scene: Scene): {
         issues: [createSceneIssue('scene.visual.unsupported', `Visual kind ${(visual as VisualSpec).kind} is unsupported.`)]
       };
   }
+}
+
+function deriveVisualSceneBind(scene: Scene, source: RenderPlanScene['source']): VisualSceneBind {
+  const visualKind = scene.visual?.kind;
+  const composition = scene.composition;
+  if (
+    (visualKind === 'html' || visualKind === 'stock_image')
+    && source.assetPath
+    && composition
+  ) {
+    const screen = composition.layers.find((layer) => layer.id === STUDIO_LAYER_IDS.image && layer.type === 'image');
+    if (screen?.fit === 'contain') {
+      return { mode: 'studio_screen', layerId: 'studio-screen', fit: 'contain' };
+    }
+  }
+
+  return { mode: 'full_frame' };
+}
+
+export function resolveVisualScene(project: Project, scene: Scene): VisualScene {
+  const resolved = resolveVisualSource(project, scene);
+  return {
+    sceneId: scene.id,
+    kind: scene.visual?.kind ?? scene.type,
+    readiness: resolved.status,
+    source: resolved.source,
+    bind: deriveVisualSceneBind(scene, resolved.source),
+    issues: resolved.issues
+  };
 }
 
 function resolveSceneLogo(project: Project, scene: Scene): {

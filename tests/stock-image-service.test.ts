@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 
 import { FakeStockProvider } from '@/lib/ai/stock/fake-provider';
 import type { StockProviderRegistry } from '@/lib/ai/stock/registry';
@@ -9,6 +11,7 @@ import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 import type { Scene, StockImageVisual } from '@/lib/types/scene';
 import type { StockPhoto } from '@/lib/types/stock';
+import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 function makeScene(visual: StockImageVisual): Scene {
   return {
@@ -79,7 +82,8 @@ function createHarness(visual: StockImageVisual) {
     media: { saveStockImage },
     registry,
     stateStore: new InMemoryStockStateStore({ now: () => 1000 }),
-    now: () => 1000
+    now: () => 1000,
+    submitLocks: new InMemoryExclusiveLock()
   });
 
   return {
@@ -186,7 +190,8 @@ describe('selectSceneStockImage', () => {
         configurationStatus: () => []
       },
       stateStore: new InMemoryStockStateStore({ now: () => 1000 }),
-      now: () => 1000
+      now: () => 1000,
+      submitLocks: new InMemoryExclusiveLock()
     });
 
     const result = await selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, dependencies);
@@ -240,6 +245,108 @@ describe('selectSceneStockImage', () => {
     await expect(
       selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, harness.dependencies)
     ).rejects.toMatchObject({ code: 'stock.scene.missingQuery' });
+  });
+
+  describe('concurrent scene submit reservation', () => {
+    it('lets only one of two overlapping auto-selects reach the provider', async () => {
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredSearch: () => void = () => {};
+      const searchEntered = new Promise<void>((resolve) => {
+        enteredSearch = resolve;
+      });
+      const harness = createHarness({ kind: 'stock_image', query: 'sunset over mountains', orientation: 'landscape' });
+      const inner = new FakeStockProvider();
+      let searchCalls = 0;
+      const gated: StockProvider = {
+        providerId: inner.providerId,
+        displayName: inner.displayName,
+        usagePolicy: inner.usagePolicy,
+        license: inner.license,
+        isConfigured: () => inner.isConfigured(),
+        async searchPhotos(query) {
+          searchCalls += 1;
+          enteredSearch();
+          await gate;
+          return inner.searchPhotos(query);
+        },
+        fetchPhoto: (photo) => inner.fetchPhoto(photo)
+      };
+      const dependencies = buildStockSelectionDependencies({
+        ...harness.dependencies,
+        registry: {
+          getProvider: () => gated,
+          listProviders: () => [],
+          configurationStatus: () => []
+        }
+      });
+
+      const first = selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, dependencies);
+      await searchEntered;
+      await expect(
+        selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, dependencies)
+      ).rejects.toMatchObject({ code: 'stock.scene.alreadyRunning' });
+      releaseGate();
+      await first;
+      expect(searchCalls).toBe(1);
+    });
+
+    it('lets only one of two independent file locks reach the stock provider', async () => {
+      const dir = path.join(os.tmpdir(), `stock-select-lock-${process.pid}-${Date.now()}`);
+      const resolvePath = (key: string) => path.join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, '_')}.lock`);
+      const holder = new FileExclusiveLock({ resolvePath });
+      const challenger = new FileExclusiveLock({ resolvePath });
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredSearch: () => void = () => {};
+      const searchEntered = new Promise<void>((resolve) => {
+        enteredSearch = resolve;
+      });
+      const harness = createHarness({ kind: 'stock_image', query: 'sunset over mountains', orientation: 'landscape' });
+      const inner = new FakeStockProvider();
+      let searchCalls = 0;
+      const gated: StockProvider = {
+        providerId: inner.providerId,
+        displayName: inner.displayName,
+        usagePolicy: inner.usagePolicy,
+        license: inner.license,
+        isConfigured: () => inner.isConfigured(),
+        async searchPhotos(query) {
+          searchCalls += 1;
+          enteredSearch();
+          await gate;
+          return inner.searchPhotos(query);
+        },
+        fetchPhoto: (photo) => inner.fetchPhoto(photo)
+      };
+      const base = buildStockSelectionDependencies({
+        ...harness.dependencies,
+        registry: {
+          getProvider: () => gated,
+          listProviders: () => [],
+          configurationStatus: () => []
+        }
+      });
+
+      const first = selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, {
+        ...base,
+        submitLocks: holder
+      });
+      await searchEntered;
+      await expect(
+        selectSceneStockImage('project-1', 'scene-1', { mode: 'mock' }, {
+          ...base,
+          submitLocks: challenger
+        })
+      ).rejects.toMatchObject({ code: 'stock.scene.alreadyRunning' });
+      releaseGate();
+      await first;
+      expect(searchCalls).toBe(1);
+    });
   });
 });
 

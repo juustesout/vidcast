@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FalVideoGenerationProvider, encodeFalJobId } from '@/lib/ai/video-generation/fal-provider';
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import {
   refreshVideoGenerationAttempt,
   submitSceneVideoGeneration
@@ -8,6 +9,8 @@ import {
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
+import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
+import { InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 const BASE_URL = 'https://queue.test';
 const ENDPOINT = 'minimax/h3-max-turbo/text-to-video';
@@ -70,6 +73,37 @@ function createProject(): Project {
   };
 }
 
+function withHumanApproval(project: Project): Project {
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
+}
+
 interface Harness {
   store: Pick<ProjectStore, 'getProject' | 'mutateProject' | 'updateProject'>;
   media: Pick<MediaStore, 'saveGeneratedVideo' | 'exists' | 'readRelativeFile'>;
@@ -78,6 +112,8 @@ interface Harness {
   submitCalls: () => number;
   savedAssets: () => number;
   submitBodies: () => string[];
+  sceneSubmitLocks: InMemoryExclusiveLock;
+  attemptPollLocks: InMemoryExclusiveLock;
 }
 
 function createHarness(
@@ -88,6 +124,8 @@ function createHarness(
   let submitCalls = 0;
   let savedAssets = 0;
   const submitBodies: string[] = [];
+  const sceneSubmitLocks = new InMemoryExclusiveLock();
+  const attemptPollLocks = new InMemoryExclusiveLock();
 
   const store = {
     async getProject(id: string) {
@@ -202,30 +240,51 @@ function createHarness(
     state,
     submitCalls: () => submitCalls,
     savedAssets: () => savedAssets,
-    submitBodies: () => submitBodies
+    submitBodies: () => submitBodies,
+    sceneSubmitLocks,
+    attemptPollLocks
   };
+}
+
+function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
+  vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+  vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '10');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '4');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+  vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+  for (const [name, value] of Object.entries(overrides)) {
+    vi.stubEnv(name, value);
+  }
 }
 
 beforeEach(() => {
   vi.stubEnv('FAL_KEY', 'fal-test-key');
   vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+  enablePaidSpendCap();
+  setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  setPaidSubmitLedgerForTests(undefined);
 });
 
 function depsOf(harness: Harness) {
   return {
     store: harness.store,
     media: harness.media,
-    registry: harness.registry as never
+    registry: harness.registry as never,
+    sceneSubmitLocks: harness.sceneSubmitLocks,
+    attemptPollLocks: harness.attemptPollLocks
   };
 }
 
 describe('FAL video generation through the scene service', () => {
   it('persists fal provider identity and endpoint across submit and poll', async () => {
-    const harness = createHarness(createProject());
+    const harness = createHarness(withHumanApproval(createProject()));
 
     const submission = await submitSceneVideoGeneration(
       'project-fal-service',
@@ -263,7 +322,7 @@ describe('FAL video generation through the scene service', () => {
   });
 
   it('never resolves fal in mock mode (policy blocks before any provider call)', async () => {
-    const harness = createHarness(createProject());
+    const harness = createHarness(withHumanApproval(createProject()));
     const getProvider = vi.spyOn(harness.registry, 'getProvider');
 
     await expect(
@@ -280,7 +339,7 @@ describe('FAL video generation through the scene service', () => {
   });
 
   it('keeps an ambiguous submit timeout active without a job id so it cannot be resubmitted', async () => {
-    const harness = createHarness(createProject(), { failSubmit: true });
+    const harness = createHarness(withHumanApproval(createProject()), { failSubmit: true });
 
     await expect(
       submitSceneVideoGeneration(
@@ -314,7 +373,7 @@ describe('FAL video generation through the scene service', () => {
   });
 
   it('keeps a timed-out poll attempt active (resumable, same job id) instead of failing it', async () => {
-    const harness = createHarness(createProject(), { failStatus: true });
+    const harness = createHarness(withHumanApproval(createProject()), { failStatus: true });
 
     const submission = await submitSceneVideoGeneration(
       'project-fal-service',
@@ -366,7 +425,7 @@ describe('FAL video generation through the scene service', () => {
     };
     scene.referenceIds = ['ref-fal-1', 'ref-fal-2'];
 
-    const harness = createHarness(project, { endpoint: I2V_ENDPOINT, withReferences: true, queueUrls: true });
+    const harness = createHarness(withHumanApproval(project), { endpoint: I2V_ENDPOINT, withReferences: true, queueUrls: true });
 
     const submission = await submitSceneVideoGeneration(
       'project-fal-service',

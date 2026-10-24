@@ -6,17 +6,30 @@ import { resolveRealImagePilotGate } from '@/lib/ai/image-generation/real-image-
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
 import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
+import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { GenerationAttempt, GenerationErrorCode, GenerationProvider, GenerationRecord } from '@/lib/types/generation';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { Scene } from '@/lib/types/scene';
+import { FileExclusiveLock, type ExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 import { createId } from '@/lib/utils/ids';
 
-const activeGenerationLocks = new Set<string>();
+const defaultSubmitLocks = new FileExclusiveLock({
+  resolvePath: (key) => {
+    const separator = key.indexOf(':');
+    const projectId = separator === -1 ? key : key.slice(0, separator);
+    const sceneId = separator === -1 ? 'scene' : key.slice(separator + 1);
+    const safeSceneId = sceneId.replace(/[^A-Za-z0-9._-]+/g, '_');
+    return path.join(getProjectRoot(projectId), 'locks', `image-submit-${safeSceneId}.lock`);
+  }
+});
 
 function lockKey(projectId: string, sceneId: string): string {
   return `${projectId}:${sceneId}`;
@@ -51,13 +64,19 @@ interface ImageGenerationServiceDependencies {
   store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedImage' | 'exists' | 'readRelativeFile'>;
   registry: ReturnType<typeof createImageGenerationRegistry>;
+  submitLocks?: ExclusiveLock;
 }
 
 const defaultDependencies: ImageGenerationServiceDependencies = {
   store: projectStore,
   media: mediaStore,
-  registry: createImageGenerationRegistry()
+  registry: createImageGenerationRegistry(),
+  submitLocks: defaultSubmitLocks
 };
+
+function submitLocksOf(dependencies: ImageGenerationServiceDependencies): ExclusiveLock {
+  return dependencies.submitLocks ?? defaultSubmitLocks;
+}
 
 function getReferenceById(project: Project, referenceId: string): ReferenceImage {
   const reference = project.references.find((entry) => entry.id === referenceId);
@@ -117,13 +136,11 @@ function updateScene(project: Project, sceneId: string, updater: (scene: Scene) 
 
 function sanitizeProviderError(error: unknown): string {
   if (error instanceof ImageGenerationProviderError) {
-    return error.message;
+    logProviderError('image-generation', { code: error.code, status: error.status, error });
+    return publicErrorMessage(error, 'Image generation failed.');
   }
 
-  if (error instanceof Error) {
-    return error.message;
-  }
-
+  logProviderError('image-generation', { code: 'INTERNAL', error });
   return 'Image generation failed.';
 }
 
@@ -185,15 +202,14 @@ function resolveImageProvider(options: { provider?: string; mode?: RunMode }) {
 export async function generateSceneImage(
   projectId: string,
   sceneId: string,
-  options: { regenerate?: boolean; provider?: string; mode?: RunMode } = {},
+  options: { regenerate?: boolean; provider?: string; mode?: RunMode; identity?: RequestIdentity } = {},
   dependencies: ImageGenerationServiceDependencies = defaultDependencies
 ): Promise<SceneImageGenerationExecutionResult> {
   const key = lockKey(projectId, sceneId);
-  if (activeGenerationLocks.has(key)) {
+  const submitLocks = submitLocksOf(dependencies);
+  if (!(await submitLocks.tryAcquire(key))) {
     throw new SceneImageGenerationError('Generation is already running for this scene.', 409, 'generation.scene.alreadyRunning');
   }
-
-  activeGenerationLocks.add(key);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -224,9 +240,13 @@ export async function generateSceneImage(
     const resolution = resolveImageProvider(options);
     try {
       requireHumanApprovalForMode(project, resolution.mode);
+      assertHumanActorForRealMode(resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new SceneImageGenerationError(error.message, error.status, `generation.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new SceneImageGenerationError(error.message, error.status, 'generation.policy.denied');
       }
       throw error;
     }
@@ -337,7 +357,7 @@ export async function generateSceneImage(
       await dependencies.store.mutateProject(projectId, withFailed);
 
       if (error instanceof ImageGenerationProviderError) {
-        throw new SceneImageGenerationError(error.message, error.status, error.code);
+        throw new SceneImageGenerationError(publicErrorMessage(error, 'Image generation failed.'), error.status, error.code);
       }
 
       throw new SceneImageGenerationError('Provider call failed during image generation.', 502, 'generation.provider.failed');
@@ -402,6 +422,6 @@ export async function generateSceneImage(
       model: generated.model
     };
   } finally {
-    activeGenerationLocks.delete(key);
+    await submitLocks.release(key);
   }
 }

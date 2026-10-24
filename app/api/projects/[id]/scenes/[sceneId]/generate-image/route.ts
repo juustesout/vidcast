@@ -11,8 +11,10 @@ interface RouteContext {
 export async function POST(request: Request, context: RouteContext) {
   const { id, sceneId } = await context.params;
 
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'generate_image');
   } catch (error) {
     if (error instanceof AccessControlError) {
@@ -24,7 +26,7 @@ export async function POST(request: Request, context: RouteContext) {
   const body = (await request.json().catch(() => ({}))) as { regenerate?: boolean };
 
   try {
-    const result = await generateSceneImage(id, sceneId, { regenerate: Boolean(body.regenerate) });
+    const result = await generateSceneImage(id, sceneId, { regenerate: Boolean(body.regenerate), identity });
     return NextResponse.json(result, { status: 200 });
   } catch (error) {
     if (error instanceof SceneImageGenerationError) {

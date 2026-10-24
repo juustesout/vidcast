@@ -11,15 +11,38 @@ interface RouteContext {
   params: Promise<{ id: string; path: string[] }>;
 }
 
+function isUnsafeSegment(segment: string): boolean {
+  if (!segment || segment === '.' || segment === '..') {
+    return true;
+  }
+  if (segment.includes('\0') || segment.includes('/') || segment.includes('\\')) {
+    return true;
+  }
+  let decoded = segment;
+  try {
+    decoded = decodeURIComponent(segment);
+  } catch {
+    return true;
+  }
+  if (decoded !== segment && (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\') || decoded.includes('\0') || decoded === '')) {
+    return true;
+  }
+  return decoded === '.' || decoded === '..';
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
 function resolveSafePath(projectId: string, segments: string[]): string | null {
   const projectRoot = getProjectRoot(projectId);
   const allowedHead = new Set(['assets', 'references', 'renders', 'previews']);
-  if (segments.length === 0 || !allowedHead.has(segments[0])) {
+  if (segments.length === 0 || !allowedHead.has(segments[0]) || segments.some(isUnsafeSegment)) {
     return null;
   }
-  const requestedPath = path.resolve(projectRoot, segments.join('/'));
-
-  if (!requestedPath.startsWith(path.resolve(projectRoot))) {
+  const requestedPath = path.resolve(projectRoot, ...segments);
+  if (!isPathInside(projectRoot, requestedPath)) {
     return null;
   }
 

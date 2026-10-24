@@ -32,8 +32,10 @@ export async function GET(request: Request, context: RouteContext) {
 export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
 
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'generate_music');
   } catch (error) {
     if (error instanceof AccessControlError) {
@@ -84,7 +86,8 @@ export async function POST(request: Request, context: RouteContext) {
       seed: body.seed,
       outputFormat: body.outputFormat,
       regenerate: action === 'regenerate',
-      mode: body.mode
+      mode: body.mode,
+      identity
     });
 
     return NextResponse.json({ action, ...result }, { status: 200 });

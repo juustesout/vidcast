@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import { createMusicRegistry, type MusicRegistry } from '@/lib/ai/music/registry';
 import { DEFAULT_ELEVENLABS_MUSIC_MODEL } from '@/lib/ai/music/elevenlabs-provider';
 import { MusicProviderError } from '@/lib/ai/music/provider';
@@ -5,14 +7,21 @@ import { clampMusicLengthMs, resolveTimelineMusicLengthMs } from '@/lib/render/m
 import { resolveProjectTimelineDurationSeconds } from '@/lib/render/scene-resolver';
 import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
+import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { Project, ProjectMusicGenerationAttempt } from '@/lib/types/render';
+import { FileExclusiveLock, type ExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 import { createId } from '@/lib/utils/ids';
 
-const activeMusicLocks = new Set<string>();
+const defaultSubmitLocks = new FileExclusiveLock({
+  resolvePath: (projectId) => path.join(getProjectRoot(projectId), 'locks', 'music-submit.lock')
+});
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -39,6 +48,7 @@ export class ProjectMusicGenerationError extends Error {
      | 'music.asset.invalidType'
      | 'music.approval.required'
      | 'music.approval.stale'
+     | 'music.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
@@ -62,6 +72,7 @@ export class ProjectMusicGenerationError extends Error {
        | 'music.asset.invalidType'
        | 'music.approval.required'
        | 'music.approval.stale'
+       | 'music.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
@@ -94,29 +105,37 @@ interface MusicServiceDependencies {
   store: Pick<ProjectStore, 'getProject' | 'mutateProject'>;
   media: Pick<typeof mediaStore, 'saveGeneratedMusic' | 'deleteAssetFile'>;
   registry: MusicRegistry;
+  submitLocks?: ExclusiveLock;
 }
 
 const defaultDependencies: MusicServiceDependencies = {
   store: projectStore,
   media: mediaStore,
-  registry: createMusicRegistry()
+  registry: createMusicRegistry(),
+  submitLocks: defaultSubmitLocks
 };
 
+function submitLocksOf(dependencies: MusicServiceDependencies): ExclusiveLock {
+  return dependencies.submitLocks ?? defaultSubmitLocks;
+}
+
 function mapProviderError(error: MusicProviderError): ProjectMusicGenerationError {
+  logProviderError('music', { code: error.code, status: error.status, error });
+  const message = publicErrorMessage(error, 'Music provider call failed.');
   switch (error.code) {
     case 'NOT_CONFIGURED':
-      return new ProjectMusicGenerationError(error.message, 409, 'music.provider.notConfigured');
+      return new ProjectMusicGenerationError(message, 409, 'music.provider.notConfigured');
     case 'INVALID_REQUEST':
     case 'UNSUPPORTED':
-      return new ProjectMusicGenerationError(error.message, 422, 'music.provider.unsupported');
+      return new ProjectMusicGenerationError(message, 422, 'music.provider.unsupported');
     case 'PROVIDER_AUTH':
-      return new ProjectMusicGenerationError(error.message, 502, 'music.provider.auth');
+      return new ProjectMusicGenerationError(message, 502, 'music.provider.auth');
     case 'PROVIDER_RATE_LIMIT':
-      return new ProjectMusicGenerationError(error.message, 429, 'music.provider.rateLimited');
+      return new ProjectMusicGenerationError(message, 429, 'music.provider.rateLimited');
     case 'PROVIDER_REJECTED':
-      return new ProjectMusicGenerationError(error.message, 422, 'music.provider.rejected');
+      return new ProjectMusicGenerationError(message, 422, 'music.provider.rejected');
     default:
-      return new ProjectMusicGenerationError(error.message, 502, 'music.provider.failed');
+      return new ProjectMusicGenerationError(message, 502, 'music.provider.failed');
   }
 }
 
@@ -157,14 +176,14 @@ export async function generateProjectMusic(
     outputFormat?: string;
     regenerate?: boolean;
     mode?: RunMode;
+    identity?: RequestIdentity;
   } = {},
   dependencies: MusicServiceDependencies = defaultDependencies
 ): Promise<ProjectMusicGenerationResult> {
-  if (activeMusicLocks.has(projectId)) {
+  const submitLocks = submitLocksOf(dependencies);
+  if (!(await submitLocks.tryAcquire(projectId))) {
     throw new ProjectMusicGenerationError('Music generation is already running for this project.', 409, 'music.alreadyRunning');
   }
-
-  activeMusicLocks.add(projectId);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -198,9 +217,13 @@ export async function generateProjectMusic(
     const resolution = resolveMusicProvider(options.provider, options.mode);
     try {
       requireHumanApprovalForMode(project, resolution.mode);
+      assertHumanActorForRealMode(resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new ProjectMusicGenerationError(error.message, error.status, `music.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new ProjectMusicGenerationError(error.message, error.status, 'music.policy.denied');
       }
       throw error;
     }
@@ -294,7 +317,7 @@ export async function generateProjectMusic(
       });
     } catch (error) {
       await finalizePaidSubmit(paidSubmit, 'failed');
-      const message = error instanceof Error ? error.message : 'Music provider call failed.';
+      const message = publicErrorMessage(error, 'Music provider call failed.');
       await dependencies.store.mutateProject(projectId, (fresh) => ({
         ...fresh,
         music: {
@@ -409,7 +432,7 @@ export async function generateProjectMusic(
       instrumental
     };
   } finally {
-    activeMusicLocks.delete(projectId);
+    await submitLocks.release(projectId);
   }
 }
 

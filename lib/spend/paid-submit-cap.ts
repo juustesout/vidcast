@@ -577,15 +577,30 @@ export function resolvePaidSubmitUnits(_modality: PaidSubmitModality): number {
   return 1;
 }
 
-export async function assertAndReservePaidSubmit(
-  input: PaidSubmitReserveInput
-): Promise<PaidSubmitReservation | undefined> {
-  if (input.mode !== 'real') {
+export function requireEnabledPaidSubmitCapForRealMode(
+  mode: RunMode
+): Extract<PaidSubmitCapConfig, { enabled: true }> | undefined {
+  if (mode !== 'real') {
     return undefined;
   }
 
   const config = resolvePaidSubmitCapConfig();
   if (!config.enabled) {
+    throw new PaidSubmitCapError(
+      'Paid provider spend cap is required for real generation but is disabled or unconfigured.',
+      403,
+      'paid.spend.cap.invalid'
+    );
+  }
+
+  return config;
+}
+
+export async function assertAndReservePaidSubmit(
+  input: PaidSubmitReserveInput
+): Promise<PaidSubmitReservation | undefined> {
+  const config = requireEnabledPaidSubmitCapForRealMode(input.mode);
+  if (!config) {
     return undefined;
   }
 

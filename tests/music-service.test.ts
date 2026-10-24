@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   clearProjectMusic,
@@ -13,6 +15,7 @@ import type { GeneratedMusicInput } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
+import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 function createProject(overrides: Partial<Project> = {}): Project {
   const now = new Date().toISOString();
@@ -77,7 +80,7 @@ function createScene(id: string, duration: number) {
 
 function createDependencies(
   project: Project,
-  behavior: { fail?: boolean; providerError?: MusicProviderError; failFinalUpdate?: boolean } = {}
+  behavior: { fail?: boolean; providerError?: MusicProviderError; failFinalUpdate?: boolean; generateGate?: () => Promise<void> } = {}
 ) {
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
@@ -137,6 +140,9 @@ function createDependencies(
         async generate(request: { durationMs: number; model?: string; outputFormat?: string }) {
           generateCalls += 1;
           generatedRequests.push(request);
+          if (behavior.generateGate) {
+            await behavior.generateGate();
+          }
           if (behavior.providerError) {
             throw behavior.providerError;
           }
@@ -157,7 +163,26 @@ function createDependencies(
     }
   };
 
-  return { state, store, media, registry, createdCount: () => createdCount, deletedAssets, generatedRequests, generateCalls: () => generateCalls };
+  return {
+    state,
+    store,
+    media,
+    registry,
+    submitLocks: new InMemoryExclusiveLock(),
+    createdCount: () => createdCount,
+    deletedAssets,
+    generatedRequests,
+    generateCalls: () => generateCalls
+  };
+}
+
+function musicServiceDeps(deps: ReturnType<typeof createDependencies>) {
+  return {
+    store: deps.store,
+    media: deps.media,
+    registry: deps.registry as never,
+    submitLocks: deps.submitLocks
+  };
 }
 
 function withHumanApproval(project: Project): Project {
@@ -214,11 +239,7 @@ describe('project music generation service', () => {
   it('generates background music, saves a music asset and records the selection', async () => {
     const deps = createDependencies(createProject());
 
-    const result = await generateProjectMusic('project-1', { prompt: 'calm ambient' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'calm ambient' }, musicServiceDeps(deps));
 
     expect(result.status).toBe('generated');
     expect(result.assetId).toBeDefined();
@@ -234,11 +255,7 @@ describe('project music generation service', () => {
 
   it('clamps an out-of-range requested length to provider-safe bounds', async () => {
     const deps = createDependencies(createProject());
-    const result = await generateProjectMusic('project-1', { prompt: 'p', musicLengthMs: 500 }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'p', musicLengthMs: 500 }, musicServiceDeps(deps));
     expect(result.musicLengthMs).toBe(3000);
   });
 
@@ -246,11 +263,7 @@ describe('project music generation service', () => {
     const project = createProject({ scenes: [createScene('scene-1', 4), createScene('scene-2', 6)] });
     const deps = createDependencies(project);
 
-    const result = await generateProjectMusic('project-1', { prompt: 'timeline' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'timeline' }, musicServiceDeps(deps));
 
     expect(deps.generatedRequests[0]?.durationMs).toBe(10_000);
     expect(result.musicLengthMs).toBe(10_000);
@@ -266,11 +279,7 @@ describe('project music generation service', () => {
     const project = createProject({ assets: [narrationAsset], scenes: [scene, createScene('scene-2', 4)] });
     const deps = createDependencies(project);
 
-    const result = await generateProjectMusic('project-1', { prompt: 'timeline' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'timeline' }, musicServiceDeps(deps));
 
     expect(result.musicLengthMs).toBe(7350);
   });
@@ -279,11 +288,7 @@ describe('project music generation service', () => {
     const project = createProject({ scenes: [createScene('scene-1', 10)] });
     const deps = createDependencies(project);
 
-    const result = await generateProjectMusic('project-1', { prompt: 'explicit', musicLengthMs: 30_000 }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'explicit', musicLengthMs: 30_000 }, musicServiceDeps(deps));
 
     expect(result.musicLengthMs).toBe(30_000);
   });
@@ -292,11 +297,7 @@ describe('project music generation service', () => {
     const project = createProject({ scenes: [createScene('scene-1', 600), createScene('scene-2', 600)] });
     const deps = createDependencies(project);
 
-    const result = await generateProjectMusic('project-1', { prompt: 'long' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'long' }, musicServiceDeps(deps));
 
     expect(result.musicLengthMs).toBe(600_000);
   });
@@ -310,11 +311,7 @@ describe('project music generation service', () => {
     });
     const deps = createDependencies(project);
 
-    const result = await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, musicServiceDeps(deps));
 
     expect(result.musicLengthMs).toBe(45_000);
   });
@@ -325,7 +322,7 @@ describe('project music generation service', () => {
     const deps = createDependencies(project);
 
     await expect(
-      generateProjectMusic('project-1', { prompt: 'new' }, { store: deps.store, media: deps.media, registry: deps.registry as never })
+      generateProjectMusic('project-1', { prompt: 'new' }, musicServiceDeps(deps))
     ).rejects.toMatchObject({ code: 'music.alreadyGenerated', status: 409 });
   });
 
@@ -334,11 +331,7 @@ describe('project music generation service', () => {
     const project = createProject({ assets: [existing], music: { assetId: existing.id, status: 'generated', prompt: 'old' } });
     const deps = createDependencies(project);
 
-    const result = await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, musicServiceDeps(deps));
 
     expect(result.assetId).not.toBe(existing.id);
     expect(deps.state.project.assets.map((asset) => asset.id)).toContain('asset-existing');
@@ -353,11 +346,7 @@ describe('project music generation service', () => {
     });
     const deps = createDependencies(project);
 
-    await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    await generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, musicServiceDeps(deps));
 
     expect(deps.generatedRequests.at(-1)?.outputFormat).toBeUndefined();
   });
@@ -368,11 +357,7 @@ describe('project music generation service', () => {
     const deps = createDependencies(project, { fail: true });
 
     await expect(
-      generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateProjectMusic('project-1', { prompt: 'new', regenerate: true }, musicServiceDeps(deps))
     ).rejects.toBeInstanceOf(ProjectMusicGenerationError);
 
     expect(deps.state.project.music?.status).toBe('failed');
@@ -386,7 +371,7 @@ describe('project music generation service', () => {
     });
 
     await expect(
-      generateProjectMusic('project-1', { prompt: 'calm' }, { store: deps.store, media: deps.media, registry: deps.registry as never })
+      generateProjectMusic('project-1', { prompt: 'calm' }, musicServiceDeps(deps))
     ).rejects.toMatchObject({ code: 'music.provider.rateLimited', status: 429 });
 
     expect(deps.state.project.music?.status).toBe('failed');
@@ -396,7 +381,7 @@ describe('project music generation service', () => {
     const deps = createDependencies(createProject(), { failFinalUpdate: true });
 
     await expect(
-      generateProjectMusic('project-1', { prompt: 'calm' }, { store: deps.store, media: deps.media, registry: deps.registry as never })
+      generateProjectMusic('project-1', { prompt: 'calm' }, musicServiceDeps(deps))
     ).rejects.toMatchObject({ code: 'music.provider.failed', status: 500 });
 
     expect(deps.deletedAssets).toHaveLength(1);
@@ -406,7 +391,7 @@ describe('project music generation service', () => {
   it('requires a prompt', async () => {
     const deps = createDependencies(createProject());
     await expect(
-      generateProjectMusic('project-1', {}, { store: deps.store, media: deps.media, registry: deps.registry as never })
+      generateProjectMusic('project-1', {}, musicServiceDeps(deps))
     ).rejects.toMatchObject({ code: 'music.invalid', status: 400 });
   });
 
@@ -449,13 +434,47 @@ describe('project music generation service', () => {
     setPaidSubmitLedgerForTests(ledger);
     const deps = createDependencies(createProject());
 
-    const result = await generateProjectMusic('project-1', { prompt: 'calm ambient' }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateProjectMusic('project-1', { prompt: 'calm ambient' }, musicServiceDeps(deps));
     expect(result.status).toBe('generated');
     expect(reserveCalls).toBe(0);
+  });
+
+  it('blocks a service token from real music generation even with human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    const deps = createDependencies(withHumanApproval(createProject()));
+
+    await expect(
+      generateProjectMusic(
+        'project-1',
+        {
+          prompt: 'calm ambient',
+          mode: 'real',
+          provider: 'elevenlabs',
+          identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+        },
+        musicServiceDeps(deps)
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'music.policy.denied'
+    });
+    expect(deps.generateCalls()).toBe(0);
+  });
+
+  it('fails closed for a real music submit when the spend cap is disabled', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const deps = createDependencies(withHumanApproval(createProject()));
+
+    await expect(
+      generateProjectMusic('project-1', { prompt: 'calm ambient', mode: 'real', provider: 'elevenlabs' }, musicServiceDeps(deps))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(deps.generateCalls()).toBe(0);
   });
 
   it('blocks a real music submit when the host cap is exhausted', async () => {
@@ -466,15 +485,94 @@ describe('project music generation service', () => {
     const deps = createDependencies(withHumanApproval(createProject()));
 
     await expect(
-      generateProjectMusic('project-1', { prompt: 'calm ambient', mode: 'real', provider: 'elevenlabs' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateProjectMusic('project-1', { prompt: 'calm ambient', mode: 'real', provider: 'elevenlabs' }, musicServiceDeps(deps))
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.exceeded'
     });
     expect(deps.generateCalls()).toBe(0);
+  });
+
+  describe('concurrent project submit reservation', () => {
+    it('lets only one of two overlapping submits reach the provider', async () => {
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredGenerate: () => void = () => {};
+      const generateEntered = new Promise<void>((resolve) => {
+        enteredGenerate = resolve;
+      });
+      const deps = createDependencies(createProject(), {
+        generateGate: async () => {
+          enteredGenerate();
+          await gate;
+        }
+      });
+
+      const first = generateProjectMusic('project-1', { prompt: 'calm ambient' }, musicServiceDeps(deps));
+      await generateEntered;
+
+      await expect(
+        generateProjectMusic('project-1', { prompt: 'calm ambient' }, musicServiceDeps(deps))
+      ).rejects.toMatchObject({ code: 'music.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.generateCalls()).toBe(1);
+    });
+
+    it('lets only one of two independent file locks reach the provider', async () => {
+      const dir = path.join(os.tmpdir(), `music-submit-lock-${process.pid}-${Date.now()}`);
+      const resolvePath = (key: string) => path.join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, '_')}.lock`);
+      const holder = new FileExclusiveLock({ resolvePath });
+      const challenger = new FileExclusiveLock({ resolvePath });
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredGenerate: () => void = () => {};
+      const generateEntered = new Promise<void>((resolve) => {
+        enteredGenerate = resolve;
+      });
+      const deps = createDependencies(createProject(), {
+        generateGate: async () => {
+          enteredGenerate();
+          await gate;
+        }
+      });
+
+      const first = generateProjectMusic('project-1', { prompt: 'calm ambient' }, {
+        ...musicServiceDeps(deps),
+        submitLocks: holder
+      });
+      await generateEntered;
+
+      await expect(
+        generateProjectMusic('project-1', { prompt: 'calm ambient' }, {
+          ...musicServiceDeps(deps),
+          submitLocks: challenger
+        })
+      ).rejects.toMatchObject({ code: 'music.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.generateCalls()).toBe(1);
+    });
+
+    it('releases the lock after a provider failure so a retry can run', async () => {
+      const failing = createDependencies(createProject(), { fail: true });
+      await expect(
+        generateProjectMusic('project-1', { prompt: 'calm ambient' }, musicServiceDeps(failing))
+      ).rejects.toThrow(ProjectMusicGenerationError);
+
+      const retry = createDependencies(failing.state.project);
+      const result = await generateProjectMusic('project-1', { prompt: 'calm ambient', regenerate: true }, {
+        ...musicServiceDeps(retry),
+        submitLocks: failing.submitLocks
+      });
+      expect(result.status).toBe('generated');
+      expect(retry.generateCalls()).toBe(1);
+    });
   });
 });

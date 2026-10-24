@@ -11,8 +11,10 @@ interface RouteContext {
 export async function POST(request: Request, context: RouteContext) {
   const { id, sceneId } = await context.params;
 
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'generate_video');
   } catch (error) {
     if (error instanceof AccessControlError) {
@@ -36,7 +38,8 @@ export async function POST(request: Request, context: RouteContext) {
       regenerate: Boolean(body.regenerate),
       provider,
       model,
-      mode
+      mode,
+      identity
     });
     return NextResponse.json(result, { status: 200 });
   } catch (error) {

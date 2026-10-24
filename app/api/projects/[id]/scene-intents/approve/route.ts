@@ -15,8 +15,13 @@ export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
   const body = (await request.json().catch(() => ({}))) as { intentIds?: unknown };
 
+  let actorSubject: string;
   try {
-    await requireProjectAccess(request, id);
+    const { identity } = await requireProjectAccess(request, id);
+    if (identity.kind !== 'user') {
+      throw new AccessControlError('A browser session is required to approve scene intents.', 'FORBIDDEN', 403);
+    }
+    actorSubject = identity.subject;
   } catch (error) {
     if (error instanceof AccessControlError) {
       return toAccessControlResponse(error);
@@ -31,7 +36,7 @@ export async function POST(request: Request, context: RouteContext) {
   let project: Awaited<ReturnType<typeof projectStore.mutateProject>>;
   try {
     project = await projectStore.mutateProject(id, (current) => {
-      const result = approveSceneIntents(current, intentIds);
+      const result = approveSceneIntents(current, intentIds, { subject: actorSubject });
       const finalValidation = validateProject(result.project);
       if (!finalValidation.valid) {
         throw new ProjectUpdateValidationError(finalValidation, 'Approved scene intents are invalid.');

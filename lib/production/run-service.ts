@@ -19,6 +19,7 @@ import { createId } from '@/lib/utils/ids';
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
 import { deriveProductionPlan } from './production-planner';
 import { createProductionRunnerError, runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent } from './production-runner';
+import type { RequestIdentity } from '@/lib/security/auth';
 import { assertRunPolicyPreflight, resolveRunPolicy, resolveRunPolicyServerConfig, type RunPolicyRequest, type RunPolicyServerConfig } from './run-policy';
 import { reconcileInterruptedGenerations } from './run-recovery';
 import { InMemoryRunRegistry } from './run-registry';
@@ -30,6 +31,7 @@ export interface StartProductionRunRequest {
   policy?: RunPolicyRequest;
   maxIterations?: number;
   limits?: Partial<Record<ProductionActionType, number>>;
+  identity?: RequestIdentity;
 }
 
 export interface StartProductionRunResponse {
@@ -394,7 +396,7 @@ export class HeadlessProductionRunService {
     let policy;
     try {
       policy = resolveRunPolicy(input.policy, this.config.policy);
-      assertRunPolicyPreflight(project, policy);
+      assertRunPolicyPreflight(project, policy, input.identity);
     } catch (error) {
       if (error instanceof Error && 'code' in error && 'status' in error) {
         const typed = error as Error & { code?: string; status?: number; details?: Record<string, unknown> };

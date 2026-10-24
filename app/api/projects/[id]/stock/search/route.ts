@@ -5,6 +5,7 @@ import { searchStockPhotos, StockSearchError } from '@/lib/ai/stock/stock-search
 import type { RunMode } from '@/lib/production/run-types';
 import { AccessControlError, enforceThrottle, requireProjectAccess } from '@/lib/security/access-control';
 import { toAccessControlResponse } from '@/lib/security/http-response';
+import type { Project } from '@/lib/types/render';
 import type { StockOrientation, StockProviderId } from '@/lib/types/stock';
 
 interface RouteContext {
@@ -17,9 +18,13 @@ const MODES: RunMode[] = ['mock', 'real'];
 export async function GET(request: Request, context: RouteContext) {
   const { id } = await context.params;
 
+  let project: Project;
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'stock_search');
+    project = access.project;
   } catch (error) {
     if (error instanceof AccessControlError) {
       return toAccessControlResponse(error);
@@ -70,7 +75,9 @@ export async function GET(request: Request, context: RouteContext) {
       orientation: orientationRaw as StockOrientation | undefined,
       providers,
       limit,
-      mode: modeRaw as RunMode | undefined
+      mode: modeRaw as RunMode | undefined,
+      project,
+      identity
     });
     return NextResponse.json(result, { status: 200 });
   } catch (error) {

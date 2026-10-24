@@ -1,3 +1,5 @@
+import { logProviderError, publicMessageForProviderCode } from '@/lib/security/safe-error';
+
 import {
   PresenterProviderError,
   type PresenterDownloadResult,
@@ -102,18 +104,10 @@ function mapStatus(raw: string | undefined): PresenterJobStatus['status'] {
   }
 }
 
-async function readError(response: Response): Promise<string> {
+async function throwHttpError(response: Response): Promise<never> {
   const text = await response.text().catch(() => '');
-  if (!text) {
-    return `${response.status} ${response.statusText}`;
-  }
-  try {
-    const body = asRecord(JSON.parse(text));
-    const message = readString(body, 'message') ?? readString(asRecord(body?.error), 'message') ?? readString(body, 'error');
-    return message ?? text.slice(0, 500);
-  } catch {
-    return text.slice(0, 500);
-  }
+  logProviderError('heygen', { code: 'PROVIDER_ERROR', status: response.status, body: text || `${response.status} ${response.statusText}` });
+  throw new PresenterProviderError(publicMessageForProviderCode('PROVIDER_ERROR'), 'PROVIDER_ERROR', response.status);
 }
 
 export class HeyGenPresenterProvider implements PresenterProvider {
@@ -135,15 +129,12 @@ export class HeyGenPresenterProvider implements PresenterProvider {
       },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     }).catch((error) => {
-      throw new PresenterProviderError(
-        error instanceof Error ? `HeyGen request failed: ${error.message}` : 'HeyGen request failed.',
-        'PROVIDER_ERROR'
-      );
+      logProviderError('heygen', { code: 'PROVIDER_ERROR', error });
+      throw new PresenterProviderError(publicMessageForProviderCode('PROVIDER_ERROR'), 'PROVIDER_ERROR');
     });
 
     if (!response.ok) {
-      const message = await readError(response);
-      throw new PresenterProviderError(`HeyGen request failed: ${message}`, 'PROVIDER_ERROR', response.status);
+      await throwHttpError(response);
     }
 
     return response.json().catch(() => ({}));
@@ -202,16 +193,21 @@ export class HeyGenPresenterProvider implements PresenterProvider {
     const status = mapStatus(providerStatus);
 
     if (status === 'failed') {
-      const error = readString(data, 'failure_message') ??
-        readString(data, 'failure') ??
-        readString(data, 'error') ??
-        readString(asRecord(data?.error), 'message') ??
-        'HeyGen video generation failed.';
       const failureCode = readString(data, 'failure_code');
+      logProviderError('heygen', {
+        code: 'PROVIDER_ERROR',
+        body: {
+          failure_code: failureCode,
+          failure_message: readString(data, 'failure_message') ??
+            readString(data, 'failure') ??
+            readString(data, 'error') ??
+            readString(asRecord(data?.error), 'message')
+        }
+      });
       return {
         status,
         providerStatus,
-        error: failureCode ? `${failureCode}: ${error}` : error
+        error: publicMessageForProviderCode('PROVIDER_ERROR')
       };
     }
 
@@ -246,14 +242,13 @@ export class HeyGenPresenterProvider implements PresenterProvider {
     const response = await fetch(status.videoUrl, {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     }).catch((error) => {
-      throw new PresenterProviderError(
-        error instanceof Error ? `HeyGen download failed: ${error.message}` : 'HeyGen download failed.',
-        'PROVIDER_ERROR'
-      );
+      logProviderError('heygen', { code: 'PROVIDER_ERROR', error });
+      throw new PresenterProviderError(publicMessageForProviderCode('PROVIDER_ERROR'), 'PROVIDER_ERROR');
     });
 
     if (!response.ok) {
-      throw new PresenterProviderError(`HeyGen download failed: ${response.status} ${response.statusText}`, 'PROVIDER_ERROR', response.status);
+      logProviderError('heygen', { code: 'PROVIDER_ERROR', status: response.status, body: `${response.status} ${response.statusText}` });
+      throw new PresenterProviderError(publicMessageForProviderCode('PROVIDER_ERROR'), 'PROVIDER_ERROR', response.status);
     }
 
     return {

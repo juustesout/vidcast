@@ -170,16 +170,18 @@ describe('FalVideoGenerationProvider', () => {
     await expect(fal.submit({ prompt: 'x' })).rejects.toMatchObject({ code: 'PROVIDER_FAILED' });
   });
 
-  it('does not leak the api key into error messages', async () => {
-    const { fetchImpl } = recordingFetch(() => jsonResponse({ error: 'generic failure' }, { status: 500 }));
+  it('does not leak the api key or provider body into error messages', async () => {
+    const { fetchImpl } = recordingFetch(() => jsonResponse({ error: 'generic failure with secret quota' }, { status: 500 }));
     const fal = provider(fetchImpl);
 
     try {
       await fal.submit({ prompt: 'x' });
       throw new Error('expected rejection');
     } catch (error) {
+      expect((error as Error).message).toBe('Provider request failed.');
       expect((error as Error).message).not.toContain('test-key');
       expect((error as Error).message).not.toContain('Key test-key');
+      expect((error as Error).message).not.toContain('secret quota');
     }
   });
 
@@ -211,7 +213,8 @@ describe('FalVideoGenerationProvider', () => {
     const status = await fal.getStatus(encodeFalJobId(ENDPOINT, 'req-1'));
     expect(status.status).toBe('failed');
     expect(status.errorCode).toBe('PROVIDER_FAILED');
-    expect(status.errorMessage).toBe('content flagged');
+    expect(status.errorMessage).toBe('Provider request failed.');
+    expect(status.errorMessage).not.toContain('content flagged');
   });
 
   it('keeps polling on an unknown status instead of abandoning the job', async () => {

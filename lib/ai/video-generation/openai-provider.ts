@@ -1,4 +1,12 @@
 import { VideoGenerationProviderError, type VideoGenerationCapabilities, type VideoGenerationDownload, type VideoGenerationProvider, type VideoGenerationRequest, type VideoGenerationStatusResult, type VideoGenerationSubmission } from './provider';
+import {
+  assertAllowedHttpsUrl,
+  OPENAI_VIDEO_API_HOST,
+  OPENAI_VIDEO_DOWNLOAD_ALLOWED_HOSTS,
+  OutboundUrlError
+} from '@/lib/security/outbound-url';
+import { logProviderError, publicMessageForProviderCode } from '@/lib/security/safe-error';
+import type { GenerationErrorCode } from '@/lib/types/generation';
 
 interface OpenAiVideoProviderOptions {
   apiKey?: string;
@@ -6,14 +14,20 @@ interface OpenAiVideoProviderOptions {
   baseUrl?: string;
 }
 
-function parseSafeErrorMessage(payload: unknown): string {
-  if (payload && typeof payload === 'object') {
-    const maybe = payload as { error?: { message?: string } };
-    if (maybe.error?.message) {
-      return maybe.error.message;
-    }
-  }
-  return 'OpenAI video generation request failed.';
+function mapOpenAiHttpError(status: number, payload: unknown): VideoGenerationProviderError {
+  const code: GenerationErrorCode = status === 401 || status === 403
+    ? 'PROVIDER_AUTH'
+    : status === 429
+      ? 'PROVIDER_RATE_LIMIT'
+      : status >= 400 && status < 500
+        ? 'PROVIDER_REJECTED'
+        : 'PROVIDER_FAILED';
+  logProviderError('openai-video', { code, status, body: payload });
+  return new VideoGenerationProviderError(
+    publicMessageForProviderCode(code),
+    status >= 400 && status < 500 ? 422 : 502,
+    code
+  );
 }
 
 function mapAspectRatio(aspectRatio?: string): string | undefined {
@@ -107,8 +121,7 @@ export class OpenAiVideoGenerationProvider implements VideoGenerationProvider {
     const body = (await response.json().catch(() => ({}))) as { id?: string; status?: string; error?: { message?: string } };
 
     if (!response.ok || !body.id) {
-      const code = response.status === 401 || response.status === 403 ? 'PROVIDER_AUTH' : response.status === 429 ? 'PROVIDER_RATE_LIMIT' : response.status >= 400 && response.status < 500 ? 'PROVIDER_REJECTED' : 'PROVIDER_FAILED';
-      throw new VideoGenerationProviderError(parseSafeErrorMessage(body), response.status >= 400 && response.status < 500 ? 422 : 502, code);
+      throw mapOpenAiHttpError(response.status, body);
     }
 
     const mapped = normalizeProviderStatus(body.status || 'queued');
@@ -134,8 +147,7 @@ export class OpenAiVideoGenerationProvider implements VideoGenerationProvider {
     const body = (await response.json().catch(() => ({}))) as { status?: string; error?: { message?: string }; output?: { url?: string } };
 
     if (!response.ok) {
-      const code = response.status === 401 || response.status === 403 ? 'PROVIDER_AUTH' : response.status === 429 ? 'PROVIDER_RATE_LIMIT' : response.status >= 400 && response.status < 500 ? 'PROVIDER_REJECTED' : 'PROVIDER_FAILED';
-      throw new VideoGenerationProviderError(parseSafeErrorMessage(body), response.status >= 400 && response.status < 500 ? 422 : 502, code);
+      throw mapOpenAiHttpError(response.status, body);
     }
 
     const mapped = normalizeProviderStatus(body.status || 'generating');
@@ -159,11 +171,29 @@ export class OpenAiVideoGenerationProvider implements VideoGenerationProvider {
       throw new VideoGenerationProviderError('Provider did not expose an output URL for the completed video job.', 502, 'DOWNLOAD_FAILED');
     }
 
-    const response = await fetch(outputUrl, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`
+    let parsed: URL;
+    try {
+      parsed = assertAllowedHttpsUrl(outputUrl, OPENAI_VIDEO_DOWNLOAD_ALLOWED_HOSTS);
+    } catch (error) {
+      if (error instanceof OutboundUrlError) {
+        throw new VideoGenerationProviderError(
+          'Provider output URL is not a trusted OpenAI download host.',
+          502,
+          'DOWNLOAD_FAILED'
+        );
       }
+      throw error;
+    }
+
+    const headers: Record<string, string> = {};
+    if (parsed.hostname.toLowerCase() === OPENAI_VIDEO_API_HOST) {
+      headers.Authorization = `Bearer ${this.apiKey}`;
+    }
+
+    const response = await fetch(parsed.href, {
+      method: 'GET',
+      headers,
+      redirect: 'error'
     });
 
     if (!response.ok) {

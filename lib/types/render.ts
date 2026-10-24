@@ -1,6 +1,6 @@
 import type { Asset, AssetType } from './asset';
 import type { ExplainerSpec } from './explainer';
-import type { GraphicStyleSpec, GraphicTemplateType, HtmlStillBackground, HtmlStillTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, StudioOverlaySpec, TransitionSpec } from './scene';
+import type { GraphicStyleSpec, GraphicTemplateType, HtmlStillBackground, HtmlStillTemplateType, LogoOverlaySpec, MotionSpec, NarrationSpec, OverlaySpec, SceneType, StudioOverlaySpec, TransitionSpec, VisualSpec } from './scene';
 import type { SceneCompositionFit, SceneCompositionLayerType, SceneCompositionPresenterMode, SceneCompositionPresetName, SceneCompositionRect, SceneCompositionSchemaVersion } from './scene-composition';
 import type { ReferenceImage } from './reference';
 import type { PresenterClipSpec, ProjectPresenterSettings, CompositionPresenterPlan } from './presenter';
@@ -186,6 +186,21 @@ export interface RenderPlanSceneStateIssue {
   code: string;
   message: string;
   severity: 'error' | 'warning';
+}
+
+export type VisualSceneReadiness = RenderPlanSceneStatus;
+
+export type VisualSceneBind =
+  | { mode: 'studio_screen'; layerId: 'studio-screen'; fit: 'contain' }
+  | { mode: 'full_frame' };
+
+export interface VisualScene {
+  sceneId: string;
+  kind: VisualSpec['kind'] | SceneType;
+  readiness: VisualSceneReadiness;
+  source: RenderPlanSceneSource;
+  bind: VisualSceneBind;
+  issues: RenderPlanSceneStateIssue[];
 }
 
 export type RenderPlanCompositionMediaKind = 'image' | 'video';

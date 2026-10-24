@@ -97,7 +97,7 @@ describe('HeyGen presenter provider', () => {
     expect(JSON.stringify(body)).not.toContain('test-key');
   });
 
-  it('surfaces HeyGen failure_code and failure_message', async () => {
+  it('does not echo HeyGen failure_code or failure_message to callers', async () => {
     vi.stubEnv('HEYGEN_API_KEY', 'test-key');
     vi.stubGlobal(
       'fetch',
@@ -120,7 +120,23 @@ describe('HeyGen presenter provider', () => {
     await expect(provider.getStatus('video-1')).resolves.toMatchObject({
       status: 'failed',
       providerStatus: 'failed',
-      error: 'rendering_failed: Avatar rendering timed out'
+      error: 'Provider request failed.'
+    });
+  });
+
+  it('does not echo HeyGen HTTP error bodies', async () => {
+    vi.stubEnv('HEYGEN_API_KEY', 'test-key');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ message: 'invalid api key test-key' }), { status: 401 })
+      )
+    );
+
+    const provider = new HeyGenPresenterProvider();
+    await expect(provider.getStatus('video-1')).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR',
+      message: 'Provider request failed.'
     });
   });
 

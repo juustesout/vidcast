@@ -18,6 +18,7 @@ import { buildLogoOverlayFilter, resolveLogoGeometry } from './logo-overlay';
 import { buildStudioOverlayFilter, createStudioOverlaySvg } from './studio-overlay';
 import { getProjectRoot } from '@/lib/storage/storage-paths';
 import { buildCompositionSceneArgs, CompositionRenderError } from './scene-composition-compositor';
+import { fetchAllowedHttps, OutboundUrlError, STOCK_HOTLINK_ALLOWED_HOSTS } from '@/lib/security/outbound-url';
 
 export type SceneRenderErrorCode = 'INVALID_PLAN' | 'MISSING_ASSET' | 'FFMPEG_UNAVAILABLE' | 'FFMPEG_TIMEOUT' | 'FFMPEG_FAILED' | 'OUTPUT_INVALID' | 'UNSUPPORTED_RENDER';
 
@@ -125,13 +126,16 @@ function parseFraction(value?: string): number | undefined {
   return numerator / denominator;
 }
 
-async function fetchRemoteSourceToFile(url: string, targetDir: string, baseName: string): Promise<string> {
+export async function fetchRemoteSourceToFile(url: string, targetDir: string, baseName: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), getSceneRenderTimeoutMs());
   let response: Response;
   try {
-    response = await fetch(url, { signal: controller.signal });
+    response = await fetchAllowedHttps(url, STOCK_HOTLINK_ALLOWED_HOSTS, { signal: controller.signal });
   } catch (error) {
+    if (error instanceof OutboundUrlError) {
+      throw new SceneRenderError('Remote render source URL is not allowed.', 'MISSING_ASSET', error.message);
+    }
     throw new SceneRenderError(
       'Failed to fetch remote render source.',
       'MISSING_ASSET',

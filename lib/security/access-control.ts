@@ -72,6 +72,12 @@ export function requireIdentity(request: Request): RequestIdentity {
   return identity;
 }
 
+export function assertHumanActorForRealMode(mode: string | undefined, identity: RequestIdentity | undefined): void {
+  if (mode === 'real' && identity?.kind === 'service') {
+    throw new AccessControlError('A browser session is required for real or paid execution.', 'FORBIDDEN', 403);
+  }
+}
+
 export async function requireProjectAccess(
   request: Request,
   projectId: string,

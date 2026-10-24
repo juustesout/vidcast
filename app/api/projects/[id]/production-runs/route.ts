@@ -55,8 +55,10 @@ const startRunSchema = z.object({
 export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
 
+  let identity;
   try {
-    const { identity } = await requireProjectAccess(request, id);
+    const access = await requireProjectAccess(request, id);
+    identity = access.identity;
     enforceThrottle(identity, 'run_start');
   } catch (error) {
     if (error instanceof AccessControlError) {
@@ -95,7 +97,8 @@ export async function POST(request: Request, context: RouteContext) {
         music: parsed.data.music
       },
       maxIterations: parsed.data.maxIterations,
-      limits: parsed.data.limits
+      limits: parsed.data.limits,
+      identity
     });
 
     return NextResponse.json(

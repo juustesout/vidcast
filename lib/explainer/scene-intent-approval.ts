@@ -1,4 +1,10 @@
 import type { Project } from '@/lib/types/render';
+import {
+  hashProductionContent,
+  stampHumanApproval,
+  stampIntentApproval,
+  type ApprovalActor
+} from './human-approval';
 
 export class SceneIntentApprovalError extends Error {
   readonly code: 'INTENT_NOT_FOUND';
@@ -22,12 +28,18 @@ export interface SceneIntentApprovalResult {
  * - With no `intentIds`, every intent that is not yet approved is approved.
  * - With `intentIds`, only those intents are approved; an unknown id is a hard
  *   error (`INTENT_NOT_FOUND`) so callers cannot silently approve nothing.
- * - Intents that are already approved are reported under `skipped` (idempotent).
+ * - Intents that are already approved for the current content are reported
+ *   under `skipped` (idempotent).
  *
  * This is an explicit status transition only; it never materializes scenes and
- * never approves anything implicitly.
+ * never approves anything implicitly. Callers must supply a human actor; the
+ * API layer refuses service identity before this function runs.
  */
-export function approveSceneIntents(project: Project, intentIds?: string[]): SceneIntentApprovalResult {
+export function approveSceneIntents(
+  project: Project,
+  intentIds?: string[],
+  actor: ApprovalActor = { subject: 'user' }
+): SceneIntentApprovalResult {
   const intents = project.explainer?.sceneIntents ?? [];
   const byId = new Map(intents.map((intent) => [intent.id, intent]));
 
@@ -41,34 +53,54 @@ export function approveSceneIntents(project: Project, intentIds?: string[]): Sce
     }
   }
 
+  const approvedAt = new Date().toISOString();
   const approved: string[] = [];
   const skipped: string[] = [];
   const nextIntents = intents.map((intent) => {
+    const cloned = { ...intent, beatIds: intent.beatIds.slice(), timing: { ...intent.timing } };
     if (!requestedIds.includes(intent.id)) {
-      return { ...intent, beatIds: intent.beatIds.slice() };
+      return cloned;
     }
 
-    if (intent.status === 'approved') {
+    if (cloned.status === 'approved') {
       skipped.push(intent.id);
-      return { ...intent, beatIds: intent.beatIds.slice() };
+      return cloned;
     }
 
     approved.push(intent.id);
-    return { ...intent, beatIds: intent.beatIds.slice(), status: 'approved' as const };
+    return {
+      ...cloned,
+      status: 'approved' as const,
+      approval: stampIntentApproval(cloned, actor, approvedAt)
+    };
   });
 
-  return {
-    project: {
-      ...project,
-      ...(project.explainer
-        ? {
-            explainer: {
-              ...project.explainer,
-              sceneIntents: nextIntents
-            }
+  const nextProject: Project = {
+    ...project,
+    ...(project.explainer
+      ? {
+          explainer: {
+            ...project.explainer,
+            sceneIntents: nextIntents
           }
-        : {})
-    },
+        }
+      : {})
+  };
+
+  if (nextProject.explainer) {
+    const previous = nextProject.explainer.humanApproval;
+    const contentHash = hashProductionContent(nextProject);
+    nextProject.explainer = {
+      ...nextProject.explainer,
+      humanApproval:
+        previous && previous.contentHash === contentHash && previous.approvedBy === actor.subject
+          ? previous
+          : stampHumanApproval(nextProject, actor, approvedAt)
+    };
+  }
+
+  return {
+    project: nextProject,
     approved,
     skipped
   };

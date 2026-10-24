@@ -83,7 +83,11 @@ describe('select-stock-image route', () => {
     expect(response.status).toBe(200);
     expect(body.action).toBe('auto');
     expect(body.provider).toBe('pexels');
-    expect(auto).toHaveBeenCalledWith('project-1', 'scene-1', { regenerate: false, mode: undefined });
+    expect(auto).toHaveBeenCalledWith('project-1', 'scene-1', {
+      regenerate: false,
+      mode: undefined,
+      identity: expect.objectContaining({ kind: 'user', subject: 'user-a', authType: 'session' })
+    });
   });
 
   it('resolves a chosen candidate server-side and applies it', async () => {
@@ -107,7 +111,8 @@ describe('select-stock-image route', () => {
       query: 'mountains',
       orientation: 'landscape',
       regenerate: false,
-      mode: undefined
+      mode: undefined,
+      identity: expect.objectContaining({ kind: 'user', subject: 'user-a', authType: 'session' })
     });
   });
 

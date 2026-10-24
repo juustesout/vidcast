@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 
 import { buildSilentWav } from '@/lib/ai/audio/silent-wav';
 import { TextToSpeechProviderError } from '@/lib/ai/text-to-speech/provider';
@@ -8,6 +10,7 @@ import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spe
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
+import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 function createProject(): Project {
   const now = new Date().toISOString();
@@ -84,7 +87,7 @@ const SAMPLE_ALIGNMENT = {
   words: [{ word: 'Hi', startSeconds: 0, endSeconds: 0.3 }]
 };
 
-function createInMemoryDependencies(project: Project, behavior?: { providerFails?: boolean; durationSeconds?: number; providerError?: Error; alignment?: typeof SAMPLE_ALIGNMENT }) {
+function createInMemoryDependencies(project: Project, behavior?: { providerFails?: boolean; durationSeconds?: number; providerError?: Error; alignment?: typeof SAMPLE_ALIGNMENT; synthesizeGate?: () => Promise<void> }) {
   const state = { project: structuredClone(project) as Project };
   const now = new Date().toISOString();
 
@@ -148,6 +151,9 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
         providerId: 'fake',
         async synthesize() {
           synthesizeCalls += 1;
+          if (behavior?.synthesizeGate) {
+            await behavior.synthesizeGate();
+          }
           if (behavior?.providerError) {
             throw behavior.providerError;
           }
@@ -172,7 +178,23 @@ function createInMemoryDependencies(project: Project, behavior?: { providerFails
     }
   };
 
-  return { state, store, media, registry, synthesizeCalls: () => synthesizeCalls };
+  return {
+    state,
+    store,
+    media,
+    registry,
+    submitLocks: new InMemoryExclusiveLock(),
+    synthesizeCalls: () => synthesizeCalls
+  };
+}
+
+function narrationServiceDeps(deps: ReturnType<typeof createInMemoryDependencies>) {
+  return {
+    store: deps.store,
+    media: deps.media,
+    registry: deps.registry as never,
+    submitLocks: deps.submitLocks
+  };
 }
 
 function withHumanApproval(project: Project): Project {
@@ -236,11 +258,7 @@ describe('narration generation service', () => {
       voiceId: 'voice-b',
       model: 'model-b',
       format: 'mp3'
-    }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    }, narrationServiceDeps(deps));
 
     expect(result.status).toBe('generated');
     expect(result.assetId).toBeDefined();
@@ -256,11 +274,7 @@ describe('narration generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project, { providerFails: true });
 
-    await expect(generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    })).rejects.toThrow(SceneNarrationGenerationError);
+    await expect(generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(deps))).rejects.toThrow(SceneNarrationGenerationError);
 
     const scene = deps.state.project.scenes[0];
     expect(scene.narration?.audioAssetId).toBe('asset-old-audio');
@@ -274,11 +288,7 @@ describe('narration generation service', () => {
       providerError: new TextToSpeechProviderError('Too many concurrent requests', 429, 'PROVIDER_RATE_LIMIT')
     });
 
-    await expect(generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    })).rejects.toMatchObject({ code: 'narration.provider.failed' });
+    await expect(generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(deps))).rejects.toMatchObject({ code: 'narration.provider.failed' });
 
     const scene = deps.state.project.scenes[0];
     expect(scene.narration?.audioAssetId).toBe('asset-old-audio');
@@ -291,11 +301,7 @@ describe('narration generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project, { durationSeconds: 3.1 });
 
-    const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(deps));
 
     expect(result.status).toBe('generated');
     expect(result.duration).toBe(3.1);
@@ -310,20 +316,12 @@ describe('narration generation service', () => {
 
   it('persists provider alignment with the generated audio and does not invent timings when missing', async () => {
     const withAlignment = createInMemoryDependencies(createProject(), { alignment: SAMPLE_ALIGNMENT });
-    await generateSceneNarration(createProject().id, 'scene-1', { regenerate: true }, {
-      store: withAlignment.store,
-      media: withAlignment.media,
-      registry: withAlignment.registry as never
-    });
+    await generateSceneNarration(createProject().id, 'scene-1', { regenerate: true }, narrationServiceDeps(withAlignment));
     expect(withAlignment.state.project.scenes[0].narration?.alignment?.words).toEqual(SAMPLE_ALIGNMENT.words);
     expect(withAlignment.state.project.scenes[0].narration?.attempts?.at(-1)?.alignment?.words).toEqual(SAMPLE_ALIGNMENT.words);
 
     const withoutAlignment = createInMemoryDependencies(createProject());
-    await generateSceneNarration(createProject().id, 'scene-1', { regenerate: true }, {
-      store: withoutAlignment.store,
-      media: withoutAlignment.media,
-      registry: withoutAlignment.registry as never
-    });
+    await generateSceneNarration(createProject().id, 'scene-1', { regenerate: true }, narrationServiceDeps(withoutAlignment));
     expect(withoutAlignment.state.project.scenes[0].narration?.alignment).toBeUndefined();
   });
 
@@ -340,13 +338,50 @@ describe('narration generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
-    const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(deps));
     expect(result.status).toBe('generated');
     expect(reserveCalls).toBe(0);
+  });
+
+  it('blocks a service token from real narration generation even with human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneNarration(
+        project.id,
+        'scene-1',
+        {
+          regenerate: true,
+          mode: 'real',
+          provider: 'elevenlabs',
+          identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+        },
+        narrationServiceDeps(deps)
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'narration.policy.denied'
+    });
+    expect(deps.synthesizeCalls()).toBe(0);
+  });
+
+  it('fails closed for a real narration submit when the spend cap is disabled', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneNarration(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'elevenlabs' }, narrationServiceDeps(deps))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(deps.synthesizeCalls()).toBe(0);
   });
 
   it('blocks a real narration submit when the host cap is exhausted', async () => {
@@ -358,15 +393,97 @@ describe('narration generation service', () => {
     const deps = createInMemoryDependencies(project);
 
     await expect(
-      generateSceneNarration(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'elevenlabs' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
-      })
+      generateSceneNarration(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'elevenlabs' }, narrationServiceDeps(deps))
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.exceeded'
     });
     expect(deps.synthesizeCalls()).toBe(0);
+  });
+
+  describe('concurrent scene submit reservation', () => {
+    it('lets only one of two overlapping submits reach the provider', async () => {
+      const project = createProject();
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredSynthesize: () => void = () => {};
+      const synthesizeEntered = new Promise<void>((resolve) => {
+        enteredSynthesize = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        synthesizeGate: async () => {
+          enteredSynthesize();
+          await gate;
+        }
+      });
+
+      const first = generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(deps));
+      await synthesizeEntered;
+
+      await expect(
+        generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(deps))
+      ).rejects.toMatchObject({ code: 'narration.scene.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.synthesizeCalls()).toBe(1);
+    });
+
+    it('lets only one of two independent file locks reach the provider', async () => {
+      const project = createProject();
+      const dir = path.join(os.tmpdir(), `narration-submit-lock-${process.pid}-${Date.now()}`);
+      const resolvePath = (key: string) => path.join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, '_')}.lock`);
+      const holder = new FileExclusiveLock({ resolvePath });
+      const challenger = new FileExclusiveLock({ resolvePath });
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredSynthesize: () => void = () => {};
+      const synthesizeEntered = new Promise<void>((resolve) => {
+        enteredSynthesize = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        synthesizeGate: async () => {
+          enteredSynthesize();
+          await gate;
+        }
+      });
+
+      const first = generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
+        ...narrationServiceDeps(deps),
+        submitLocks: holder
+      });
+      await synthesizeEntered;
+
+      await expect(
+        generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
+          ...narrationServiceDeps(deps),
+          submitLocks: challenger
+        })
+      ).rejects.toMatchObject({ code: 'narration.scene.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.synthesizeCalls()).toBe(1);
+    });
+
+    it('releases the lock after a provider failure so a retry can run', async () => {
+      const project = createProject();
+      const failing = createInMemoryDependencies(project, { providerFails: true });
+      await expect(
+        generateSceneNarration(project.id, 'scene-1', { regenerate: true }, narrationServiceDeps(failing))
+      ).rejects.toThrow(SceneNarrationGenerationError);
+
+      const retry = createInMemoryDependencies(failing.state.project);
+      const result = await generateSceneNarration(project.id, 'scene-1', { regenerate: true }, {
+        ...narrationServiceDeps(retry),
+        submitLocks: failing.submitLocks
+      });
+      expect(result.status).toBe('generated');
+      expect(retry.synthesizeCalls()).toBe(1);
+    });
   });
 });

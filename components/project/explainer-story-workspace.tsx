@@ -259,6 +259,22 @@ export function ExplainerStoryWorkspace({ project, onProjectChange, onNavigateTo
     setPlanningBusy(false);
   }
 
+  async function approveSceneIntent(intentId: string) {
+    setScenePlanMessage('Approving scene intent...');
+    const response = await fetch(`/api/projects/${project.id}/scene-intents/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ intentIds: [intentId] })
+    });
+    const body = (await response.json().catch(() => ({}))) as { message?: string; project?: Project };
+    if (!response.ok || !body.project) {
+      setScenePlanMessage(body.message || 'Could not approve scene intent.');
+      return;
+    }
+    onProjectChange(body.project);
+    setScenePlanMessage('Scene intent approved.');
+  }
+
   async function materializeSceneIntents(intentId?: string) {
     if (intentId) {
       setMaterializingIntentId(intentId);
@@ -487,9 +503,15 @@ export function ExplainerStoryWorkspace({ project, onProjectChange, onNavigateTo
                       <div className="flex flex-wrap gap-2">
                         <button type="button" onClick={() => moveSceneIntent(intent.id, 'up')} disabled={index === 0} className="rounded-xl border border-slate-700 px-2 py-1 text-xs text-slate-200 disabled:opacity-40">Up</button>
                         <button type="button" onClick={() => moveSceneIntent(intent.id, 'down')} disabled={index === sceneIntents.length - 1} className="rounded-xl border border-slate-700 px-2 py-1 text-xs text-slate-200 disabled:opacity-40">Down</button>
-                        <button type="button" onClick={() => updateSceneIntent(intent.id, { status: intent.status === 'approved' ? 'draft' : 'approved' })} className="rounded-xl border border-emerald-400/40 px-2 py-1 text-xs text-emerald-200">
-                          {intent.status === 'approved' ? 'Mark draft' : 'Approve'}
-                        </button>
+                        {intent.status === 'approved' ? (
+                          <button type="button" onClick={() => updateSceneIntent(intent.id, { status: 'draft' })} className="rounded-xl border border-emerald-400/40 px-2 py-1 text-xs text-emerald-200">
+                            Mark draft
+                          </button>
+                        ) : (
+                          <button type="button" onClick={() => void approveSceneIntent(intent.id)} className="rounded-xl border border-emerald-400/40 px-2 py-1 text-xs text-emerald-200">
+                            Approve
+                          </button>
+                        )}
                         <button type="button" onClick={() => deleteSceneIntent(intent.id)} className="rounded-xl border border-rose-400/40 px-2 py-1 text-xs text-rose-200">Delete</button>
                       </div>
                     </div>

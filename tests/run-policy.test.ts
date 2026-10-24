@@ -1,9 +1,41 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { assertRunPolicyPreflight, resolveManualGenerationProvider, resolveRunPolicy, RunPolicyError } from '@/lib/production/run-policy';
 import type { Project } from '@/lib/types/render';
 
-function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' = 'openai', model?: string): Project {
+function withHumanApproval(project: Project): Project {
+  const next: Project = {
+    ...project,
+    explainer: {
+      brief: project.explainer?.brief ?? {
+        topic: '',
+        goal: '',
+        audience: '',
+        tone: '',
+        targetDurationSeconds: project.durationTarget,
+        notes: ''
+      },
+      story: project.explainer?.story ?? {
+        title: project.title,
+        hook: '',
+        script: '',
+        beats: [],
+        cta: '',
+        notes: '',
+        versions: []
+      },
+      sceneIntents: project.explainer?.sceneIntents ?? []
+    }
+  };
+  next.explainer = {
+    ...next.explainer!,
+    humanApproval: stampHumanApproval(next, { subject: 'user_test' })
+  };
+  return next;
+}
+
+function createUnauthoredProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' = 'openai', model?: string): Project {
   const now = new Date().toISOString();
   return {
     id: 'project-policy',
@@ -58,9 +90,13 @@ function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' =
   };
 }
 
+function createProjectWithRunningVideoJob(provider: 'openai' | 'local' | 'fal' = 'openai', model?: string): Project {
+  return withHumanApproval(createUnauthoredProjectWithRunningVideoJob(provider, model));
+}
+
 function createNarrationOnlyProject(): Project {
   const now = new Date().toISOString();
-  return {
+  return withHumanApproval({
     id: 'project-narration',
     title: 'Narration Only',
     description: '',
@@ -96,7 +132,7 @@ function createNarrationOnlyProject(): Project {
         notes: ''
       }
     ]
-  };
+  });
 }
 
 afterEach(() => {
@@ -185,6 +221,100 @@ describe('run policy', () => {
     );
 
     expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/narration/i);
+  });
+
+  it('denies real preflight without a current human approval', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = createUnauthoredProjectWithRunningVideoJob('openai');
+    const policy = resolveRunPolicy(
+      { mode: 'real' },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(RunPolicyError);
+    try {
+      assertRunPolicyPreflight(project, policy);
+      throw new Error('expected preflight to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(RunPolicyError);
+      expect((error as RunPolicyError).code).toBe('POLICY_DENIED');
+      expect((error as RunPolicyError).details).toMatchObject({ code: 'HUMAN_APPROVAL_REQUIRED' });
+    }
+  });
+
+  it('denies real preflight when human approval is stale', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = createProjectWithRunningVideoJob('openai');
+    project.explainer = {
+      ...project.explainer!,
+      humanApproval: {
+        ...project.explainer!.humanApproval!,
+        contentHash: 'stale'
+      }
+    };
+    const policy = resolveRunPolicy(
+      { mode: 'real' },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    try {
+      assertRunPolicyPreflight(project, policy);
+      throw new Error('expected preflight to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(RunPolicyError);
+      expect((error as RunPolicyError).code).toBe('POLICY_DENIED');
+      expect((error as RunPolicyError).details).toMatchObject({ code: 'HUMAN_APPROVAL_STALE' });
+    }
+  });
+
+  it('allows mock preflight without human approval', () => {
+    const project = createUnauthoredProjectWithRunningVideoJob('local');
+    const policy = resolveRunPolicy(
+      { mode: 'mock', providers: { video: 'local' } },
+      { allowRealProviders: true, defaultMode: 'mock' }
+    );
+
+    expect(() => assertRunPolicyPreflight(project, policy)).not.toThrow();
+  });
+
+  it('denies real preflight for a service token even with current human approval', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = createProjectWithRunningVideoJob('openai');
+    const policy = resolveRunPolicy(
+      { mode: 'real' },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    try {
+      assertRunPolicyPreflight(project, policy, {
+        kind: 'service',
+        subject: 'service:api_token',
+        authType: 'service_token'
+      });
+      throw new Error('expected preflight to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(RunPolicyError);
+      expect((error as RunPolicyError).code).toBe('POLICY_DENIED');
+      expect((error as RunPolicyError).status).toBe(403);
+      expect((error as RunPolicyError).details).toMatchObject({ code: 'FORBIDDEN' });
+    }
+  });
+
+  it('allows real preflight for a user identity with current human approval', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = createProjectWithRunningVideoJob('openai');
+    const policy = resolveRunPolicy(
+      { mode: 'real' },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    expect(() =>
+      assertRunPolicyPreflight(project, policy, {
+        kind: 'user',
+        subject: 'user_test',
+        authType: 'session'
+      })
+    ).not.toThrow();
   });
 });
 

@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import { resolveStockProviderOrder, STOCK_PROVIDER_IDS } from '@/lib/ai/stock/catalog';
 import {
   createStockProviderRegistry,
@@ -12,17 +14,31 @@ import {
   type StockRouterDiagnostic,
   type StockRouterResult
 } from '@/lib/ai/stock/stock-router';
+import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
 import { resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
+import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import type { RequestIdentity } from '@/lib/security/auth';
+import { PaidSubmitCapError, requireEnabledPaidSubmitCapForRealMode } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
 import { projectStore, type ProjectStore } from '@/lib/storage/project-store';
 import type { Asset } from '@/lib/types/asset';
 import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
+import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { StockAttribution, StockOrientation, StockPhoto, StockProviderId, StockSelection, StockUsagePolicy } from '@/lib/types/stock';
 import { stockSelectionKey } from '@/lib/types/stock';
+import { FileExclusiveLock, type ExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
-const activeSelectionLocks = new Set<string>();
+const defaultSubmitLocks = new FileExclusiveLock({
+  resolvePath: (key) => {
+    const separator = key.indexOf(':');
+    const projectId = separator === -1 ? key : key.slice(0, separator);
+    const sceneId = separator === -1 ? 'scene' : key.slice(separator + 1);
+    const safeSceneId = sceneId.replace(/[^A-Za-z0-9._-]+/g, '_');
+    return path.join(getProjectRoot(projectId), 'locks', `stock-select-${safeSceneId}.lock`);
+  }
+});
 
 export class StockImageSelectionError extends Error {
   readonly status: number;
@@ -52,6 +68,7 @@ export interface StockSelectionExecutionResult {
 export interface StockSelectionRequest {
   regenerate?: boolean;
   mode?: RunMode;
+  identity?: RequestIdentity;
 }
 
 interface StockSelectionDependencies {
@@ -60,6 +77,7 @@ interface StockSelectionDependencies {
   registry: StockProviderRegistry;
   stateStore: StockStateStore;
   now: () => number;
+  submitLocks?: ExclusiveLock;
 }
 
 let defaultStateStore: StockStateStore | undefined;
@@ -76,8 +94,17 @@ const defaultDependencies: StockSelectionDependencies = {
   get stateStore() {
     return getDefaultStateStore();
   },
-  now: () => Date.now()
+  now: () => Date.now(),
+  submitLocks: defaultSubmitLocks
 };
+
+function submitLocksOf(dependencies: StockSelectionDependencies): ExclusiveLock {
+  return dependencies.submitLocks ?? defaultSubmitLocks;
+}
+
+function lockKey(projectId: string, sceneId: string): string {
+  return `${projectId}:${sceneId}`;
+}
 
 export interface StockModeResolution {
   mode: RunMode;
@@ -191,11 +218,11 @@ export async function selectSceneStockImage(
   options: StockSelectionRequest = {},
   dependencies: StockSelectionDependencies = defaultDependencies
 ): Promise<StockSelectionExecutionResult> {
-  const lockKey = `${projectId}:${sceneId}`;
-  if (activeSelectionLocks.has(lockKey)) {
+  const key = lockKey(projectId, sceneId);
+  const submitLocks = submitLocksOf(dependencies);
+  if (!(await submitLocks.tryAcquire(key))) {
     throw new StockImageSelectionError('Stock selection is already running for this scene.', 409, 'stock.scene.alreadyRunning');
   }
-  activeSelectionLocks.add(lockKey);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -207,6 +234,18 @@ export async function selectSceneStockImage(
     ensureStockScene(scene);
 
     const { mode, allowedProviders, order } = resolveStockMode({ mode: options.mode });
+    try {
+      requireHumanApprovalForMode(project, mode);
+      assertHumanActorForRealMode(mode, options.identity);
+    } catch (error) {
+      if (error instanceof HumanApprovalError) {
+        throw new StockImageSelectionError(error.message, error.status, `stock.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new StockImageSelectionError(error.message, error.status, 'stock.policy.denied');
+      }
+      throw error;
+    }
 
     const existing = scene.visual.selection;
     const existingUsable = existing ? isSelectionUsableInMode(existing.provider, mode, allowedProviders) : false;
@@ -236,6 +275,15 @@ export async function selectSceneStockImage(
 
     if (!scene.visual.query.trim()) {
       throw new StockImageSelectionError('Stock search query is required.', 400, 'stock.scene.missingQuery');
+    }
+
+    try {
+      requireEnabledPaidSubmitCapForRealMode(mode);
+    } catch (error) {
+      if (error instanceof PaidSubmitCapError) {
+        throw new StockImageSelectionError(error.message, error.status, error.code);
+      }
+      throw error;
     }
 
     const router = new StockRouter({
@@ -304,7 +352,7 @@ export async function selectSceneStockImage(
 
     throw new StockImageSelectionError('No stock image candidate could be downloaded.', 502, 'stock.download.failed');
   } finally {
-    activeSelectionLocks.delete(lockKey);
+    await submitLocks.release(key);
   }
 }
 
@@ -316,14 +364,14 @@ export async function selectSceneStockPhoto(
   projectId: string,
   sceneId: string,
   photo: StockPhoto,
-  options: { query: string; orientation?: StockOrientation; regenerate?: boolean; mode?: RunMode } ,
+  options: { query: string; orientation?: StockOrientation; regenerate?: boolean; mode?: RunMode; identity?: RequestIdentity } ,
   dependencies: StockSelectionDependencies = defaultDependencies
 ): Promise<StockSelectionExecutionResult> {
-  const lockKey = `${projectId}:${sceneId}`;
-  if (activeSelectionLocks.has(lockKey)) {
+  const key = lockKey(projectId, sceneId);
+  const submitLocks = submitLocksOf(dependencies);
+  if (!(await submitLocks.tryAcquire(key))) {
     throw new StockImageSelectionError('Stock selection is already running for this scene.', 409, 'stock.scene.alreadyRunning');
   }
-  activeSelectionLocks.add(lockKey);
 
   try {
     const project = await dependencies.store.getProject(projectId);
@@ -334,7 +382,19 @@ export async function selectSceneStockPhoto(
     const scene = getScene(project, sceneId);
     ensureStockScene(scene);
 
-    const { allowedProviders } = resolveStockMode({ mode: options.mode });
+    const { mode, allowedProviders } = resolveStockMode({ mode: options.mode });
+    try {
+      requireHumanApprovalForMode(project, mode);
+      assertHumanActorForRealMode(mode, options.identity);
+    } catch (error) {
+      if (error instanceof HumanApprovalError) {
+        throw new StockImageSelectionError(error.message, error.status, `stock.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
+      }
+      if (error instanceof AccessControlError) {
+        throw new StockImageSelectionError(error.message, error.status, 'stock.policy.denied');
+      }
+      throw error;
+    }
 
     if (!photo || !photo.provider || !photo.photoId || !photo.imageUrl) {
       throw new StockImageSelectionError('Invalid stock photo selection.', 400, 'stock.photo.invalid');
@@ -362,6 +422,17 @@ export async function selectSceneStockPhoto(
       throw new StockImageSelectionError('Stock search query is required.', 400, 'stock.scene.missingQuery');
     }
 
+    if (photo.usagePolicy === 'download') {
+      try {
+        requireEnabledPaidSubmitCapForRealMode(mode);
+      } catch (error) {
+        if (error instanceof PaidSubmitCapError) {
+          throw new StockImageSelectionError(error.message, error.status, error.code);
+        }
+        throw error;
+      }
+    }
+
     const orientation = options.orientation ?? scene.visual.orientation;
     const selection: StockSelection = {
       provider: photo.provider,
@@ -383,7 +454,7 @@ export async function selectSceneStockPhoto(
 
     return await persistSceneSelection(dependencies, projectId, sceneId, scene, selection, false);
   } finally {
-    activeSelectionLocks.delete(lockKey);
+    await submitLocks.release(key);
   }
 }
 

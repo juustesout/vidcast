@@ -12,11 +12,12 @@ export function createSceneRenderFingerprint(plan: RenderPlan, scene: RenderPlan
       sceneId: scene.sceneId,
       order: scene.order,
       duration: scene.duration,
-      source: {
-        kind: scene.source.kind,
-        assetId: scene.source.assetId,
-        assetPath: scene.source.assetPath,
-        assetType: scene.source.assetType,
+        source: {
+          kind: scene.source.kind,
+          assetId: scene.source.assetId,
+          assetPath: scene.source.assetPath,
+          remoteUrl: scene.source.remoteUrl,
+          assetType: scene.source.assetType,
         width: scene.source.width,
         height: scene.source.height,
         duration: scene.source.duration,

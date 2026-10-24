@@ -17,6 +17,8 @@ import { getProjectRoot } from '@/lib/storage/storage-paths';
 import type { Asset } from '@/lib/types/asset';
 import type { PresenterClipAttempt } from '@/lib/types/presenter';
 import type { Project } from '@/lib/types/render';
+import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
+import os from 'node:os';
 
 const CREATED = '2026-01-01T00:00:00.000Z';
 const createdRoots: string[] = [];
@@ -237,6 +239,7 @@ async function createDependencies(project: Project, provider: PresenterProvider,
     store,
     media,
     registry: registry as never,
+    submitLocks: new InMemoryExclusiveLock(),
     get submitCalls() {
       return submitCalls;
     },
@@ -303,6 +306,8 @@ function configureRealPresenterPricing(pricing = JSON.stringify({
   vi.stubEnv('HEYGEN_AVATAR_TYPE', 'photo_avatar');
   vi.stubEnv('HEYGEN_PRESENTER_ENGINE', 'avatar_iii');
   vi.stubEnv('HEYGEN_PRICING_JSON', pricing);
+  enablePaidSpendCap();
+  setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
 }
 
 function realProject(overrides: {
@@ -618,10 +623,15 @@ describe('presenter generation service', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let enteredSubmit: () => void = () => {};
+    const submitEntered = new Promise<void>((resolve) => {
+      enteredSubmit = resolve;
+    });
     const provider = mockProvider();
     const slowProvider: PresenterProvider = {
       ...provider,
       async submit(request) {
+        enteredSubmit();
         await gate;
         return provider.submit(request);
       }
@@ -629,11 +639,72 @@ describe('presenter generation service', () => {
     const deps = await createDependencies(project, slowProvider);
 
     const first = submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps);
+    await submitEntered;
     await expect(submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps)).rejects.toMatchObject({
       code: 'presenter.scene.alreadyRunning'
     });
     release?.();
     await expect(first).resolves.toMatchObject({ status: 'accepted' });
+    expect(deps.submitCalls).toBe(1);
+  });
+
+  it('lets only one of two independent file locks reach the presenter provider', async () => {
+    const project = buildProject();
+    const dir = path.join(os.tmpdir(), `presenter-submit-lock-${process.pid}-${Date.now()}`);
+    const resolvePath = (key: string) => path.join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, '_')}.lock`);
+    const holder = new FileExclusiveLock({ resolvePath });
+    const challenger = new FileExclusiveLock({ resolvePath });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let enteredSubmit: () => void = () => {};
+    const submitEntered = new Promise<void>((resolve) => {
+      enteredSubmit = resolve;
+    });
+    const provider = mockProvider();
+    const slowProvider: PresenterProvider = {
+      ...provider,
+      async submit(request) {
+        enteredSubmit();
+        await gate;
+        return provider.submit(request);
+      }
+    };
+    const deps = await createDependencies(project, slowProvider);
+
+    const first = submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, {
+      ...deps,
+      submitLocks: holder
+    });
+    await submitEntered;
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, {
+        ...deps,
+        submitLocks: challenger
+      })
+    ).rejects.toMatchObject({
+      code: 'presenter.scene.alreadyRunning'
+    });
+    release?.();
+    await first;
+    expect(deps.submitCalls).toBe(1);
+  });
+
+  it('releases the presenter submit lock after a provider failure so a retry can run', async () => {
+    const project = buildProject();
+    const failing = await createDependencies(project, mockProvider({ failSubmit: true }));
+    await expect(submitPresenterClip(project.id, 'scene-1', { mode: 'mock' }, failing)).rejects.toBeInstanceOf(
+      PresenterGenerationError
+    );
+
+    const retry = await createDependencies(failing.state.project, mockProvider());
+    const submitted = await submitPresenterClip(project.id, 'scene-1', { mode: 'mock', regenerate: true }, {
+      ...retry,
+      submitLocks: failing.submitLocks
+    });
+    expect(submitted.status).toBe('accepted');
+    expect(retry.submitCalls).toBe(1);
   });
 
   it('surfaces provider failures with a recoverable error code', async () => {
@@ -823,6 +894,43 @@ describe('presenter generation service', () => {
     await pollPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps);
     expect((await ledger.snapshot()).entries).toHaveLength(1);
     expect(deps.submitCalls).toBe(1);
+  });
+
+  it('blocks a service token from real presenter generation even with human approval', async () => {
+    configureRealPresenterPricing();
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(
+        project.id,
+        'scene-1',
+        {
+          mode: 'real',
+          identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+        },
+        deps
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'presenter.policy.denied'
+    });
+    expect(deps.submitCalls).toBe(0);
+  });
+
+  it('fails closed for a real presenter submit when the spend cap is disabled', async () => {
+    configureRealPresenterPricing();
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'false');
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(deps.submitCalls).toBe(0);
   });
 
   it('still blocks on maxCostUsd when the host cap has remaining units', async () => {

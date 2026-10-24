@@ -114,7 +114,8 @@ describe('ElevenLabs music provider adapter', () => {
       expect(error).toBeInstanceOf(MusicProviderError);
       expect((error as MusicProviderError).code).toBe('PROVIDER_REJECTED');
       expect((error as MusicProviderError).status).toBe(422);
-      expect((error as MusicProviderError).message).toBe('prompt too long; bad length');
+      expect((error as MusicProviderError).message).toBe('Provider rejected the request.');
+      expect((error as MusicProviderError).message).not.toContain('prompt too long');
     }
   });
 

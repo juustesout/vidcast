@@ -50,7 +50,10 @@ describe('OpenAI provider adapter', () => {
     );
 
     const provider = new OpenAiImageGenerationProvider({ apiKey: 'test-key' });
-    await expect(provider.generateImage({ prompt: 'test', aspectRatio: '16:9' })).rejects.toThrow(ImageGenerationProviderError);
+    await expect(provider.generateImage({ prompt: 'test', aspectRatio: '16:9' })).rejects.toMatchObject({
+      code: 'provider.request.rejected',
+      message: 'Provider rejected the request.'
+    });
   });
 
   it('rejects provider output that is not a valid PNG before it can be stored', async () => {

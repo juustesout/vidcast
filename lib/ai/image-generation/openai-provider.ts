@@ -1,5 +1,7 @@
 import { imageSize } from 'image-size';
 
+import { logProviderError, publicMessageForProviderCode } from '@/lib/security/safe-error';
+
 import { ImageGenerationProviderError, type ImageGenerationProvider, type ImageGenerationRequest, type ImageGenerationResult } from './provider';
 
 const DEFAULT_TIMEOUT_MS = 90_000;
@@ -68,14 +70,19 @@ function decodeBase64Image(payload: unknown): Buffer {
   return Buffer.from(encoded, 'base64');
 }
 
-function parseErrorMessage(payload: unknown): string {
-  if (payload && typeof payload === 'object') {
-    const maybe = payload as { error?: { message?: string } };
-    if (maybe.error?.message) {
-      return maybe.error.message;
-    }
+function classifyHttpError(status: number, payload: unknown): ImageGenerationProviderError {
+  let code: string;
+  if (status === 401 || status === 403) {
+    code = 'provider.request.unauthorized';
+  } else if (status === 429) {
+    code = 'provider.request.rateLimited';
+  } else if (status >= 400 && status < 500) {
+    code = 'provider.request.rejected';
+  } else {
+    code = 'provider.request.failed';
   }
-  return 'Image generation provider call failed.';
+  logProviderError('openai-image', { code, status, body: payload });
+  return new ImageGenerationProviderError(publicMessageForProviderCode(code), status === 429 ? 429 : status >= 400 && status < 500 && status !== 401 && status !== 403 ? 422 : 502, code);
 }
 
 // `gpt-image-*` models always return base64 and reject the legacy
@@ -107,22 +114,6 @@ function validatePngBytes(data: Buffer): { width: number; height: number } {
   }
 
   return { width, height };
-}
-
-// Classifies non-2xx HTTP responses without ever echoing credentials. Auth and
-// rate-limit failures are surfaced distinctly so callers can react (and so a
-// retry is never issued automatically by this adapter).
-function classifyHttpError(status: number, message: string): ImageGenerationProviderError {
-  if (status === 401 || status === 403) {
-    return new ImageGenerationProviderError(message, 502, 'provider.request.unauthorized');
-  }
-  if (status === 429) {
-    return new ImageGenerationProviderError(message, 429, 'provider.request.rateLimited');
-  }
-  if (status >= 400 && status < 500) {
-    return new ImageGenerationProviderError(message, 422, 'provider.request.rejected');
-  }
-  return new ImageGenerationProviderError(message, 502, 'provider.request.failed');
 }
 
 function mapTransportError(error: unknown): ImageGenerationProviderError {
@@ -253,7 +244,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       }
 
       if (!response.ok) {
-        throw classifyHttpError(response.status, parseErrorMessage(json));
+        throw classifyHttpError(response.status, json);
       }
 
       const data = decodeBase64Image(json);

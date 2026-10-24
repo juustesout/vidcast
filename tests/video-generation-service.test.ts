@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { cancelSceneVideoGeneration, classifyStatusPollError, refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
@@ -9,6 +11,7 @@ import type { VideoGenerationRequest } from '@/lib/ai/video-generation/provider'
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
 import type { Project } from '@/lib/types/render';
+import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-file-lock';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -157,13 +160,18 @@ function createInMemoryDependencies(
     failOnCancel?: boolean;
     // Awaited inside getStatus so a test can hold a poll in flight.
     statusGate?: () => Promise<void>;
+    // Awaited inside submit so a test can hold a submit in flight.
+    submitGate?: () => Promise<void>;
   }
 ) {
   const state = { project: structuredClone(project) as Project };
   let createdAssetCount = 0;
   let submitCalls = 0;
+  let downloadCalls = 0;
   const submitRequests: VideoGenerationRequest[] = [];
   const canceledJobIds: string[] = [];
+  const sceneSubmitLocks = new InMemoryExclusiveLock();
+  const attemptPollLocks = new InMemoryExclusiveLock();
 
   const store: Pick<ProjectStore, 'getProject' | 'updateProject' | 'mutateProject'> = {
     async getProject(id: string) {
@@ -240,6 +248,9 @@ function createInMemoryDependencies(
         },
         async submit(request: VideoGenerationRequest) {
           submitCalls += 1;
+          if (behavior?.submitGate) {
+            await behavior.submitGate();
+          }
           if (behavior?.submitError !== undefined) {
             throw behavior.submitError;
           }
@@ -269,6 +280,7 @@ function createInMemoryDependencies(
           };
         },
         async download() {
+          downloadCalls += 1;
           if (behavior?.failOnDownload) {
             throw new Error('download failed');
           }
@@ -282,7 +294,28 @@ function createInMemoryDependencies(
     }
   };
 
-  return { state, store, media, registry, submitRequests, canceledJobIds, submitCalls: () => submitCalls };
+  return {
+    state,
+    store,
+    media,
+    registry,
+    submitRequests,
+    canceledJobIds,
+    sceneSubmitLocks,
+    attemptPollLocks,
+    submitCalls: () => submitCalls,
+    downloadCalls: () => downloadCalls
+  };
+}
+
+function videoServiceDeps(deps: ReturnType<typeof createInMemoryDependencies>) {
+  return {
+    store: deps.store,
+    media: deps.media,
+    registry: deps.registry as never,
+    sceneSubmitLocks: deps.sceneSubmitLocks,
+    attemptPollLocks: deps.attemptPollLocks
+  };
 }
 
 describe('video generation service', () => {
@@ -290,20 +323,12 @@ describe('video generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
-    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
 
     expect(submit.status).toBe('queued');
     expect(submit.providerJobId).toBe('job-1');
 
-    const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, videoServiceDeps(deps));
 
     expect(poll.status).toBe('generated');
     expect(poll.assetId).toBeDefined();
@@ -322,17 +347,11 @@ describe('video generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
-    await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
 
     await expect(
       submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: false }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       })
     ).rejects.toThrow(SceneVideoGenerationError);
   });
@@ -343,9 +362,7 @@ describe('video generation service', () => {
 
     await expect(
       submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       })
     ).rejects.toThrow(SceneVideoGenerationError);
 
@@ -376,11 +393,7 @@ describe('video generation service', () => {
     };
     const deps = createInMemoryDependencies(project);
 
-    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
 
     const retried = deps.state.project.scenes[0];
     if (retried.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
@@ -391,12 +404,9 @@ describe('video generation service', () => {
     expect(retried.visual.generation.metadata?.pollUnresolved).toBeUndefined();
     expect(retried.visual.generation.metadata?.lastPollErrorCode).toBeUndefined();
     expect(retried.visual.generation.metadata?.cancelFailed).toBeUndefined();
+    expect(retried.visual.generation.metadata?.downloadFailed).toBeUndefined();
 
-    const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, videoServiceDeps(deps));
     expect(poll.status).toBe('generated');
   });
 
@@ -408,9 +418,7 @@ describe('video generation service', () => {
 
     await expect(
       submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       })
     ).rejects.toMatchObject({
       status: 403,
@@ -419,9 +427,56 @@ describe('video generation service', () => {
     expect(deps.submitCalls()).toBe(0);
   });
 
+  it('fails closed for a real video submit when the spend cap is disabled', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project, { providerId: 'fal' });
+
+    await expect(
+      submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+        ...videoServiceDeps(deps)
+      })
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'paid.spend.cap.invalid'
+    });
+    expect(deps.submitCalls()).toBe(0);
+  });
+
+  it('blocks a service token from real video generation even with human approval', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('FAL_KEY', 'fal-test-key');
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project, { providerId: 'fal' });
+
+    await expect(
+      submitSceneVideoGeneration(
+        project.id,
+        'scene-video-1',
+        {
+          regenerate: true,
+          provider: 'fal',
+          mode: 'real',
+          identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+        },
+        {
+          ...videoServiceDeps(deps)
+        }
+      )
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'generation.policy.denied'
+    });
+    expect(deps.submitCalls()).toBe(0);
+  });
+
   it('keeps an ambiguous real-provider submit active and blocks a duplicate paid submit', async () => {
     vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
     vi.stubEnv('FAL_KEY', 'fal-test-key');
+    enablePaidSpendCap();
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
     const project = withHumanApproval(createProject());
     const deps = createInMemoryDependencies(project, {
       providerId: 'fal',
@@ -430,9 +485,7 @@ describe('video generation service', () => {
 
     await expect(
       submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       })
     ).rejects.toMatchObject({ code: 'generation.attempt.submitUnresolved' });
 
@@ -446,9 +499,7 @@ describe('video generation service', () => {
 
     await expect(
       submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       })
     ).rejects.toMatchObject({ code: 'generation.scene.busy' });
     expect(deps.submitCalls()).toBe(1);
@@ -471,27 +522,15 @@ describe('video generation service', () => {
     const project = createProject();
     const deps = createInMemoryDependencies(project);
 
-    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
 
     const firstAttemptId = 'gen-video-current';
-    const historical = await refreshVideoGenerationAttempt(project.id, firstAttemptId, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    const historical = await refreshVideoGenerationAttempt(project.id, firstAttemptId, videoServiceDeps(deps));
 
     expect(historical.generationAttemptId).toBe(firstAttemptId);
     expect(historical.status).toBe('generated');
 
-    await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, videoServiceDeps(deps));
   });
 
   function addReference(project: Project, id: string): void {
@@ -522,11 +561,7 @@ describe('video generation service', () => {
   }
 
   function submit(deps: ReturnType<typeof createInMemoryDependencies>) {
-    return submitSceneVideoGeneration('project-video-1', 'scene-video-1', { regenerate: true }, {
-      store: deps.store,
-      media: deps.media,
-      registry: deps.registry as never
-    });
+    return submitSceneVideoGeneration('project-video-1', 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
   }
 
   it('maps designated keyframes to start_frame/end_frame and leaves other references plain', async () => {
@@ -600,7 +635,7 @@ describe('video generation service', () => {
       project.id,
       'scene-video-1',
       { regenerate: true, model: 'minimax/h3-max-turbo/image-to-video' },
-      { store: deps.store, media: deps.media, registry: deps.registry as never }
+      videoServiceDeps(deps)
     );
 
     expect(deps.submitRequests).toHaveLength(1);
@@ -621,7 +656,7 @@ describe('video generation service', () => {
         project.id,
         'scene-video-1',
         { regenerate: true, provider: 'fal', mode: 'mock' },
-        { store: deps.store, media: deps.media, registry: deps.registry as never }
+        videoServiceDeps(deps)
       )
     ).rejects.toMatchObject({ code: 'generation.provider.notAllowed' });
 
@@ -633,15 +668,11 @@ describe('video generation service', () => {
       const project = createProject();
       const deps = createInMemoryDependencies(project);
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       const result = await cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       expect(deps.canceledJobIds).toEqual(['job-1']);
@@ -659,16 +690,12 @@ describe('video generation service', () => {
       const project = createProject();
       const deps = createInMemoryDependencies(project, { supportsCancellation: false });
       await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       await expect(
         cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.provider.cancelUnsupported' });
 
@@ -685,9 +712,7 @@ describe('video generation service', () => {
 
       await expect(
         cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.scene.notActive' });
     });
@@ -696,16 +721,12 @@ describe('video generation service', () => {
       const project = createProject();
       const deps = createInMemoryDependencies(project, { failOnCancel: true });
       await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       await expect(
         cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.provider.cancelFailed' });
 
@@ -721,9 +742,7 @@ describe('video generation service', () => {
       const project = createProject();
       const deps = createInMemoryDependencies(project, { failOnCancel: true });
       await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       // FAL rejects the cancel because the job already completed remotely: the
@@ -731,9 +750,7 @@ describe('video generation service', () => {
       // completed result is still recoverable by a later poll.
       await expect(
         cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.provider.cancelFailed' });
 
@@ -742,9 +759,7 @@ describe('video generation service', () => {
       expect(active.visual.generation.status).toBe('queued');
 
       const polled = await refreshVideoGenerationAttempt(project.id, active.visual.generation.id, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       expect(polled.status).toBe('generated');
       expect(polled.assetId).toBeDefined();
@@ -756,27 +771,29 @@ describe('video generation service', () => {
       const gate = new Promise<void>((resolve) => {
         releaseGate = resolve;
       });
-      const deps = createInMemoryDependencies(project, { statusGate: () => gate });
+      let enteredPoll: () => void = () => {};
+      const pollEntered = new Promise<void>((resolve) => {
+        enteredPoll = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        statusGate: async () => {
+          enteredPoll();
+          await gate;
+        }
+      });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
-      // Start the poll but do not await it: it acquires the per-attempt poll lock
-      // synchronously before its first await and then blocks on the gate.
       const poll = refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
+      await pollEntered;
 
       await expect(
         cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.pollBusy' });
 
@@ -799,25 +816,19 @@ describe('video generation service', () => {
       const deps = createInMemoryDependencies(project);
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       // A poll completes the job (active -> generated) before cancellation starts.
       const polled = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       expect(polled.status).toBe('generated');
 
       // Cancelling the (now terminal) attempt must be refused, not applied.
       await expect(
         cancelSceneVideoGeneration(project.id, 'scene-video-1', {}, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.scene.notActive' });
 
@@ -836,17 +847,13 @@ describe('video generation service', () => {
       const deps = createInMemoryDependencies(project, behavior);
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       expect(submit.providerJobId).toBe('job-1');
 
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
@@ -861,9 +868,7 @@ describe('video generation service', () => {
       // still be running.
       await expect(
         submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.scene.busy' });
 
@@ -871,9 +876,7 @@ describe('video generation service', () => {
       // SAME attempt/job once the provider is reachable again (no re-submission).
       behavior.failOnStatus = false;
       const resumed = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       expect(resumed.generationAttemptId).toBe(submit.generationAttemptId);
       expect(resumed.providerJobId).toBe('job-1');
@@ -887,16 +890,12 @@ describe('video generation service', () => {
       });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
@@ -913,9 +912,7 @@ describe('video generation service', () => {
       });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       // A 4xx from the *status* endpoint (e.g. 404 for a not-yet-registered
@@ -924,9 +921,7 @@ describe('video generation service', () => {
       // (failing it lets the planner auto-resubmit with regenerate).
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
@@ -938,9 +933,7 @@ describe('video generation service', () => {
 
       await expect(
         submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.scene.busy' });
     });
@@ -952,16 +945,12 @@ describe('video generation service', () => {
       });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
@@ -979,18 +968,14 @@ describe('video generation service', () => {
       });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       // The poll cannot confirm status, but the job id is fully recoverable once
       // the credential returns, so the attempt must NOT be failed.
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
@@ -1003,9 +988,7 @@ describe('video generation service', () => {
       // a missing credential can never leak into a second paid job.
       await expect(
         submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.scene.busy' });
       // No provider submit was attempted at all.
@@ -1019,16 +1002,12 @@ describe('video generation service', () => {
       });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
 
@@ -1058,15 +1037,11 @@ describe('video generation service', () => {
       });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       const poll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
 
       expect(poll.status).toBe('generating');
@@ -1083,15 +1058,11 @@ describe('video generation service', () => {
       const deps = createInMemoryDependencies(project, behavior);
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       await expect(
         refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.statusUnresolved' });
 
@@ -1103,6 +1074,122 @@ describe('video generation service', () => {
       const scene = deps.state.project.scenes[0];
       if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
       expect(scene.visual.generation.status).toBe('queued');
+    });
+  });
+
+  describe('download retry without a second paid submit', () => {
+    it('keeps the remote job id after a download failure and retries download only', async () => {
+      const project = createProject();
+      const behavior: { failOnDownload?: boolean } = { failOnDownload: true };
+      const deps = createInMemoryDependencies(project, behavior);
+
+      const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
+      expect(deps.submitCalls()).toBe(1);
+
+      const failedPoll = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, videoServiceDeps(deps));
+      expect(failedPoll.status).toBe('generating');
+      expect(failedPoll.providerJobId).toBe('job-1');
+      expect(failedPoll.providerStatus).toBe('download_failed');
+      expect(failedPoll.errorCode).toBe('DOWNLOAD_FAILED');
+      expect(deps.downloadCalls()).toBe(1);
+
+      const scene = deps.state.project.scenes[0];
+      if (scene.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(scene.visual.generation.status).toBe('generating');
+      expect(scene.visual.generation.providerJobId).toBe('job-1');
+      expect(scene.visual.generation.metadata?.downloadFailed).toBe(true);
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps))
+      ).rejects.toMatchObject({ code: 'generation.scene.busy' });
+      expect(deps.submitCalls()).toBe(1);
+
+      const recovery = reconcileInterruptedGenerations(deps.state.project, 'real');
+      expect(recovery.suppressedActionIds).toEqual([]);
+      expect(recovery.notes.some((note) => note.actionType === 'video_poll')).toBe(true);
+
+      behavior.failOnDownload = false;
+      const resumed = await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, videoServiceDeps(deps));
+      expect(resumed.generationAttemptId).toBe(submit.generationAttemptId);
+      expect(resumed.providerJobId).toBe('job-1');
+      expect(resumed.status).toBe('generated');
+      expect(deps.submitCalls()).toBe(1);
+      expect(deps.downloadCalls()).toBe(2);
+
+      const completed = deps.state.project.scenes[0];
+      if (completed.visual?.kind !== 'generated_video') throw new Error('expected generated_video');
+      expect(completed.visual.generation.metadata?.downloadFailed).toBeUndefined();
+    });
+  });
+
+  describe('concurrent scene submit reservation', () => {
+    it('lets only one of two overlapping submits reach the provider', async () => {
+      const project = createProject();
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredSubmit: () => void = () => {};
+      const submitEntered = new Promise<void>((resolve) => {
+        enteredSubmit = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        submitGate: async () => {
+          enteredSubmit();
+          await gate;
+        }
+      });
+
+      const first = submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps));
+      await submitEntered;
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, videoServiceDeps(deps))
+      ).rejects.toMatchObject({ code: 'generation.scene.alreadyRunning' });
+
+      releaseGate();
+      const submitted = await first;
+      expect(submitted.providerJobId).toBe('job-1');
+      expect(deps.submitCalls()).toBe(1);
+    });
+
+    it('lets only one of two independent file locks reach the provider', async () => {
+      const project = createProject();
+      const dir = path.join(os.tmpdir(), `video-submit-lock-${process.pid}-${Date.now()}`);
+      const resolvePath = (key: string) => path.join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, '_')}.lock`);
+      const holder = new FileExclusiveLock({ resolvePath });
+      const challenger = new FileExclusiveLock({ resolvePath });
+      let releaseGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let enteredSubmit: () => void = () => {};
+      const submitEntered = new Promise<void>((resolve) => {
+        enteredSubmit = resolve;
+      });
+      const deps = createInMemoryDependencies(project, {
+        submitGate: async () => {
+          enteredSubmit();
+          await gate;
+        }
+      });
+
+      const first = submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+        ...videoServiceDeps(deps),
+        sceneSubmitLocks: holder
+      });
+      await submitEntered;
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
+          ...videoServiceDeps(deps),
+          sceneSubmitLocks: challenger
+        })
+      ).rejects.toMatchObject({ code: 'generation.scene.alreadyRunning' });
+
+      releaseGate();
+      await first;
+      expect(deps.submitCalls()).toBe(1);
     });
   });
 
@@ -1130,17 +1217,13 @@ describe('video generation service', () => {
       const deps = createInMemoryDependencies(project, { providerId: 'fal' });
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       expect(deps.submitCalls()).toBe(1);
       expect((await ledger.snapshot()).entries).toHaveLength(1);
 
       await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       }, { mode: 'real' });
       expect((await ledger.snapshot()).entries).toHaveLength(1);
       expect(deps.submitCalls()).toBe(1);
@@ -1160,9 +1243,7 @@ describe('video generation service', () => {
 
       await expect(
         submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.attempt.submitUnresolved' });
       expect((await ledger.snapshot()).entries).toHaveLength(1);
@@ -1170,9 +1251,7 @@ describe('video generation service', () => {
 
       await expect(
         submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
-          store: deps.store,
-          media: deps.media,
-          registry: deps.registry as never
+          ...videoServiceDeps(deps)
         })
       ).rejects.toMatchObject({ code: 'generation.scene.busy' });
       expect((await ledger.snapshot()).entries).toHaveLength(1);
@@ -1193,14 +1272,10 @@ describe('video generation service', () => {
       const deps = createInMemoryDependencies(project);
 
       const submit = await submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true }, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       await refreshVideoGenerationAttempt(project.id, submit.generationAttemptId, {
-        store: deps.store,
-        media: deps.media,
-        registry: deps.registry as never
+        ...videoServiceDeps(deps)
       });
       expect(reserveCalls).toBe(0);
     });

@@ -69,7 +69,16 @@ function visualFingerprint(visual: VisualSpec | undefined): unknown {
       return {
         kind: 'stock_image',
         query: visual.query,
-        orientation: visual.orientation ?? null
+        orientation: visual.orientation ?? null,
+        assetId: visual.assetId ?? null,
+        selection: visual.selection
+          ? {
+              provider: visual.selection.provider,
+              photoId: visual.selection.photoId,
+              selectionKey: visual.selection.selectionKey,
+              origin: visual.selection.origin ?? null
+            }
+          : null
       };
     case 'graphic':
       return {
@@ -113,6 +122,8 @@ function sceneFingerprint(scene: Scene): unknown {
     duration: scene.duration,
     type: scene.type,
     narrationText: scene.narration?.text ?? '',
+    narrationVoiceId: scene.narration?.voiceId ?? null,
+    narrationModel: scene.narration?.model ?? null,
     visual: visualFingerprint(scene.visual)
   };
 }
@@ -133,6 +144,12 @@ export function hashProductionContent(project: Project): string {
   return sha256({
     intents,
     scenes: project.scenes.map(sceneFingerprint),
+    music: project.music
+      ? {
+          prompt: project.music.prompt ?? '',
+          assetId: project.music.assetId ?? null
+        }
+      : null,
     presenter: project.presenter
       ? {
           enabled: project.presenter.enabled === true,
