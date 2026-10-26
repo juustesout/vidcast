@@ -312,6 +312,36 @@ describe('production QC', () => {
     expect(report.warnings.some((warning) => warning.includes('Audio is optional'))).toBe(true);
   });
 
+  it('does not fail QC for blocked narration_generate when scenes have no narration text', async () => {
+    const project = createProject();
+    attachRender(project, 'scene-1', 'render-1');
+    attachRender(project, 'scene-2', 'render-2');
+    attachComposition(project);
+
+    const blockedNarration = (sceneId: string, order: number): ProductionPlannedAction => ({
+      id: `scene:${sceneId}:narration_generate`,
+      type: 'narration_generate',
+      sceneId,
+      sceneOrder: order,
+      status: 'blocked',
+      execute: false,
+      dependencyActionIds: [],
+      reason: 'Narration text is missing.'
+    });
+
+    const report = await evaluate(
+      project,
+      makeRun({
+        unresolvedActions: [blockedNarration('scene-1', 1), blockedNarration('scene-2', 2)]
+      })
+    );
+
+    expect(report.qcStatus).toBe('passed');
+    expect(report.failures.map((issue) => issue.code)).not.toContain('qc.actions.unresolved');
+    expect(report.scenes).toEqual({ total: 2, passed: 2, failed: 0, skipped: 0 });
+    expect(report.warnings.some((warning) => warning.includes('no narration text'))).toBe(true);
+  });
+
   it('fails incomplete scenes or failed required actions', async () => {
     const project = createProject();
 

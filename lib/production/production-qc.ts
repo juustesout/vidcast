@@ -17,7 +17,7 @@ import { getProjectMandateSpendPath, getProjectRoot } from '@/lib/storage/storag
 import type { MandateBudgetSettings, ProductionMandate } from '@/lib/types/mandate';
 import type { CompositionArtifact, Project } from '@/lib/types/render';
 
-import { deriveProductionPlan } from './production-planner';
+import { deriveProductionPlan, type ProductionPlannedAction } from './production-planner';
 import type { ProductionRunnerEvent } from './production-runner';
 import type { HeadlessRunSnapshot, HeadlessRunStatus } from './run-types';
 
@@ -178,6 +178,10 @@ async function defaultReadSpendSnapshot(projectId: string): Promise<MandateSpend
 
 function countRecoveryAttempts(events: ProductionRunnerEvent[]): number {
   return events.filter((event) => event.code === 'action_retrying' || event.code === 'run_recovered').length;
+}
+
+function isOptionalBlockedNarration(action: ProductionPlannedAction): boolean {
+  return action.type === 'narration_generate' && action.status === 'blocked' && action.execute !== true;
 }
 
 function skippedSceneIds(events: ProductionRunnerEvent[]): Set<string> {
@@ -558,9 +562,12 @@ export async function evaluateProductionQc(
   const composeCompleted = input.run.completedActionIds.includes(COMPOSE_ACTION_ID);
   const expectsAudio = productionExpectsAudio(project);
 
-  const unresolvedRequired = input.run.unresolvedActions.filter(
-    (action) => action.status === 'ready' || action.status === 'waiting_dependency' || action.status === 'blocked'
-  );
+  const unresolvedRequired = input.run.unresolvedActions.filter((action) => {
+    if (isOptionalBlockedNarration(action)) {
+      return false;
+    }
+    return action.status === 'ready' || action.status === 'waiting_dependency' || action.status === 'blocked';
+  });
   if (unresolvedRequired.length > 0) {
     for (const action of unresolvedRequired) {
       failures.push({
@@ -568,6 +575,15 @@ export async function evaluateProductionQc(
         message: action.reason || `Required action ${action.type} is unresolved.`,
         sceneId: action.sceneId
       });
+    }
+  }
+  for (const action of input.run.unresolvedActions) {
+    if (isOptionalBlockedNarration(action)) {
+      warnings.push(
+        action.sceneId
+          ? `Scene ${action.sceneId} has no narration text; narration_generate stayed blocked and is optional.`
+          : 'Narration generation stayed blocked because narration text is missing; that is optional.'
+      );
     }
   }
 
