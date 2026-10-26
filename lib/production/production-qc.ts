@@ -513,7 +513,7 @@ function deriveQcStatus(input: {
     return 'failed';
   }
 
-  if (input.runStatus === 'failed' || input.runStatus === 'unresolved') {
+  if (input.runStatus === 'failed') {
     return 'failed';
   }
 

@@ -288,6 +288,16 @@ function createActionLabel(action: ProductionPlannedAction): string {
   }
 }
 
+function isOptionalBlockedNarration(action: ProductionPlannedAction): boolean {
+  return action.type === 'narration_generate' && action.status === 'blocked' && action.execute !== true;
+}
+
+function collectUnresolvedActions(actions: ProductionPlannedAction[]): ProductionPlannedAction[] {
+  return actions.filter(
+    (action) => action.status !== 'current' && action.status !== 'skipped' && !isOptionalBlockedNarration(action)
+  );
+}
+
 function determineResultStatus(unresolvedActions: ProductionPlannedAction[], failedCount: number): ProductionRunnerResultStatus {
   if (unresolvedActions.length === 0 && failedCount === 0) {
     return 'completed';
@@ -486,7 +496,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
     if (readyActions.length === 0) {
       const unresolved = plan.actions.filter((action) => action.status === 'running' || action.status === 'waiting_dependency' || action.status === 'ready');
       if (unresolved.length === 0 || statusSignature(plan) === previousSignature) {
-        const unresolvedActions = plan.actions.filter((action) => action.status !== 'current' && action.status !== 'skipped');
+        const unresolvedActions = collectUnresolvedActions(plan.actions);
         const status = determineResultStatus(unresolvedActions, failedActionIds.size);
         emit({
           iteration,
@@ -673,7 +683,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
         completedActionIds: Array.from(completedActionIds),
         compositionAttempted
       });
-      const unresolvedActions = finalPlan.actions.filter((action) => action.status !== 'current' && action.status !== 'skipped');
+      const unresolvedActions = collectUnresolvedActions(finalPlan.actions);
       const status = determineResultStatus(unresolvedActions, failedActionIds.size);
       emit({
         iteration,
@@ -706,7 +716,7 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
     completedActionIds: Array.from(completedActionIds),
     compositionAttempted
   });
-  const unresolvedActions = finalPlan.actions.filter((action) => action.status !== 'current' && action.status !== 'skipped');
+  const unresolvedActions = collectUnresolvedActions(finalPlan.actions);
   const status = determineResultStatus(unresolvedActions, failedActionIds.size);
   emit({
     iteration,

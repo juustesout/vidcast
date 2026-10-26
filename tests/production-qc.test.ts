@@ -332,10 +332,12 @@ describe('production QC', () => {
     const report = await evaluate(
       project,
       makeRun({
+        status: 'unresolved',
         unresolvedActions: [blockedNarration('scene-1', 1), blockedNarration('scene-2', 2)]
       })
     );
 
+    expect(report.runStatus).toBe('unresolved');
     expect(report.qcStatus).toBe('passed');
     expect(report.failures.map((issue) => issue.code)).not.toContain('qc.actions.unresolved');
     expect(report.scenes).toEqual({ total: 2, passed: 2, failed: 0, skipped: 0 });

@@ -444,6 +444,37 @@ describe('runProductionBatch', () => {
     expect(result.events.some((event) => event.code === 'action_blocked' && event.actionId === 'blocked-1')).toBe(true);
   });
 
+  it('completes when the only leftover actions are blocked narration_generate without text', async () => {
+    const plan = makePlan([
+      makeAction('compose', 'final_compose', 'current'),
+      {
+        ...makeAction('nar-1', 'narration_generate', 'blocked', 's1'),
+        execute: false,
+        reason: 'Narration text is missing.'
+      },
+      {
+        ...makeAction('nar-2', 'narration_generate', 'blocked', 's2'),
+        execute: false,
+        reason: 'Narration text is missing.'
+      }
+    ]);
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plan,
+      refreshProject: async () => emptyProject,
+      config: { maxIterations: 1 },
+      executeAction: async () => {
+        throw new Error('should not run');
+      }
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.unresolvedActions).toEqual([]);
+    expect(result.events.some((event) => event.code === 'run_completed')).toBe(true);
+    expect(result.events.some((event) => event.code === 'action_blocked' && event.actionId === 'nar-1')).toBe(true);
+  });
+
   it('emits composition lifecycle events', async () => {
     const plan = makePlan([makeAction('compose', 'final_compose', 'ready')]);
     const result = await runProductionBatch({
