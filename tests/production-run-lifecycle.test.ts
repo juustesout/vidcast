@@ -212,6 +212,9 @@ describe('production run lifecycle robustness', () => {
     const snapshot = service.getRun(started.run.runId);
     expect(snapshot.status).toBe('failed');
     expect(snapshot.finishedAt).toBeDefined();
+    expect(snapshot.report).toBeDefined();
+    expect(snapshot.report?.qcStatus).toBe('failed');
+    expect(snapshot.report?.runStatus).toBe('failed');
 
     const log = service.getRunLog(started.run.runId);
     const failure = log.items.find((item) => item.event.code === 'run_failed');
@@ -267,8 +270,8 @@ describe('production run lifecycle robustness', () => {
     const status = await waitForStatus(service, started.run.runId, ['failed']);
 
     expect(status).toBe('failed');
-    // 1 start read + 1 initial read + 3 bounded refresh attempts.
-    expect(reads()).toBe(5);
+    // 1 start read + 1 initial read + 3 bounded refresh attempts + 1 QC attach read.
+    expect(reads()).toBe(6);
 
     const log = service.getRunLog(started.run.runId);
     const failure = log.items.find((item) => item.event.code === 'run_failed');
@@ -296,8 +299,8 @@ describe('production run lifecycle robustness', () => {
     const status = await waitForStatus(service, started.run.runId, ['failed']);
 
     expect(status).toBe('failed');
-    // 1 start read + 1 initial read + 3 bounded refresh attempts.
-    expect(reads()).toBe(5);
+    // 1 start read + 1 initial read + 3 bounded refresh attempts + 1 QC attach read.
+    expect(reads()).toBe(6);
 
     const log = service.getRunLog(started.run.runId);
     const failure = log.items.find((item) => item.event.code === 'run_failed');

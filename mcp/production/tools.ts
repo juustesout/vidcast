@@ -66,7 +66,8 @@ export const getRunLogInputSchema = z.object({
 export const PRODUCTION_TOOL_DEFINITIONS = [
   {
     name: 'run_production',
-    description: 'Start a server-side production run for a project or return the existing active run.',
+    description:
+      'Start a server-side production run for a project or return the existing active run. mode=mock (default) needs no human approval. mode=real requires PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true on the app host. A browser session still needs a current explainer.humanApproval snapshot. A service token cannot mint that approval; it needs a previously user-minted live production mandate for this exact project (check get_mandate_status). The first accepted real run binds boundRunId; reuse rechecks the mandate. Revoked, expired, or failed mandates block new paid work. This tool never mints or revokes a mandate.',
     inputSchema: runProductionInputSchema,
     annotations: {
       title: 'Run Production',
@@ -76,7 +77,8 @@ export const PRODUCTION_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_run_status',
-    description: 'Get status and progress metadata for a headless production run.',
+    description:
+      'Get status and progress metadata for a headless production run. Terminal snapshots include run.report with QC status, MP4 probe, scene counts, recovery attempts, mandate/budget status, and concrete failure causes. A successful compose job alone does not mean QC passed. QC never starts new paid submits; resume uses the existing recovery path.',
     inputSchema: getRunStatusInputSchema,
     annotations: {
       title: 'Get Run Status',

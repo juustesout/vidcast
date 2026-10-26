@@ -4,11 +4,13 @@ import { AudioIntegrityError, validateGeneratedAudio, type AudioIntegrityResult 
 import { resolveRealNarrationPilotGate } from '@/lib/ai/text-to-speech/real-narration-pilot';
 import { createTextToSpeechRegistry } from '@/lib/ai/text-to-speech/registry';
 import { TextToSpeechProviderError, type TextToSpeechFormat } from '@/lib/ai/text-to-speech/provider';
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
+import { MandateBudgetError, type MandateBudgetErrorCode } from '@/lib/spend/mandate-spend';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { MAX_SCENE_DURATION_SECONDS } from '@/lib/constants';
@@ -67,11 +69,12 @@ export class SceneNarrationGenerationError extends Error {
      | 'narration.scene.alreadyGenerated'
       | 'narration.approval.required'
      | 'narration.approval.stale'
-     | 'narration.policy.denied'
+      | 'narration.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
-        | 'paid.spend.cap.in_flight';
+        | 'paid.spend.cap.in_flight'
+        | MandateBudgetErrorCode;
 
   constructor(
     message: string,
@@ -87,11 +90,12 @@ export class SceneNarrationGenerationError extends Error {
        | 'narration.scene.alreadyGenerated'
        | 'narration.approval.required'
        | 'narration.approval.stale'
-       | 'narration.policy.denied'
-        | 'paid.spend.cap.exceeded'
-        | 'paid.spend.cap.invalid'
-        | 'paid.spend.cap.unavailable'
-        | 'paid.spend.cap.in_flight'
+        | 'narration.policy.denied'
+         | 'paid.spend.cap.exceeded'
+         | 'paid.spend.cap.invalid'
+         | 'paid.spend.cap.unavailable'
+         | 'paid.spend.cap.in_flight'
+         | MandateBudgetErrorCode
     ) {
     super(message);
     this.name = 'SceneNarrationGenerationError';
@@ -229,8 +233,7 @@ export async function generateSceneNarration(
     const model = options.model ?? existingNarration.model ?? resolveDefaultModel();
     const resolution = resolveNarrationProvider(options.provider, options.mode);
     try {
-      requireHumanApprovalForMode(project, resolution.mode);
-      assertHumanActorForRealMode(resolution.mode, options.identity);
+      await assertRealExecutionAuthorized(project, resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new SceneNarrationGenerationError(error.message, error.status, `narration.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
@@ -258,6 +261,7 @@ export async function generateSceneNarration(
       throw new SceneNarrationGenerationError(`Unknown narration provider: ${providerId}`, 422, 'narration.provider.unsupported');
     }
 
+    const attemptId = createId('generation_attempt');
     let paidSubmit;
     try {
       paidSubmit = await assertAndReservePaidSubmit({
@@ -265,16 +269,15 @@ export async function generateSceneNarration(
         sceneId,
         modality: 'narration',
         provider: provider.providerId,
-        mode: resolution.mode
+        mode: resolution.mode,
+        idempotencyKey: attemptId
       });
     } catch (error) {
-      if (error instanceof PaidSubmitCapError) {
+      if (error instanceof PaidSubmitCapError || error instanceof MandateBudgetError) {
         throw new SceneNarrationGenerationError(error.message, error.status, error.code);
       }
       throw error;
     }
-
-    const attemptId = createId('generation_attempt');
     const previousAudioAssetId = existingNarration.audioAssetId;
     const previousDuration = existingNarration.duration;
 

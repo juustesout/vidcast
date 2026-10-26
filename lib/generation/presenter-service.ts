@@ -21,11 +21,13 @@ import {
 import {
   evaluatePresenterPaidCostPrecondition
 } from '@/lib/presenter/pricing';
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
+import { MandateBudgetError, type MandateBudgetErrorCode } from '@/lib/spend/mandate-spend';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
@@ -72,15 +74,17 @@ export class PresenterGenerationError extends Error {
     | 'presenter.scene.alreadyRunning'
     | 'presenter.scene.alreadyGenerated'
     | 'presenter.scene.submissionUnknown'
+    | 'presenter.poll.unresolved'
      | 'presenter.cost.notConfigured'
      | 'presenter.budget.exceeded'
      | 'presenter.approval.required'
      | 'presenter.approval.stale'
-     | 'presenter.policy.denied'
-      | 'paid.spend.cap.exceeded'
-      | 'paid.spend.cap.invalid'
-      | 'paid.spend.cap.unavailable'
-      | 'paid.spend.cap.in_flight';
+      | 'presenter.policy.denied'
+       | 'paid.spend.cap.exceeded'
+       | 'paid.spend.cap.invalid'
+       | 'paid.spend.cap.unavailable'
+       | 'paid.spend.cap.in_flight'
+       | MandateBudgetErrorCode;
   readonly details?: Record<string, unknown>;
 
   constructor(
@@ -99,15 +103,17 @@ export class PresenterGenerationError extends Error {
       | 'presenter.scene.alreadyRunning'
       | 'presenter.scene.alreadyGenerated'
       | 'presenter.scene.submissionUnknown'
+      | 'presenter.poll.unresolved'
        | 'presenter.cost.notConfigured'
        | 'presenter.budget.exceeded'
        | 'presenter.approval.required'
        | 'presenter.approval.stale'
-       | 'presenter.policy.denied'
-        | 'paid.spend.cap.exceeded'
-        | 'paid.spend.cap.invalid'
-        | 'paid.spend.cap.unavailable'
-        | 'paid.spend.cap.in_flight',
+        | 'presenter.policy.denied'
+         | 'paid.spend.cap.exceeded'
+         | 'paid.spend.cap.invalid'
+         | 'paid.spend.cap.unavailable'
+         | 'paid.spend.cap.in_flight'
+         | MandateBudgetErrorCode,
     details?: Record<string, unknown>
   ) {
     super(message);
@@ -172,6 +178,23 @@ function updateClip(project: Project, sceneId: string, updater: (clip: Presenter
           duration: 0
         })]
   };
+}
+
+const TERMINAL_PRESENTER_POLL_ERROR_CODES = new Set(['INVALID_REQUEST', 'UNSUPPORTED']);
+const TRANSIENT_PRESENTER_POLL_MESSAGE =
+  'Presenter status could not be confirmed; the job may still be running. The same job will be re-polled during recovery (no new submission is started).';
+
+export function classifyPresenterPollError(error: unknown): 'transient' | 'terminal' {
+  if (error instanceof PresenterProviderError) {
+    return TERMINAL_PRESENTER_POLL_ERROR_CODES.has(error.code) ? 'terminal' : 'transient';
+  }
+  if (error instanceof PresenterGenerationError) {
+    if (error.code === 'presenter.provider.unsupported' || error.code === 'presenter.invalid') {
+      return 'terminal';
+    }
+    return 'transient';
+  }
+  return 'transient';
 }
 
 function mapProviderError(error: PresenterProviderError): PresenterGenerationError {
@@ -374,8 +397,7 @@ export async function submitPresenterClip(
 
     const resolution = resolvePresenterProvider(project, options.provider, options.mode);
     try {
-      requireHumanApprovalForMode(project, resolution.mode);
-      assertHumanActorForRealMode(resolution.mode, options.identity);
+      await assertRealExecutionAuthorized(project, resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new PresenterGenerationError(error.message, error.status, `presenter.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
@@ -414,6 +436,7 @@ export async function submitPresenterClip(
       : undefined;
 
     const avatarId = resolveAvatarId(project, provider, options.avatarId);
+    const attemptId = createId('presenter_attempt');
 
     let paidSubmit;
     try {
@@ -422,17 +445,18 @@ export async function submitPresenterClip(
         sceneId,
         modality: 'presenter',
         provider: provider.providerId,
-        mode: resolution.mode
+        mode: resolution.mode,
+        idempotencyKey: attemptId,
+        estimatedUsd: cost?.estimatedUsd
       });
     } catch (error) {
-      if (error instanceof PaidSubmitCapError) {
+      if (error instanceof PaidSubmitCapError || error instanceof MandateBudgetError) {
         throw new PresenterGenerationError(error.message, error.status, error.code);
       }
       throw error;
     }
 
     const walletBalanceBeforeUsd = cost ? await readProviderBalance(provider) : undefined;
-    const attemptId = createId('presenter_attempt');
     const attempt: PresenterClipAttempt = {
       id: attemptId,
       status: 'submitting',
@@ -599,6 +623,9 @@ export async function pollPresenterClip(
   try {
     providerStatus = await provider.getStatus(attempt.providerJobId);
   } catch (error) {
+    if (classifyPresenterPollError(error) === 'transient') {
+      throw new PresenterGenerationError(TRANSIENT_PRESENTER_POLL_MESSAGE, 503, 'presenter.poll.unresolved');
+    }
     if (error instanceof PresenterProviderError) {
       throw mapProviderError(error);
     }

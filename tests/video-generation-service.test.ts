@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { cancelSceneVideoGeneration, classifyStatusPollError, refreshVideoGenerationAttempt, SceneVideoGenerationError, submitSceneVideoGeneration } from '@/lib/generation/video-generation-service';
+import { InMemoryMandateSpendLedger, setMandateSpendLedgerForTests, setMandateSpendReaderForTests } from '@/lib/spend/mandate-spend';
 import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import { VideoGenerationProviderError } from '@/lib/ai/video-generation/provider';
 import { reconcileInterruptedGenerations } from '@/lib/production/run-recovery';
@@ -16,6 +17,8 @@ import { FileExclusiveLock, InMemoryExclusiveLock } from '@/lib/utils/exclusive-
 afterEach(() => {
   vi.unstubAllEnvs();
   setPaidSubmitLedgerForTests(undefined);
+  setMandateSpendLedgerForTests(undefined);
+  setMandateSpendReaderForTests(undefined);
 });
 
 function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
@@ -1256,6 +1259,37 @@ describe('video generation service', () => {
       ).rejects.toMatchObject({ code: 'generation.scene.busy' });
       expect((await ledger.snapshot()).entries).toHaveLength(1);
       expect(deps.submitCalls()).toBe(1);
+    });
+
+    it('blocks a real video submit when the mandate video budget is exhausted', async () => {
+      vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+      vi.stubEnv('FAL_KEY', 'fal-test-key');
+      enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '5', PAID_SPEND_CAP_MAX_VIDEO_SUBMITS: '5' });
+      setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+      setMandateSpendLedgerForTests(new InMemoryMandateSpendLedger());
+      setMandateSpendReaderForTests(async () => ({
+        mandateId: 'mandate_1',
+        projectId: 'project-video-1',
+        issuedBy: 'user_test',
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        status: 'active',
+        brief: '',
+        allowedActions: ['generate_video'],
+        budgets: { maxVideoSubmits: 0 }
+      }));
+      const project = withHumanApproval(createProject());
+      const deps = createInMemoryDependencies(project, { providerId: 'fal' });
+
+      await expect(
+        submitSceneVideoGeneration(project.id, 'scene-video-1', { regenerate: true, provider: 'fal', mode: 'real' }, {
+          ...videoServiceDeps(deps)
+        })
+      ).rejects.toMatchObject({
+        status: 403,
+        code: 'mandate.budget.exceeded'
+      });
+      expect(deps.submitCalls()).toBe(0);
     });
 
     it('does not consult the spend ledger for mock video submit or poll', async () => {

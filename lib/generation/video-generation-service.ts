@@ -4,11 +4,13 @@ import { isRealVideoProviderKey, toGenerationProvider } from '@/lib/ai/video-gen
 import { createVideoGenerationRegistry } from '@/lib/ai/video-generation/registry';
 import { VideoGenerationProviderError, type VideoReferenceInput } from '@/lib/ai/video-generation/provider';
 import { resolveVideoGeneration, resolveVideoGenerationProviderForAttempt } from '@/lib/ai/video-generation/resolver';
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
+import { MandateBudgetError } from '@/lib/spend/mandate-spend';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import { RunPolicyError } from '@/lib/production/run-policy';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
 import type { RunMode } from '@/lib/production/run-types';
@@ -456,8 +458,7 @@ export async function submitSceneVideoGeneration(
     }
 
     try {
-      requireHumanApprovalForMode(project, resolved.mode);
-      assertHumanActorForRealMode(resolved.mode, options.identity);
+      await assertRealExecutionAuthorized(project, resolved.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new SceneVideoGenerationError(error.message, error.status, `generation.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
@@ -475,10 +476,11 @@ export async function submitSceneVideoGeneration(
         sceneId,
         modality: 'video',
         provider: resolved.providerKey,
-        mode: resolved.mode
+        mode: resolved.mode,
+        idempotencyKey: attemptId
       });
     } catch (error) {
-      if (error instanceof PaidSubmitCapError) {
+      if (error instanceof PaidSubmitCapError || error instanceof MandateBudgetError) {
         throw new SceneVideoGenerationError(error.message, error.status, error.code);
       }
       throw error;

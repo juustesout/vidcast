@@ -5,6 +5,8 @@ import path from 'node:path';
 import { FakeImageGenerationProvider } from '@/lib/ai/image-generation/fake-provider';
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { generateSceneImage, SceneImageGenerationError } from '@/lib/generation/image-generation-service';
+import * as mandateStore from '@/lib/storage/mandate-store';
+import { InMemoryMandateSpendLedger, setMandateSpendLedgerForTests, setMandateSpendReaderForTests } from '@/lib/spend/mandate-spend';
 import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -201,7 +203,10 @@ function imageServiceDeps(deps: ReturnType<typeof createInMemoryDependencies>) {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   setPaidSubmitLedgerForTests(undefined);
+  setMandateSpendLedgerForTests(undefined);
+  setMandateSpendReaderForTests(undefined);
 });
 
 function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
@@ -354,6 +359,40 @@ describe('image generation service', () => {
     expect(deps.generateImageCalls()).toBe(0);
   });
 
+  it('allows a service token to submit real image generation with a live mandate', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    enablePaidSpendCap();
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    const project = createProject();
+    const deps = createInMemoryDependencies(project);
+    vi.spyOn(mandateStore, 'requireLiveProjectMandate').mockResolvedValue({
+      mandateId: 'mandate_1',
+      projectId: project.id,
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['generate_image']
+    });
+
+    const result = await generateSceneImage(
+      project.id,
+      'scene-1',
+      {
+        regenerate: true,
+        mode: 'real',
+        provider: 'openai',
+        identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+      },
+      imageServiceDeps(deps)
+    );
+
+    expect(result.status).toBe('generated');
+    expect(deps.generateImageCalls()).toBe(1);
+  });
+
   it('allows a user identity to submit real image generation after approval', async () => {
     vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
@@ -418,6 +457,35 @@ describe('image generation service', () => {
       code: 'paid.spend.cap.exceeded'
     });
     expect(secondDeps.generateImageCalls()).toBe(0);
+  });
+
+  it('blocks a real image submit when the mandate image budget is exhausted', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '5', PAID_SPEND_CAP_MAX_IMAGE_SUBMITS: '5' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    setMandateSpendLedgerForTests(new InMemoryMandateSpendLedger());
+    setMandateSpendReaderForTests(async () => ({
+      mandateId: 'mandate_1',
+      projectId: 'project-1',
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['generate_image'],
+      budgets: { maxImageSubmits: 0 }
+    }));
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneImage(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'openai' }, imageServiceDeps(deps))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'mandate.budget.exceeded'
+    });
+    expect(deps.generateImageCalls()).toBe(0);
   });
 
   it('does not consult the spend ledger for mock image generation', async () => {

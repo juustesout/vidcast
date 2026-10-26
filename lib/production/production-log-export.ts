@@ -38,7 +38,8 @@ const EVENT_LABELS: Record<ProductionRunnerEvent['code'], string> = {
   run_superseded: 'RUN',
   run_completed: 'RUN',
   run_stopped_unresolved: 'RUN',
-  run_failed: 'RUN'
+  run_failed: 'RUN',
+  action_retrying: 'RETRY'
 };
 
 const ACTION_LABELS: Record<NonNullable<ProductionRunnerEvent['actionType']>, string> = {

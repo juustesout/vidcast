@@ -4,11 +4,13 @@ import { createImageGenerationRegistry } from '@/lib/ai/image-generation/registr
 import { ImageGenerationProviderError, type ImageGenerationRequest, type ReferenceInput } from '@/lib/ai/image-generation/provider';
 import { resolveRealImagePilotGate } from '@/lib/ai/image-generation/real-image-pilot';
 import { assertGenerationTransition } from '@/lib/generation/generation-state';
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
+import { MandateBudgetError } from '@/lib/spend/mandate-spend';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -239,8 +241,7 @@ export async function generateSceneImage(
 
     const resolution = resolveImageProvider(options);
     try {
-      requireHumanApprovalForMode(project, resolution.mode);
-      assertHumanActorForRealMode(resolution.mode, options.identity);
+      await assertRealExecutionAuthorized(project, resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new SceneImageGenerationError(error.message, error.status, `generation.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
@@ -254,6 +255,7 @@ export async function generateSceneImage(
     const provider = dependencies.registry.getProvider(providerId);
     const referenceIds = current.referenceIds && current.referenceIds.length > 0 ? current.referenceIds : scene.referenceIds;
     const referenceImages = await resolveReferenceInputs(project, referenceIds, dependencies.media);
+    const attemptId = createId('generation_attempt');
     let paidSubmit;
     try {
       paidSubmit = await assertAndReservePaidSubmit({
@@ -261,16 +263,15 @@ export async function generateSceneImage(
         sceneId,
         modality: 'image',
         provider: provider.providerId,
-        mode: resolution.mode
+        mode: resolution.mode,
+        idempotencyKey: attemptId
       });
     } catch (error) {
-      if (error instanceof PaidSubmitCapError) {
+      if (error instanceof PaidSubmitCapError || error instanceof MandateBudgetError) {
         throw new SceneImageGenerationError(error.message, error.status, error.code);
       }
       throw error;
     }
-
-    const attemptId = createId('generation_attempt');
     const previousAssetId = scene.visual.assetId || current.assetId;
 
     const queuedAttempt: GenerationAttempt = {

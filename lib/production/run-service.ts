@@ -18,13 +18,17 @@ import type { Project } from '@/lib/types/render';
 import { createId } from '@/lib/utils/ids';
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
 import { deriveProductionPlan } from './production-planner';
+import { evaluateProductionQc, type ProductionQcInput, type ProductionQcReport } from './production-qc';
 import { createProductionRunnerError, runProductionBatch, type ProductionActionExecutionOutcome, type ProductionRunnerEvent } from './production-runner';
 import type { RequestIdentity } from '@/lib/security/auth';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertAuthorizedRealActor } from '@/lib/security/real-actor';
+import { MandateStoreError, bindProjectMandateRun, isMandateLive, readProjectMandate } from '@/lib/storage/mandate-store';
 import { assertRunPolicyPreflight, resolveRunPolicy, resolveRunPolicyServerConfig, type RunPolicyRequest, type RunPolicyServerConfig } from './run-policy';
 import { reconcileInterruptedGenerations } from './run-recovery';
 import { InMemoryRunRegistry } from './run-registry';
 import { FileRunStore, type PersistedRun, type RunStore } from './run-store';
-import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, RunPolicySnapshot } from './run-types';
+import type { HeadlessRunAcceptedConfig, HeadlessRunLogPage, HeadlessRunSnapshot, HeadlessRunStatus, RunPolicySnapshot } from './run-types';
 
 export interface StartProductionRunRequest {
   projectId: string;
@@ -119,6 +123,7 @@ interface ServiceDependencies {
   selectMusic: typeof selectProjectMusic;
   now: () => string;
   delay: (ms: number) => Promise<void>;
+  evaluateQc: (input: ProductionQcInput) => Promise<ProductionQcReport>;
 }
 
 const defaultDependencies: ServiceDependencies = {
@@ -138,7 +143,8 @@ const defaultDependencies: ServiceDependencies = {
   generateMusic: generateProjectMusic,
   selectMusic: selectProjectMusic,
   now: () => new Date().toISOString(),
-  delay: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
+  delay: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms))),
+  evaluateQc: evaluateProductionQc
 };
 
 function envInt(value: string | undefined, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
@@ -344,6 +350,7 @@ export class HeadlessProductionRunService {
 
     const existing = this.registry.getActiveRunByProject(projectId);
     if (existing) {
+      await this.assertReuseAuthorized(existing, input.identity);
       return {
         run: existing,
         reused: true
@@ -357,6 +364,7 @@ export class HeadlessProductionRunService {
     const pending = this.pendingStarts.get(projectId);
     if (pending) {
       const result = await pending;
+      await this.assertReuseAuthorized(result.run, input.identity);
       return {
         run: result.run,
         reused: true
@@ -381,8 +389,10 @@ export class HeadlessProductionRunService {
       const snapshot = this.registry.getRunUnsafe(persistedActive.runId);
       if (snapshot) {
         await this.ensureRunActive(persistedActive);
+        const reused = this.registry.getRunUnsafe(persistedActive.runId) ?? snapshot;
+        await this.assertReuseAuthorized(reused, input.identity);
         return {
-          run: this.registry.getRunUnsafe(persistedActive.runId) ?? snapshot,
+          run: reused,
           reused: true
         };
       }
@@ -396,7 +406,7 @@ export class HeadlessProductionRunService {
     let policy;
     try {
       policy = resolveRunPolicy(input.policy, this.config.policy);
-      assertRunPolicyPreflight(project, policy, input.identity);
+      await assertRunPolicyPreflight(project, policy, input.identity);
     } catch (error) {
       if (error instanceof Error && 'code' in error && 'status' in error) {
         const typed = error as Error & { code?: string; status?: number; details?: Record<string, unknown> };
@@ -413,6 +423,7 @@ export class HeadlessProductionRunService {
 
     const acceptedConfig = resolveRunConfig(this.config, input, policy);
     const runId = createId('run');
+    await this.bindMandateIfNeeded(projectId, runId, policy.mode, input.identity);
     const run = this.registry.createRun({
       runId,
       projectId,
@@ -433,6 +444,56 @@ export class HeadlessProductionRunService {
     };
   }
 
+  private mapMandateError(error: unknown): never {
+    if (error instanceof MandateStoreError) {
+      const code = error.status === 409 ? 'CONFLICT' : error.status === 404 ? 'NOT_FOUND' : 'POLICY_DENIED';
+      throw new RunServiceError(error.message, code, error.status, { mandateCode: error.code });
+    }
+    if (error instanceof AccessControlError) {
+      throw new RunServiceError(error.message, 'POLICY_DENIED', error.status, { code: error.code, ...error.details });
+    }
+    throw error;
+  }
+
+  private async bindMandateIfNeeded(
+    projectId: string,
+    runId: string,
+    mode: string | undefined,
+    identity?: RequestIdentity
+  ): Promise<void> {
+    if (mode !== 'real') {
+      return;
+    }
+    const mandate = await readProjectMandate(projectId);
+    if (!mandate) {
+      return;
+    }
+    if (mandate.status === 'active' && isMandateLive(mandate)) {
+      try {
+        await bindProjectMandateRun(projectId, runId);
+      } catch (error) {
+        this.mapMandateError(error);
+      }
+      return;
+    }
+    if (identity?.kind === 'user') {
+      return;
+    }
+    if (isMandateLive(mandate) && mandate.boundRunId && mandate.boundRunId !== runId) {
+      throw new RunServiceError('The production mandate is already bound to another run.', 'CONFLICT', 409, {
+        mandateCode: 'MANDATE_BOUND'
+      });
+    }
+  }
+
+  private async assertReuseAuthorized(run: HeadlessRunSnapshot, identity?: RequestIdentity): Promise<void> {
+    try {
+      await assertAuthorizedRealActor(run.acceptedConfig.policy.mode, identity, run.projectId);
+    } catch (error) {
+      this.mapMandateError(error);
+    }
+  }
+
   getRun(runId: string): HeadlessRunSnapshot {
     const value = this.registry.getRun(runId);
     if (!value) {
@@ -450,10 +511,13 @@ export class HeadlessProductionRunService {
 
     if (!persisted) {
       const local = this.registry.getRun(runId);
-      if (local) {
+      if (!local) {
+        throw this.notFoundRunError(runId);
+      }
+      if (local.status === 'queued' || local.status === 'running' || local.report) {
         return local;
       }
-      throw this.notFoundRunError(runId);
+      return this.ensureQcReport(runId);
     }
 
     if (this.isPersistedRunExpired(persisted)) {
@@ -471,7 +535,7 @@ export class HeadlessProductionRunService {
       return this.registry.getRunUnsafe(runId) ?? snapshot;
     }
 
-    return snapshot;
+    return this.ensureQcReport(runId);
   }
 
   async getRunLogForRead(runId: string, options: { cursor?: number; limit?: number } = {}): Promise<HeadlessRunLogPage> {
@@ -604,7 +668,10 @@ export class HeadlessProductionRunService {
           status: 'stopped',
           message: 'Superseded by an earlier recovered run for the same project.'
         });
-        this.registry.updateRunStatus(entry.runId, 'failed', { finishedAt: this.dependencies.now() });
+        const project = await this.dependencies.store.getProject(entry.projectId).catch(() => null);
+        await this.finalizeTerminalRun(entry.runId, 'failed', project ?? null, {
+          finishedAt: this.dependencies.now()
+        });
         await this.flushRun(entry.runId);
         continue;
       }
@@ -711,7 +778,7 @@ export class HeadlessProductionRunService {
         status: 'failed',
         message: `Production run failed on recovery: project ${entry.projectId} no longer exists.`
       });
-      this.registry.updateRunStatus(runId, 'failed', { finishedAt: at });
+      await this.finalizeTerminalRun(runId, 'failed', null, { finishedAt: at });
       await this.flushRun(runId);
       return this.registry.getRunUnsafe(runId);
     }
@@ -758,6 +825,29 @@ export class HeadlessProductionRunService {
         failed.add(actionId);
       }
       this.registry.updateProgress(runId, { failedActionIds: Array.from(failed) });
+    }
+
+    if (entry.acceptedConfig.policy.mode === 'real') {
+      try {
+        const mandate = await readProjectMandate(entry.projectId);
+        if (mandate && !isMandateLive(mandate)) {
+          this.registry.appendEvent(runId, {
+            timestamp: at,
+            iteration: 0,
+            code: 'run_recovered',
+            status: 'info',
+            message: 'Production mandate is no longer valid. New paid submits are blocked; existing provider jobs may still be polled.'
+          });
+        }
+      } catch {
+        this.registry.appendEvent(runId, {
+          timestamp: at,
+          iteration: 0,
+          code: 'run_recovered',
+          status: 'info',
+          message: 'Production mandate could not be read during recovery. New paid submits will fail closed.'
+        });
+      }
     }
 
     this.registry.appendEvent(runId, {
@@ -904,7 +994,6 @@ export class HeadlessProductionRunService {
       const initial = await this.readProjectWithRetry(run.projectId);
       if (!initial.ok) {
         const at = this.dependencies.now();
-        this.registry.updateRunStatus(runId, 'failed', { finishedAt: at });
         this.registry.appendEvent(runId, {
           timestamp: at,
           iteration: 0,
@@ -914,6 +1003,7 @@ export class HeadlessProductionRunService {
             ? `Production run failed: project ${run.projectId} could not be read.`
             : `Production run failed: project ${run.projectId} no longer exists.`
         });
+        await this.finalizeTerminalRun(runId, 'failed', null, { finishedAt: at });
         return;
       }
 
@@ -983,7 +1073,8 @@ export class HeadlessProductionRunService {
         },
         onEvent: (event: ProductionRunnerEvent) => {
           this.registry.appendEvent(runId, event);
-        }
+        },
+        delay: this.dependencies.delay
       });
 
       this.registry.updateProgress(runId, {
@@ -997,7 +1088,7 @@ export class HeadlessProductionRunService {
         failedActionIds: result.failedActionIds,
         unresolvedActions: result.unresolvedActions
       });
-      this.registry.updateRunStatus(runId, result.status, {
+      await this.finalizeTerminalRun(runId, result.status, result.project, {
         finishedAt: this.dependencies.now()
       });
     } catch (error) {
@@ -1009,9 +1100,85 @@ export class HeadlessProductionRunService {
         status: 'failed',
         message: `Production run failed: ${message}`
       });
-      this.registry.updateRunStatus(runId, 'failed', {
+      const project = await this.dependencies.store.getProject(run.projectId).catch(() => null);
+      await this.finalizeTerminalRun(runId, 'failed', project ?? null, {
         finishedAt: this.dependencies.now()
       });
+    }
+  }
+
+  private async ensureQcReport(runId: string): Promise<HeadlessRunSnapshot> {
+    const snapshot = this.registry.getRunUnsafe(runId);
+    if (!snapshot) {
+      throw this.notFoundRunError(runId);
+    }
+    if (snapshot.status === 'queued' || snapshot.status === 'running' || snapshot.report) {
+      return snapshot;
+    }
+    const project = await this.dependencies.store.getProject(snapshot.projectId).catch(() => null);
+    await this.attachQcReport(runId, project ?? null);
+    return this.registry.getRunUnsafe(runId) ?? snapshot;
+  }
+
+  private async finalizeTerminalRun(
+    runId: string,
+    status: Exclude<HeadlessRunStatus, 'queued' | 'running'>,
+    project: Project | null,
+    patch: { finishedAt?: string } = {}
+  ): Promise<void> {
+    const snapshot = this.registry.getRunUnsafe(runId);
+    if (!snapshot) {
+      return;
+    }
+    if (snapshot.report && snapshot.status !== 'queued' && snapshot.status !== 'running') {
+      return;
+    }
+    const runForQc = { ...snapshot, status };
+    const exported = this.registry.exportRun(runId);
+    const report = await this.buildQcReport(runForQc, project, exported?.events ?? []);
+    this.registry.updateRunStatus(runId, status, { ...patch, report });
+  }
+
+  private async attachQcReport(runId: string, project: Project | null): Promise<void> {
+    const snapshot = this.registry.getRunUnsafe(runId);
+    if (!snapshot || snapshot.status === 'queued' || snapshot.status === 'running' || snapshot.report) {
+      return;
+    }
+    const exported = this.registry.exportRun(runId);
+    const report = await this.buildQcReport(snapshot, project, exported?.events ?? []);
+    this.registry.setRunReport(runId, report);
+  }
+
+  private async buildQcReport(
+    run: HeadlessRunSnapshot,
+    project: Project | null,
+    events: ProductionRunnerEvent[]
+  ): Promise<ProductionQcReport> {
+    try {
+      return await this.dependencies.evaluateQc({
+        run,
+        project,
+        events
+      });
+    } catch {
+      return {
+        projectId: run.projectId,
+        runId: run.runId,
+        generatedAt: this.dependencies.now(),
+        runStatus: run.status,
+        qcStatus: 'failed',
+        output: null,
+        scenes: { total: project?.scenes.length ?? 0, passed: 0, failed: 0, skipped: 0 },
+        recoveryAttempts: 0,
+        warnings: [],
+        failures: [{ code: 'qc.evaluate.failed', message: 'QC evaluation failed unexpectedly.' }],
+        mandate: null,
+        recovery: {
+          paidSubmitRequired: false,
+          resumeSafe: false,
+          notes: ['QC evaluation failed. Do not start a new paid submit.']
+        }
+      };
     }
   }
 

@@ -197,6 +197,50 @@ export function reconcileInterruptedGenerations(project: Project, mode: RunMode)
 
   let updatedProject: Project | null = changed ? { ...project, scenes } : null;
 
+  if (project.presenterClips && project.presenterClips.length > 0) {
+    const base = updatedProject ?? project;
+    let clipsChanged = false;
+    const presenterClips = project.presenterClips.map((clip) => {
+      if (clip.status !== 'submitting' && clip.status !== 'generating') {
+        return clip;
+      }
+
+      const lastAttempt = clip.attempts?.find((attempt) => attempt.id === clip.lastAttemptId);
+      if (clip.status === 'generating' && lastAttempt?.providerJobId) {
+        notes.push({
+          sceneId: clip.sceneId,
+          actionType: 'presenter_poll',
+          message: `Resuming stored presenter job for scene ${clip.sceneId}.`
+        });
+        return clip;
+      }
+
+      clipsChanged = true;
+      notes.push({
+        sceneId: clip.sceneId,
+        actionType: 'presenter_submit',
+        message: `Unconfirmed presenter submit for scene ${clip.sceneId} cannot be resumed; marked as failed without resubmitting.`
+      });
+      if (mode === 'real') {
+        suppressedActionIds.push(sceneActionId('presenter_submit', clip.sceneId));
+      }
+      return {
+        ...clip,
+        status: 'failed' as const,
+        error: clip.error ?? 'The provider submit outcome could not be confirmed.',
+        attempts: (clip.attempts ?? []).map((attempt) =>
+          attempt.id === clip.lastAttemptId && (attempt.status === 'submitting' || attempt.status === 'generating')
+            ? { ...attempt, status: 'failed' as const, error: attempt.error ?? 'The provider submit outcome could not be confirmed.' }
+            : attempt
+        )
+      };
+    });
+
+    if (clipsChanged) {
+      updatedProject = { ...base, presenterClips };
+    }
+  }
+
   // Project-level background music is not a production-run action, but an
   // interrupted generation must not leave the project permanently stuck in
   // `generating` (which would block all future music generation).

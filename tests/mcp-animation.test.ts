@@ -99,6 +99,7 @@ describe('list_animation_templates', () => {
       getValidationReport: async () => ({}) as never,
       getProductionPlan: async () => ({}) as never,
       getGenerationJob: async () => ({}) as never,
+      getMandateStatus: async () => ({}) as never,
       listAnimationTemplates: async () => templates,
       searchStockPhotos: async () => ({
         searchId: 'stocksearch_1',
@@ -124,6 +125,7 @@ describe('list_animation_templates', () => {
       getValidationReport: async () => ({}) as never,
       getProductionPlan: async () => ({}) as never,
       getGenerationJob: async () => ({}) as never,
+      getMandateStatus: async () => ({}) as never,
       listAnimationTemplates: async () => [],
       searchStockPhotos: async () => ({
         searchId: 'stocksearch_1',

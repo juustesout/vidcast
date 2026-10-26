@@ -457,4 +457,165 @@ describe('runProductionBatch', () => {
     expect(result.events.some((event) => event.code === 'composition_started')).toBe(true);
     expect(result.events.some((event) => event.code === 'composition_completed')).toBe(true);
   });
+
+  it('retries a transient poll error then succeeds without marking the action failed', async () => {
+    const plans = [
+      makePlan([makeAction('poll-1', 'video_poll', 'ready', 's1')]),
+      makePlan([])
+    ];
+    let pointer = 0;
+    let calls = 0;
+    const delays: number[] = [];
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plans[Math.min(pointer, plans.length - 1)],
+      refreshProject: async () => {
+        pointer += 1;
+        return emptyProject;
+      },
+      config: { maxIterations: 2, maxTransientRetries: 3, transientRetryDelayMs: 5 },
+      delay: async (ms) => {
+        delays.push(ms);
+      },
+      executeAction: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw createProductionRunnerError('status unresolved', {
+            code: 'generation.attempt.statusUnresolved',
+            httpStatus: 503
+          });
+        }
+        return { message: 'generated' };
+      }
+    });
+
+    expect(calls).toBe(2);
+    expect(delays).toEqual([5]);
+    expect(result.failedActionIds).toEqual([]);
+    expect(result.completedActionIds).toContain('poll-1');
+    expect(result.events.some((event) => event.code === 'action_retrying')).toBe(true);
+  });
+
+  it('retries a transient render error then succeeds', async () => {
+    const plans = [
+      makePlan([makeAction('render-1', 'scene_render', 'ready', 's1')]),
+      makePlan([])
+    ];
+    let pointer = 0;
+    let calls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plans[Math.min(pointer, plans.length - 1)],
+      refreshProject: async () => {
+        pointer += 1;
+        return emptyProject;
+      },
+      config: { maxIterations: 2, maxTransientRetries: 2, transientRetryDelayMs: 1 },
+      delay: async () => {},
+      executeAction: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw createProductionRunnerError('ffmpeg timed out', { code: 'FFMPEG_TIMEOUT', httpStatus: 504 });
+        }
+        return { message: 'rendered' };
+      }
+    });
+
+    expect(calls).toBe(2);
+    expect(result.failedActionIds).toEqual([]);
+    expect(result.completedActionIds).toContain('render-1');
+  });
+
+  it('fails a render after the bounded retry budget is exhausted', async () => {
+    const plan = makePlan([makeAction('render-1', 'scene_render', 'ready', 's1')]);
+    let calls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plan,
+      refreshProject: async () => emptyProject,
+      config: { maxIterations: 1, maxTransientRetries: 2, transientRetryDelayMs: 1 },
+      delay: async () => {},
+      executeAction: async () => {
+        calls += 1;
+        throw createProductionRunnerError('ffmpeg failed', { code: 'FFMPEG_FAILED', httpStatus: 500 });
+      }
+    });
+
+    expect(calls).toBe(3);
+    expect(result.failedActionIds).toContain('render-1');
+    expect(result.events.filter((event) => event.code === 'action_retrying')).toHaveLength(2);
+  });
+
+  it('does not retry a definitive paid-submit failure', async () => {
+    const plan = makePlan([makeAction('video-1', 'video_submit', 'ready', 's1')]);
+    let calls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plan,
+      refreshProject: async () => emptyProject,
+      config: { maxIterations: 1, maxTransientRetries: 3, transientRetryDelayMs: 1 },
+      delay: async () => {},
+      executeAction: async () => {
+        calls += 1;
+        throw createProductionRunnerError('unconfirmed submit', {
+          code: 'generation.attempt.submitUnresolved',
+          httpStatus: 503
+        });
+      }
+    });
+
+    expect(calls).toBe(1);
+    expect(result.failedActionIds).toContain('video-1');
+    expect(result.events.some((event) => event.code === 'action_retrying')).toBe(false);
+  });
+
+  it('does not retry a mandate budget error during recovery', async () => {
+    const plan = makePlan([makeAction('img-1', 'image_generate', 'ready', 's1')]);
+    let calls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plan,
+      refreshProject: async () => emptyProject,
+      config: { maxIterations: 1, maxTransientRetries: 3, transientRetryDelayMs: 1 },
+      delay: async () => {},
+      executeAction: async () => {
+        calls += 1;
+        throw createProductionRunnerError('mandate budget exceeded', {
+          code: 'mandate.budget.exceeded',
+          httpStatus: 403
+        });
+      }
+    });
+
+    expect(calls).toBe(1);
+    expect(result.failedActionIds).toContain('img-1');
+  });
+
+  it('does not retry a terminal presenter provider failure', async () => {
+    const plan = makePlan([makeAction('poll-1', 'presenter_poll', 'ready', 's1')]);
+    let calls = 0;
+
+    const result = await runProductionBatch({
+      initialProject: emptyProject,
+      derivePlan: () => plan,
+      refreshProject: async () => emptyProject,
+      config: { maxIterations: 1, maxTransientRetries: 3, transientRetryDelayMs: 1 },
+      delay: async () => {},
+      executeAction: async () => {
+        calls += 1;
+        throw createProductionRunnerError('presenter failed', {
+          code: 'presenter.provider.failed',
+          httpStatus: 502
+        });
+      }
+    });
+
+    expect(calls).toBe(1);
+    expect(result.failedActionIds).toContain('poll-1');
+  });
 });

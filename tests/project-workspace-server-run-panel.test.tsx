@@ -43,4 +43,15 @@ describe('ServerRunPanel idle-aware polling', () => {
     expect(source).toContain('void pollRef.current();');
     expect(source).not.toContain('void pollServerRun();');
   });
+
+  it('renders the production QC report from the run snapshot', () => {
+    const source = panelSource();
+
+    expect(source).toContain('trackerState.run.report');
+    expect(source).toContain('Production QC');
+    expect(source).toContain('report.qcStatus');
+    expect(source).toContain('output.downloadPath');
+    expect(source).toContain('report.scenes.passed');
+    expect(source).toContain('report.recoveryAttempts');
+  });
 });

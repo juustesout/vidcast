@@ -1,6 +1,7 @@
 import type { AnimationTemplateSummary } from '@/lib/animation/types';
 import type { StockSearchResponse } from '@/lib/ai/stock/stock-search-service';
 import type { RunMode } from '@/lib/production/run-types';
+import type { ProductionMandate } from '@/lib/types/mandate';
 import type { Project } from '@/lib/types/render';
 import type { CompositionArtifact } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
@@ -129,6 +130,12 @@ export interface GetGenerationJobResponse {
   errorCode?: string;
   errorMessage?: string;
   lastPolledAt?: string;
+}
+
+export interface GetMandateStatusResponse {
+  projectId: string;
+  live: boolean;
+  mandate: ProductionMandate;
 }
 
 export function toCompositionInfo(projectId: string, artifact: CompositionArtifact): CompositionInfo {

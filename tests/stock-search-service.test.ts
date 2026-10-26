@@ -11,6 +11,7 @@ import {
 } from '@/lib/ai/stock/stock-search-service';
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { InMemoryStockStateStore } from '@/lib/ai/stock/stock-state-store';
+import * as mandateStore from '@/lib/storage/mandate-store';
 import type { Project } from '@/lib/types/render';
 import type { StockPhoto, StockProviderId, StockSearchResult } from '@/lib/types/stock';
 
@@ -151,6 +152,7 @@ describe('searchStockPhotos', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   it('returns fake candidates in mock mode and builds inline previews', async () => {
@@ -297,6 +299,43 @@ describe('searchStockPhotos', () => {
       code: 'stock.policy.denied'
     });
     expect(pexels.searchPhotos).not.toHaveBeenCalled();
+  });
+
+  it('allows a service token to search real stock with a live mandate', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('PAID_SPEND_CAP_ENABLED', 'true');
+    vi.stubEnv('PAID_SPEND_CAP_WINDOW_HOURS', '24');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_SUBMITS', '10');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_IMAGE_SUBMITS', '4');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_VIDEO_SUBMITS', '2');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_NARRATION_SUBMITS', '4');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_MUSIC_SUBMITS', '1');
+    vi.stubEnv('PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS', '1');
+    const pexels = stubProvider('pexels', { photos: [photo('pexels', 0)] });
+    const project = createProject();
+    vi.spyOn(mandateStore, 'requireLiveProjectMandate').mockResolvedValue({
+      mandateId: 'mandate_1',
+      projectId: project.id,
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['search_stock_photos']
+    });
+
+    const result = await searchStockPhotos(
+      {
+        query: 'sunset',
+        mode: 'real',
+        project,
+        identity: { kind: 'service', subject: 'service:api_token', authType: 'service_token' }
+      },
+      deps({ pexels })
+    );
+
+    expect(result.results[0].provider).toBe('pexels');
+    expect(pexels.searchPhotos).toHaveBeenCalledTimes(1);
   });
 
   it('refuses real search when human approval is stale', async () => {

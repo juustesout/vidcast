@@ -47,6 +47,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
     getValidationReport: async () => ({}) as never,
     getProductionPlan: async () => ({}) as never,
     getGenerationJob: async () => ({}) as never,
+    getMandateStatus: async () => ({}) as never,
     listAnimationTemplates: async () => [],
     searchStockPhotos: async () => sampleSearch,
     ...overrides
@@ -62,6 +63,7 @@ describe('search_stock_photos tool definition', () => {
     expect(entry?.description).toMatch(/stock_select/);
     expect(entry?.description).toMatch(/import_asset/);
     expect(entry?.description).toMatch(/human approval/);
+    expect(entry?.description).toMatch(/live production mandate/);
   });
 });
 

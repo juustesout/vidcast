@@ -3,13 +3,15 @@ import path from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { PresenterJobStatus, PresenterProvider } from '@/lib/ai/presenter/provider';
+import { PresenterProviderError, type PresenterJobStatus, type PresenterProvider } from '@/lib/ai/presenter/provider';
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import {
+  classifyPresenterPollError,
   pollPresenterClip,
   PresenterGenerationError,
   submitPresenterClip
 } from '@/lib/generation/presenter-service';
+import { InMemoryMandateSpendLedger, setMandateSpendLedgerForTests, setMandateSpendReaderForTests } from '@/lib/spend/mandate-spend';
 import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -365,6 +367,8 @@ function realProject(overrides: {
 afterEach(() => {
   vi.unstubAllEnvs();
   setPaidSubmitLedgerForTests(undefined);
+  setMandateSpendLedgerForTests(undefined);
+  setMandateSpendReaderForTests(undefined);
 });
 
 function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
@@ -946,5 +950,77 @@ describe('presenter generation service', () => {
     ).rejects.toMatchObject({ code: 'presenter.budget.exceeded' });
     expect(deps.submitCalls).toBe(0);
     expect((await ledger.snapshot()).entries).toHaveLength(0);
+  });
+
+  it('blocks a real presenter submit when the mandate presenter budget is exhausted', async () => {
+    configureRealPresenterPricing();
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '5', PAID_SPEND_CAP_MAX_PRESENTER_SUBMITS: '5' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    setMandateSpendLedgerForTests(new InMemoryMandateSpendLedger());
+    setMandateSpendReaderForTests(async () => ({
+      mandateId: 'mandate_1',
+      projectId: 'project-presenter-service',
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['run_production'],
+      budgets: { maxPresenterSubmits: 0 }
+    }));
+    const project = realProject();
+    const deps = await createDependencies(project, heygenProvider([5]));
+
+    await expect(
+      submitPresenterClip(project.id, 'scene-1', { mode: 'real' }, deps)
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'mandate.budget.exceeded'
+    });
+    expect(deps.submitCalls).toBe(0);
+  });
+
+  it('treats a transport presenter poll error as transient and does not fail the clip', async () => {
+    const project = buildProject({
+      presenterClips: [
+        {
+          sceneId: 'scene-1',
+          status: 'generating',
+          provider: 'mock',
+          outputFormat: 'mp4',
+          audioAssetId: 'audio-1',
+          narrationSignature: 'signature',
+          duration: 2,
+          lastAttemptId: 'presenter-attempt-1',
+          attempts: [{
+            id: 'presenter-attempt-1',
+            status: 'generating',
+            provider: 'mock',
+            providerJobId: 'mock-job-1',
+            outputFormat: 'mp4',
+            audioAssetId: 'audio-1',
+            narrationSignature: 'signature',
+            duration: 2,
+            createdAt: new Date().toISOString()
+          }]
+        }
+      ]
+    });
+    const provider = mockProvider();
+    provider.getStatus = async () => {
+      throw new PresenterProviderError('network down', 'PROVIDER_ERROR', 503);
+    };
+    const deps = await createDependencies(project, provider);
+
+    await expect(pollPresenterClip(project.id, 'scene-1', { mode: 'mock' }, deps)).rejects.toMatchObject({
+      code: 'presenter.poll.unresolved',
+      status: 503
+    });
+    expect(deps.state.project.presenterClips?.[0].status).toBe('generating');
+    expect(classifyPresenterPollError(new PresenterProviderError('network down', 'PROVIDER_ERROR', 503))).toBe('transient');
+  });
+
+  it('treats an invalid presenter poll request as terminal', () => {
+    expect(classifyPresenterPollError(new PresenterProviderError('bad job', 'INVALID_REQUEST', 400))).toBe('terminal');
   });
 });

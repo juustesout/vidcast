@@ -1,10 +1,11 @@
 import type { AnimationTemplateSummary } from '@/lib/animation/types';
 import type { StockSearchResponse } from '@/lib/ai/stock/stock-search-service';
+import type { ProductionMandate } from '@/lib/types/mandate';
 import type { Project } from '@/lib/types/render';
 import type { ProjectSummary } from '@/lib/storage/project-store';
 import type { ProjectValidationReport } from '@/lib/validation/project-validation-report';
 import type { ProductionPlanReport } from '@/lib/production/production-plan-report';
-import type { GetGenerationJobResponse, ReadOnlyMcpErrorCode, SearchStockPhotosInput } from './types';
+import type { GetGenerationJobResponse, GetMandateStatusResponse, ReadOnlyMcpErrorCode, SearchStockPhotosInput } from './types';
 import { ReadOnlyMcpToolError } from './errors';
 
 interface ProjectsListPayload {
@@ -46,12 +47,18 @@ interface GenerationJobPayload {
   lastPolledAt?: string;
 }
 
+interface MandatePayload {
+  mandate?: ProductionMandate;
+  live?: boolean;
+}
+
 export interface AppApiClient {
   listProjects(): Promise<ProjectSummary[]>;
   getProject(projectId: string): Promise<Project>;
   getValidationReport(projectId: string): Promise<ProjectValidationReport>;
   getProductionPlan(projectId: string): Promise<ProductionPlanReport>;
   getGenerationJob(projectId: string, attemptId: string): Promise<GetGenerationJobResponse>;
+  getMandateStatus(projectId: string): Promise<GetMandateStatusResponse>;
   listAnimationTemplates(): Promise<AnimationTemplateSummary[]>;
   searchStockPhotos(projectId: string, input: SearchStockPhotosInput): Promise<StockSearchResponse>;
 }
@@ -247,6 +254,22 @@ export class HttpAppApiClient implements AppApiClient {
       errorCode: payload.errorCode,
       errorMessage: payload.errorMessage,
       lastPolledAt: payload.lastPolledAt
+    };
+  }
+
+  async getMandateStatus(projectId: string): Promise<GetMandateStatusResponse> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/mandates`;
+    const payload = (await this.request(path)) as MandatePayload;
+    if (!payload.mandate || typeof payload.live !== 'boolean') {
+      throw new ReadOnlyMcpToolError('API_ERROR', 'Invalid mandate status response payload.', {
+        endpoint: path,
+        projectId
+      });
+    }
+    return {
+      projectId,
+      live: payload.live,
+      mandate: payload.mandate
     };
   }
 

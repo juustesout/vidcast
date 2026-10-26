@@ -96,7 +96,8 @@ function storedRunFromEntry(entry: RunRegistryEntry): StoredRun {
       }
     },
     events: entry.events.map((event) => ({ ...event, error: event.error ? { ...event.error } : undefined })),
-    eventOffset: entry.eventOffset
+    eventOffset: entry.eventOffset,
+    ...(entry.report ? { report: entry.report } : {})
   };
 }
 
@@ -273,7 +274,11 @@ export class InMemoryRunRegistry {
     return this.snapshot(run);
   }
 
-  updateRunStatus(runId: string, status: HeadlessRunStatus, patch: Partial<Pick<HeadlessRunSnapshot, 'startedAt' | 'finishedAt'>> = {}): HeadlessRunSnapshot | null {
+  updateRunStatus(
+    runId: string,
+    status: HeadlessRunStatus,
+    patch: Partial<Pick<HeadlessRunSnapshot, 'startedAt' | 'finishedAt' | 'report'>> = {}
+  ): HeadlessRunSnapshot | null {
     const run = this.runs.get(runId);
     if (!run) {
       return null;
@@ -286,11 +291,24 @@ export class InMemoryRunRegistry {
     if (patch.finishedAt) {
       run.finishedAt = patch.finishedAt;
     }
+    if (patch.report) {
+      run.report = patch.report;
+    }
 
     if (status !== 'queued' && status !== 'running') {
       this.activeByProject.delete(run.projectId);
     }
 
+    this.notify(runId);
+    return this.snapshot(run);
+  }
+
+  setRunReport(runId: string, report: HeadlessRunSnapshot['report']): HeadlessRunSnapshot | null {
+    const run = this.runs.get(runId);
+    if (!run) {
+      return null;
+    }
+    run.report = report;
     this.notify(runId);
     return this.snapshot(run);
   }
@@ -407,7 +425,8 @@ export class InMemoryRunRegistry {
           maxVideoPolls: run.acceptedConfig.limits.maxVideoPolls,
           perActionConcurrency: { ...run.acceptedConfig.limits.perActionConcurrency }
         }
-      }
+      },
+      ...(run.report ? { report: run.report } : {})
     };
   }
 }

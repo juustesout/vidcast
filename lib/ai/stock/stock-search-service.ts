@@ -1,7 +1,8 @@
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { resolveStockMode, StockImageSelectionError } from '@/lib/generation/stock-image-service';
 import type { RunMode } from '@/lib/production/run-types';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { PaidSubmitCapError, requireEnabledPaidSubmitCapForRealMode } from '@/lib/spend/paid-submit-cap';
 import type { Project } from '@/lib/types/render';
@@ -229,9 +230,8 @@ export async function searchStockPhotos(
       );
     }
     if (request.project) {
-      requireHumanApprovalForMode(request.project, mode.mode);
+      await assertRealExecutionAuthorized(request.project, mode.mode, request.identity);
     }
-    assertHumanActorForRealMode(mode.mode, request.identity);
   } catch (error) {
     if (error instanceof HumanApprovalError) {
       throw new StockSearchError(

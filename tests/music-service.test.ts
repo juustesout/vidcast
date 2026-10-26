@@ -9,6 +9,7 @@ import {
   selectProjectMusic
 } from '@/lib/generation/music-service';
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
+import { InMemoryMandateSpendLedger, setMandateSpendLedgerForTests, setMandateSpendReaderForTests } from '@/lib/spend/mandate-spend';
 import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import { MusicProviderError } from '@/lib/ai/music/provider';
 import type { GeneratedMusicInput } from '@/lib/storage/media-store';
@@ -219,6 +220,8 @@ function withHumanApproval(project: Project): Project {
 afterEach(() => {
   vi.unstubAllEnvs();
   setPaidSubmitLedgerForTests(undefined);
+  setMandateSpendLedgerForTests(undefined);
+  setMandateSpendReaderForTests(undefined);
 });
 
 function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
@@ -489,6 +492,34 @@ describe('project music generation service', () => {
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.exceeded'
+    });
+    expect(deps.generateCalls()).toBe(0);
+  });
+
+  it('blocks a real music submit when the mandate music budget is exhausted', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '5', PAID_SPEND_CAP_MAX_MUSIC_SUBMITS: '5' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    setMandateSpendLedgerForTests(new InMemoryMandateSpendLedger());
+    setMandateSpendReaderForTests(async () => ({
+      mandateId: 'mandate_1',
+      projectId: 'project-1',
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['manage_project_music'],
+      budgets: { maxMusicSubmits: 0 }
+    }));
+    const deps = createDependencies(withHumanApproval(createProject()));
+
+    await expect(
+      generateProjectMusic('project-1', { prompt: 'calm ambient', mode: 'real', provider: 'elevenlabs' }, musicServiceDeps(deps))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'mandate.budget.exceeded'
     });
     expect(deps.generateCalls()).toBe(0);
   });

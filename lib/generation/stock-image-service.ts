@@ -14,9 +14,10 @@ import {
   type StockRouterDiagnostic,
   type StockRouterResult
 } from '@/lib/ai/stock/stock-router';
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { resolveRunPolicyServerConfig } from '@/lib/production/run-policy';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { PaidSubmitCapError, requireEnabledPaidSubmitCapForRealMode } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
@@ -235,8 +236,7 @@ export async function selectSceneStockImage(
 
     const { mode, allowedProviders, order } = resolveStockMode({ mode: options.mode });
     try {
-      requireHumanApprovalForMode(project, mode);
-      assertHumanActorForRealMode(mode, options.identity);
+      await assertRealExecutionAuthorized(project, mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new StockImageSelectionError(error.message, error.status, `stock.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
@@ -384,8 +384,7 @@ export async function selectSceneStockPhoto(
 
     const { mode, allowedProviders } = resolveStockMode({ mode: options.mode });
     try {
-      requireHumanApprovalForMode(project, mode);
-      assertHumanActorForRealMode(mode, options.identity);
+      await assertRealExecutionAuthorized(project, mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new StockImageSelectionError(error.message, error.status, `stock.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);

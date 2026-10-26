@@ -6,6 +6,7 @@ import { HttpAppApiClient } from './api-client';
 import { ReadOnlyMcpToolError, toFailure, toSuccess } from './errors';
 import type {
   GetGenerationJobResponse,
+  GetMandateStatusResponse,
   GetProjectCompositionsResponse,
   GetProjectResponse,
   GetProductionPlanResponse,
@@ -42,6 +43,9 @@ export const getProjectCompositionsInputSchema = z.object({
 export const getGenerationJobInputSchema = z.object({
   projectId: projectIdSchema,
   attemptId: z.string().trim().min(1).max(200)
+});
+export const getMandateStatusInputSchema = z.object({
+  projectId: projectIdSchema
 });
 export const listAnimationTemplatesInputSchema = z.object({}).strict();
 export const searchStockPhotosInputSchema = z.object({
@@ -131,6 +135,17 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: 'get_mandate_status',
+    description:
+      'Read the existing user-minted production mandate for a project via GET /api/projects/{id}/mandates. Returns live (whether the mandate currently authorizes service real/paid work) plus the public mandate view: mandateId, status (active|consumed|revoked|expired|failed), issuedBy, issuedAt, expiresAt, brief, allowedActions, allowedProviders, budgets, boundRunId. Status is resolved at read time, so an expired file is reported as expired even if the stored status is still active or consumed. This tool never mints, revokes, or forges a mandate; POST and DELETE remain browser-session only. Missing mandate returns NOT_FOUND. A live mandate is the service-token substitute for explainer.humanApproval on real/paid authoring and run_production; Hermes must not invent mint/revoke MCP tools.',
+    inputSchema: getMandateStatusInputSchema,
+    annotations: {
+      title: 'Get Mandate Status',
+      readOnlyHint: true,
+      openWorldHint: false
+    }
+  },
+  {
     name: 'list_animation_templates',
     description:
       'List the server-owned Motion Canvas animation templates Hermes may render. Returns id, destination (bigscreen|overlay), output codec/container, allowedParamKeys, paramsSchema, and defaults. Structured numbers/colors/text only; unknown fields are rejected. Does not execute code or render.',
@@ -144,7 +159,7 @@ export const READ_ONLY_TOOL_DEFINITIONS = [
   {
     name: 'search_stock_photos',
     description:
-      'Search stock photo candidates via GET /api/projects/{id}/stock/search. Returns searchId, sanitized results (provider, photoId, dimensions, preview/image/source URLs, photographer, license, usagePolicy), diagnostics, and quota. This is discovery only: it never selects a photo, never downloads bytes, never writes a scene, and never assigns HTML-slot imageAssetId. Stock CDN URLs are not slot-eligible; import local PNG/JPEG/WebP with import_asset, then assign the returned assetId. Production stock scenes still use the stock_select action. Mock mode is locked to the fake provider. Real mode requires a current human approval of the project snapshot and may consume provider quota. Searching refreshes the server-side candidate cache, so it is not a pure read.',
+      'Search stock photo candidates via GET /api/projects/{id}/stock/search. Returns searchId, sanitized results (provider, photoId, dimensions, preview/image/source URLs, photographer, license, usagePolicy), diagnostics, and quota. This is discovery only: it never selects a photo, never downloads bytes, never writes a scene, and never assigns HTML-slot imageAssetId. Stock CDN URLs are not slot-eligible; import local PNG/JPEG/WebP with import_asset, then assign the returned assetId. Production stock scenes still use the stock_select action. Mock mode is locked to the fake provider. Real mode requires a current human approval of the project snapshot for a browser session, or a live production mandate for the service token, and may consume provider quota. Searching refreshes the server-side candidate cache, so it is not a pure read.',
     inputSchema: searchStockPhotosInputSchema,
     annotations: {
       title: 'Search Stock Photos',
@@ -162,6 +177,7 @@ export interface ReadOnlyToolService {
   getProductionPlan(args: unknown): Promise<ReadOnlyMcpResult<GetProductionPlanResponse>>;
   getProjectCompositions(args: unknown): Promise<ReadOnlyMcpResult<GetProjectCompositionsResponse>>;
   getGenerationJob(args: unknown): Promise<ReadOnlyMcpResult<GetGenerationJobResponse>>;
+  getMandateStatus(args: unknown): Promise<ReadOnlyMcpResult<GetMandateStatusResponse>>;
   listAnimationTemplates(args: unknown): Promise<ReadOnlyMcpResult<ListAnimationTemplatesResponse>>;
   searchStockPhotos(args: unknown): Promise<ReadOnlyMcpResult<SearchStockPhotosResponse>>;
 }
@@ -270,6 +286,16 @@ export function createReadOnlyToolService(apiClient: AppApiClient = new HttpAppA
         const parsed = getGenerationJobInputSchema.parse(args ?? {});
         const job = await apiClient.getGenerationJob(parsed.projectId, parsed.attemptId);
         return toSuccess(job);
+      } catch (error) {
+        return toFailure(fromValidationError(error));
+      }
+    },
+
+    async getMandateStatus(args: unknown) {
+      try {
+        const parsed = getMandateStatusInputSchema.parse(args ?? {});
+        const status = await apiClient.getMandateStatus(parsed.projectId);
+        return toSuccess(status);
       } catch (error) {
         return toFailure(fromValidationError(error));
       }
@@ -413,11 +439,21 @@ export function registerReadOnlyTools(server: McpServer, service: ReadOnlyToolSe
   );
 
   server.registerTool(
-    'list_animation_templates',
+    'get_mandate_status',
     {
       description: READ_ONLY_TOOL_DEFINITIONS[7].description,
       inputSchema: READ_ONLY_TOOL_DEFINITIONS[7].inputSchema,
       annotations: READ_ONLY_TOOL_DEFINITIONS[7].annotations
+    },
+    async (args) => asToolResponse(await service.getMandateStatus(args))
+  );
+
+  server.registerTool(
+    'list_animation_templates',
+    {
+      description: READ_ONLY_TOOL_DEFINITIONS[8].description,
+      inputSchema: READ_ONLY_TOOL_DEFINITIONS[8].inputSchema,
+      annotations: READ_ONLY_TOOL_DEFINITIONS[8].annotations
     },
     async (args) => asToolResponse(await service.listAnimationTemplates(args))
   );
@@ -425,9 +461,9 @@ export function registerReadOnlyTools(server: McpServer, service: ReadOnlyToolSe
   server.registerTool(
     'search_stock_photos',
     {
-      description: READ_ONLY_TOOL_DEFINITIONS[8].description,
-      inputSchema: READ_ONLY_TOOL_DEFINITIONS[8].inputSchema,
-      annotations: READ_ONLY_TOOL_DEFINITIONS[8].annotations
+      description: READ_ONLY_TOOL_DEFINITIONS[9].description,
+      inputSchema: READ_ONLY_TOOL_DEFINITIONS[9].inputSchema,
+      annotations: READ_ONLY_TOOL_DEFINITIONS[9].annotations
     },
     async (args) => asToolResponse(await service.searchStockPhotos(args))
   );

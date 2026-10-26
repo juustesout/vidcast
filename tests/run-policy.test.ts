@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { assertRunPolicyPreflight, resolveManualGenerationProvider, resolveRunPolicy, RunPolicyError } from '@/lib/production/run-policy';
+import * as mandateStore from '@/lib/storage/mandate-store';
 import type { Project } from '@/lib/types/render';
 
 function withHumanApproval(project: Project): Project {
@@ -137,6 +138,7 @@ function createNarrationOnlyProject(): Project {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe('run policy', () => {
@@ -168,17 +170,17 @@ describe('run policy', () => {
     expect(resolveRunPolicy({ mode: 'mock', force: true }, server).force).toBe(true);
   });
 
-  it('blocks mock mode when an active poll would hit a real provider job', () => {
+  it('blocks mock mode when an active poll would hit a real provider job', async () => {
     const project = createProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(
       { mode: 'mock' },
       { allowRealProviders: true, defaultMode: 'mock' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/does not match locked run provider policy/i);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/does not match locked run provider policy/i);
   });
 
-  it('requires OpenAI key for real visual generation runs', () => {
+  it('requires OpenAI key for real visual generation runs', async () => {
     const project = createProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(
       { mode: 'real' },
@@ -186,10 +188,10 @@ describe('run policy', () => {
     );
 
     vi.stubEnv('OPENAI_API_KEY', '');
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/OPENAI_API_KEY/);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/OPENAI_API_KEY/);
   });
 
-  it('only enforces providers for modalities the run actually needs', () => {
+  it('only enforces providers for modalities the run actually needs', async () => {
     const project = createNarrationOnlyProject();
     vi.stubEnv('ELEVENLABS_API_KEY', 'xi-test');
     vi.stubEnv('OPENAI_API_KEY', '');
@@ -199,31 +201,30 @@ describe('run policy', () => {
       { allowRealProviders: true, defaultMode: 'real' }
     );
 
-    // image/video are unused by this project, so their non-real providers are fine.
-    expect(() => assertRunPolicyPreflight(project, policy)).not.toThrow();
+    await expect(assertRunPolicyPreflight(project, policy)).resolves.toBeDefined();
   });
 
-  it('rejects a non-real provider for a modality the run needs in real mode', () => {
+  it('rejects a non-real provider for a modality the run needs in real mode', async () => {
     const project = createNarrationOnlyProject();
     const policy = resolveRunPolicy(
       { mode: 'real', providers: { narration: 'fake' } },
       { allowRealProviders: true, defaultMode: 'real' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/narration/i);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/narration/i);
   });
 
-  it('rejects a real provider for a modality the run needs in mock mode', () => {
+  it('rejects a real provider for a modality the run needs in mock mode', async () => {
     const project = createNarrationOnlyProject();
     const policy = resolveRunPolicy(
       { mode: 'mock', providers: { narration: 'elevenlabs' } },
       { allowRealProviders: true, defaultMode: 'mock' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/narration/i);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/narration/i);
   });
 
-  it('denies real preflight without a current human approval', () => {
+  it('denies real preflight without a current human approval', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
     const project = createUnauthoredProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(
@@ -231,18 +232,14 @@ describe('run policy', () => {
       { allowRealProviders: true, defaultMode: 'real' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(RunPolicyError);
-    try {
-      assertRunPolicyPreflight(project, policy);
-      throw new Error('expected preflight to throw');
-    } catch (error) {
-      expect(error).toBeInstanceOf(RunPolicyError);
-      expect((error as RunPolicyError).code).toBe('POLICY_DENIED');
-      expect((error as RunPolicyError).details).toMatchObject({ code: 'HUMAN_APPROVAL_REQUIRED' });
-    }
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toBeInstanceOf(RunPolicyError);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toMatchObject({
+      code: 'POLICY_DENIED',
+      details: { code: 'HUMAN_APPROVAL_REQUIRED' }
+    });
   });
 
-  it('denies real preflight when human approval is stale', () => {
+  it('denies real preflight when human approval is stale', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
     const project = createProjectWithRunningVideoJob('openai');
     project.explainer = {
@@ -257,27 +254,23 @@ describe('run policy', () => {
       { allowRealProviders: true, defaultMode: 'real' }
     );
 
-    try {
-      assertRunPolicyPreflight(project, policy);
-      throw new Error('expected preflight to throw');
-    } catch (error) {
-      expect(error).toBeInstanceOf(RunPolicyError);
-      expect((error as RunPolicyError).code).toBe('POLICY_DENIED');
-      expect((error as RunPolicyError).details).toMatchObject({ code: 'HUMAN_APPROVAL_STALE' });
-    }
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toMatchObject({
+      code: 'POLICY_DENIED',
+      details: { code: 'HUMAN_APPROVAL_STALE' }
+    });
   });
 
-  it('allows mock preflight without human approval', () => {
+  it('allows mock preflight without human approval', async () => {
     const project = createUnauthoredProjectWithRunningVideoJob('local');
     const policy = resolveRunPolicy(
       { mode: 'mock', providers: { video: 'local' } },
       { allowRealProviders: true, defaultMode: 'mock' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).not.toThrow();
+    await expect(assertRunPolicyPreflight(project, policy)).resolves.toBeDefined();
   });
 
-  it('denies real preflight for a service token even with current human approval', () => {
+  it('denies real preflight for a service token even with current human approval', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
     const project = createProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(
@@ -285,22 +278,20 @@ describe('run policy', () => {
       { allowRealProviders: true, defaultMode: 'real' }
     );
 
-    try {
+    await expect(
       assertRunPolicyPreflight(project, policy, {
         kind: 'service',
         subject: 'service:api_token',
         authType: 'service_token'
-      });
-      throw new Error('expected preflight to throw');
-    } catch (error) {
-      expect(error).toBeInstanceOf(RunPolicyError);
-      expect((error as RunPolicyError).code).toBe('POLICY_DENIED');
-      expect((error as RunPolicyError).status).toBe(403);
-      expect((error as RunPolicyError).details).toMatchObject({ code: 'FORBIDDEN' });
-    }
+      })
+    ).rejects.toMatchObject({
+      code: 'POLICY_DENIED',
+      status: 403,
+      details: { code: 'FORBIDDEN' }
+    });
   });
 
-  it('allows real preflight for a user identity with current human approval', () => {
+  it('allows real preflight for a user identity with current human approval', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
     const project = createProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(
@@ -308,13 +299,40 @@ describe('run policy', () => {
       { allowRealProviders: true, defaultMode: 'real' }
     );
 
-    expect(() =>
+    await expect(
       assertRunPolicyPreflight(project, policy, {
         kind: 'user',
         subject: 'user_test',
         authType: 'session'
       })
-    ).not.toThrow();
+    ).resolves.toBeDefined();
+  });
+
+  it('allows real preflight for a service token when a live mandate exists', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const project = createProjectWithRunningVideoJob('openai');
+    vi.spyOn(mandateStore, 'requireLiveProjectMandate').mockResolvedValue({
+      mandateId: 'mandate_1',
+      projectId: project.id,
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['run_production']
+    });
+    const policy = resolveRunPolicy(
+      { mode: 'real' },
+      { allowRealProviders: true, defaultMode: 'real' }
+    );
+
+    await expect(
+      assertRunPolicyPreflight(project, policy, {
+        kind: 'service',
+        subject: 'service:api_token',
+        authType: 'service_token'
+      })
+    ).resolves.toBeDefined();
   });
 });
 
@@ -415,7 +433,7 @@ describe('FAL video provider policy', () => {
   const mockServer = { allowRealProviders: false, defaultMode: 'mock' as const };
   const realServer = { allowRealProviders: true, defaultMode: 'real' as const };
 
-  it('accepts fal as a real run video provider when FAL_KEY is present', () => {
+  it('accepts fal as a real run video provider when FAL_KEY is present', async () => {
     vi.stubEnv('FAL_KEY', 'fal-test-key');
     const project = createProjectWithRunningVideoJob('fal');
     const policy = resolveRunPolicy(
@@ -424,10 +442,10 @@ describe('FAL video provider policy', () => {
     );
 
     expect(policy.providers.video).toBe('fal');
-    expect(() => assertRunPolicyPreflight(project, policy)).not.toThrow();
+    await expect(assertRunPolicyPreflight(project, policy)).resolves.toBeDefined();
   });
 
-  it('rejects fal for a real video run without FAL_KEY', () => {
+  it('rejects fal for a real video run without FAL_KEY', async () => {
     vi.stubEnv('FAL_KEY', '');
     const project = createProjectWithRunningVideoJob('openai');
     const policy = resolveRunPolicy(
@@ -435,10 +453,10 @@ describe('FAL video provider policy', () => {
       realServer
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/FAL_KEY/);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/FAL_KEY/);
   });
 
-  it('requires FAL_KEY for an image-to-video scene model (no per-scene model bypass)', () => {
+  it('requires FAL_KEY for an image-to-video scene model (no per-scene model bypass)', async () => {
     vi.stubEnv('FAL_KEY', '');
     const project = createProjectWithRunningVideoJob('fal', 'minimax/h3-max-turbo/image-to-video');
     const policy = resolveRunPolicy(
@@ -446,17 +464,17 @@ describe('FAL video provider policy', () => {
       realServer
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/FAL_KEY/);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/FAL_KEY/);
   });
 
-  it('rejects fal for a video run in mock mode', () => {
+  it('rejects fal for a video run in mock mode', async () => {
     const project = createProjectWithRunningVideoJob('local');
     const policy = resolveRunPolicy(
       { mode: 'mock', providers: { video: 'fal' } },
       { allowRealProviders: true, defaultMode: 'mock' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/mock mode only allows the local video provider/i);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/mock mode only allows the local video provider/i);
   });
 
   it('resolves the fal provider for manual calls only in real mode', () => {
@@ -472,25 +490,25 @@ describe('FAL video provider policy', () => {
     });
   });
 
-  it('matches an active fal poll job against the locked video provider', () => {
+  it('matches an active fal poll job against the locked video provider', async () => {
     vi.stubEnv('FAL_KEY', 'fal-test-key');
     const project = createProjectWithRunningVideoJob('fal');
 
     const matching = resolveRunPolicy({ mode: 'real', providers: { video: 'fal' } }, realServer);
-    expect(() => assertRunPolicyPreflight(project, matching)).not.toThrow();
+    await expect(assertRunPolicyPreflight(project, matching)).resolves.toBeDefined();
 
     const mismatched = resolveRunPolicy({ mode: 'real', providers: { video: 'openai' } }, realServer);
-    expect(() => assertRunPolicyPreflight(project, mismatched)).toThrow(/does not match locked run provider policy/i);
+    await expect(assertRunPolicyPreflight(project, mismatched)).rejects.toThrow(/does not match locked run provider policy/i);
   });
 
-  it('refuses to poll an active fal job from mock mode', () => {
+  it('refuses to poll an active fal job from mock mode', async () => {
     const project = createProjectWithRunningVideoJob('fal');
     const policy = resolveRunPolicy(
       { mode: 'mock', providers: { video: 'local' } },
       { allowRealProviders: true, defaultMode: 'mock' }
     );
 
-    expect(() => assertRunPolicyPreflight(project, policy)).toThrow(/does not match locked run provider policy/i);
+    await expect(assertRunPolicyPreflight(project, policy)).rejects.toThrow(/does not match locked run provider policy/i);
   });
 });
 

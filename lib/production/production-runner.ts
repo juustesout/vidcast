@@ -6,6 +6,10 @@ export interface ProductionRunnerConfig {
   // action type keep working and fall back to one execution at a time.
   limits: Partial<Record<ProductionActionType, number>>;
   maxIterations: number;
+  // Bounded in-action retries for transient poll/render/compose faults.
+  // Paid submits are never retried here; an uncertain submit stays failed.
+  maxTransientRetries: number;
+  transientRetryDelayMs: number;
 }
 
 export type ProductionRunnerResultStatus = 'completed' | 'partial' | 'unresolved' | 'failed';
@@ -33,7 +37,8 @@ export type ProductionRunnerEventCode =
   | 'run_superseded'
   | 'run_completed'
   | 'run_stopped_unresolved'
-  | 'run_failed';
+  | 'run_failed'
+  | 'action_retrying';
 
 export type ProductionRunnerEventStatus = 'info' | 'scheduled' | 'started' | 'completed' | 'failed' | 'skipped' | 'waiting' | 'blocked' | 'running' | 'current' | 'stopped';
 
@@ -123,6 +128,7 @@ export interface RunProductionBatchInput {
   config?: Partial<ProductionRunnerConfig>;
   onProgress?: (progress: ProductionRunnerProgress) => void;
   onEvent?: (event: ProductionRunnerEvent) => void;
+  delay?: (ms: number) => Promise<void>;
 }
 
 const DEFAULT_CONFIG: ProductionRunnerConfig = {
@@ -138,7 +144,9 @@ const DEFAULT_CONFIG: ProductionRunnerConfig = {
     scene_render: 1,
     final_compose: 1
   },
-  maxIterations: 24
+  maxIterations: 24,
+  maxTransientRetries: 3,
+  transientRetryDelayMs: 250
 };
 
 function mergeConfig(config?: Partial<ProductionRunnerConfig>): ProductionRunnerConfig {
@@ -147,8 +155,52 @@ function mergeConfig(config?: Partial<ProductionRunnerConfig>): ProductionRunner
       ...DEFAULT_CONFIG.limits,
       ...(config?.limits ?? {})
     },
-    maxIterations: config?.maxIterations ?? DEFAULT_CONFIG.maxIterations
+    maxIterations: config?.maxIterations ?? DEFAULT_CONFIG.maxIterations,
+    maxTransientRetries: config?.maxTransientRetries ?? DEFAULT_CONFIG.maxTransientRetries,
+    transientRetryDelayMs: config?.transientRetryDelayMs ?? DEFAULT_CONFIG.transientRetryDelayMs
   };
+}
+
+const TRANSIENT_ACTION_ERROR_CODES = new Set([
+  'generation.attempt.statusUnresolved',
+  'presenter.poll.unresolved',
+  'FFMPEG_TIMEOUT',
+  'FFMPEG_FAILED',
+  'OUTPUT_INVALID',
+  'COMPOSITION_FAILED'
+]);
+
+const TERMINAL_ACTION_ERROR_CODES = new Set([
+  'generation.attempt.submitUnresolved',
+  'presenter.scene.submissionUnknown',
+  'presenter.provider.failed',
+  'presenter.budget.exceeded',
+  'mandate.budget.exceeded',
+  'mandate.budget.denied',
+  'mandate.budget.invalid',
+  'mandate.budget.unavailable',
+  'paid.spend.cap.exceeded',
+  'paid.spend.cap.invalid',
+  'paid.spend.cap.unavailable',
+  'FFMPEG_UNAVAILABLE'
+]);
+
+function isTransientActionError(error: ProductionRunnerEventError): boolean {
+  if (error.code && TERMINAL_ACTION_ERROR_CODES.has(error.code)) {
+    return false;
+  }
+  if (error.code && TRANSIENT_ACTION_ERROR_CODES.has(error.code)) {
+    return true;
+  }
+  const httpStatus = error.httpStatus;
+  if (httpStatus === 429 || httpStatus === 502 || httpStatus === 503 || httpStatus === 504) {
+    return true;
+  }
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
 function statusSignature(plan: ProductionPlan): string {
@@ -160,6 +212,10 @@ function statusSignature(plan: ProductionPlan): string {
 // within-batch dedup set.
 function isRepeatablePoll(type: ProductionActionType): boolean {
   return type === 'video_poll' || type === 'presenter_poll';
+}
+
+function isRetryableActionType(type: ProductionActionType): boolean {
+  return type === 'video_poll' || type === 'presenter_poll' || type === 'scene_render' || type === 'final_compose';
 }
 
 function sanitizeDiagnostics(outcome?: Partial<ProductionActionExecutionOutcome>): ProductionRunnerEventError | undefined {
@@ -300,6 +356,7 @@ async function executeBounded(
 
 export async function runProductionBatch(input: RunProductionBatchInput): Promise<ProductionRunnerResult> {
   const config = mergeConfig(input.config);
+  const delay = input.delay ?? sleep;
   const skippedActionIds = new Set(input.skippedActionIds ?? []);
   const completedActionIds = new Set<string>(input.initialCompletedActionIds ?? []);
   // Ids completed by *this* batch execution only. Used to avoid re-running an
@@ -567,7 +624,40 @@ export async function runProductionBatch(input: RunProductionBatchInput): Promis
           });
 
           try {
-            return await input.executeAction(action);
+            const maxRetries = isRetryableActionType(action.type) ? Math.max(0, config.maxTransientRetries) : 0;
+            let lastError: ProductionRunnerEventError | undefined;
+            for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+              try {
+                return await input.executeAction(action);
+              } catch (error) {
+                lastError = normalizeExecutionError(error);
+                const canRetry = attempt < maxRetries && isTransientActionError(lastError);
+                if (!canRetry) {
+                  if (isRepeatablePoll(action.type) && isTransientActionError(lastError)) {
+                    return {
+                      message: lastError.message,
+                      code: lastError.code,
+                      httpStatus: lastError.httpStatus,
+                      providerStatus: lastError.providerStatus,
+                      sceneId: action.sceneId
+                    };
+                  }
+                  throw error;
+                }
+                emit({
+                  iteration,
+                  code: 'action_retrying',
+                  status: 'info',
+                  actionType: action.type,
+                  actionId: action.id,
+                  sceneId: action.sceneId,
+                  message: `${createActionLabel(action)} retrying after transient error (${attempt + 1}/${maxRetries}): ${lastError.message}`,
+                  error: lastError
+                });
+                await delay(config.transientRetryDelayMs * (attempt + 1));
+              }
+            }
+            throw new ProductionRunnerExecutionError(lastError?.message ?? 'Action failed unexpectedly.', lastError);
           } finally {
             runningActionIds.delete(action.id);
           }

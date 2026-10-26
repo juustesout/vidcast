@@ -5,11 +5,13 @@ import { DEFAULT_ELEVENLABS_MUSIC_MODEL } from '@/lib/ai/music/elevenlabs-provid
 import { MusicProviderError } from '@/lib/ai/music/provider';
 import { clampMusicLengthMs, resolveTimelineMusicLengthMs } from '@/lib/render/music-mix';
 import { resolveProjectTimelineDurationSeconds } from '@/lib/render/scene-resolver';
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
 import { resolveManualGenerationProvider, RunPolicyError } from '@/lib/production/run-policy';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { AccessControlError } from '@/lib/security/access-control';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { RequestIdentity } from '@/lib/security/auth';
 import { logProviderError, publicErrorMessage } from '@/lib/security/safe-error';
+import { MandateBudgetError, type MandateBudgetErrorCode } from '@/lib/spend/mandate-spend';
 import { PaidSubmitCapError, assertAndReservePaidSubmit, finalizePaidSubmit } from '@/lib/spend/paid-submit-cap';
 import type { RunMode } from '@/lib/production/run-types';
 import { mediaStore } from '@/lib/storage/media-store';
@@ -48,11 +50,12 @@ export class ProjectMusicGenerationError extends Error {
      | 'music.asset.invalidType'
      | 'music.approval.required'
      | 'music.approval.stale'
-     | 'music.policy.denied'
+      | 'music.policy.denied'
         | 'paid.spend.cap.exceeded'
         | 'paid.spend.cap.invalid'
         | 'paid.spend.cap.unavailable'
-        | 'paid.spend.cap.in_flight';
+        | 'paid.spend.cap.in_flight'
+        | MandateBudgetErrorCode;
 
   constructor(
     message: string,
@@ -72,11 +75,12 @@ export class ProjectMusicGenerationError extends Error {
        | 'music.asset.invalidType'
        | 'music.approval.required'
        | 'music.approval.stale'
-       | 'music.policy.denied'
-        | 'paid.spend.cap.exceeded'
-        | 'paid.spend.cap.invalid'
-        | 'paid.spend.cap.unavailable'
-        | 'paid.spend.cap.in_flight'
+        | 'music.policy.denied'
+         | 'paid.spend.cap.exceeded'
+         | 'paid.spend.cap.invalid'
+         | 'paid.spend.cap.unavailable'
+         | 'paid.spend.cap.in_flight'
+         | MandateBudgetErrorCode
     ) {
     super(message);
     this.name = 'ProjectMusicGenerationError';
@@ -216,8 +220,7 @@ export async function generateProjectMusic(
     const outputFormat = options.outputFormat;
     const resolution = resolveMusicProvider(options.provider, options.mode);
     try {
-      requireHumanApprovalForMode(project, resolution.mode);
-      assertHumanActorForRealMode(resolution.mode, options.identity);
+      await assertRealExecutionAuthorized(project, resolution.mode, options.identity);
     } catch (error) {
       if (error instanceof HumanApprovalError) {
         throw new ProjectMusicGenerationError(error.message, error.status, `music.approval.${error.code === 'HUMAN_APPROVAL_STALE' ? 'stale' : 'required'}`);
@@ -253,22 +256,22 @@ export async function generateProjectMusic(
       }
     })();
 
+    const attemptId = createId('music_attempt');
     let paidSubmit;
     try {
       paidSubmit = await assertAndReservePaidSubmit({
         projectId,
         modality: 'music',
         provider: registered.providerId,
-        mode: resolution.mode
+        mode: resolution.mode,
+        idempotencyKey: attemptId
       });
     } catch (error) {
-      if (error instanceof PaidSubmitCapError) {
+      if (error instanceof PaidSubmitCapError || error instanceof MandateBudgetError) {
         throw new ProjectMusicGenerationError(error.message, error.status, error.code);
       }
       throw error;
     }
-
-    const attemptId = createId('music_attempt');
     const previousAssetId = existingMusic.assetId;
     const previousDuration = existingMusic.duration;
 

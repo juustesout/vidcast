@@ -1,6 +1,7 @@
-import { HumanApprovalError, requireHumanApprovalForMode } from '@/lib/explainer/human-approval';
-import { AccessControlError, assertHumanActorForRealMode } from '@/lib/security/access-control';
+import { HumanApprovalError } from '@/lib/explainer/human-approval';
+import { AccessControlError } from '@/lib/security/access-control';
 import type { RequestIdentity } from '@/lib/security/auth';
+import { assertRealExecutionAuthorized } from '@/lib/security/real-actor';
 import type { Project } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
 import {
@@ -344,14 +345,13 @@ function requireEnvVar(name: string, message: string): void {
   }
 }
 
-export function assertRunPolicyPreflight(
+export async function assertRunPolicyPreflight(
   project: Project,
   policy: RunPolicySnapshot,
   identity?: RequestIdentity
-): RunPolicyPreflightResult {
+): Promise<RunPolicyPreflightResult> {
   try {
-    requireHumanApprovalForMode(project, policy.mode);
-    assertHumanActorForRealMode(policy.mode, identity);
+    await assertRealExecutionAuthorized(project, policy.mode, identity);
   } catch (error) {
     if (error instanceof HumanApprovalError) {
       throw new RunPolicyError(error.message, 'POLICY_DENIED', error.status, { code: error.code });

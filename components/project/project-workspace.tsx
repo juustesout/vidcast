@@ -9,6 +9,7 @@ import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-wo
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { HtmlStillSlotImagePicker } from '@/components/project/html-still-slot-image-picker';
 import { ProductionWorkflow } from '@/components/project/production-workflow';
+import { AgentMandatePanel } from '@/components/project/agent-mandate-panel';
 import { ServerRunPanel } from '@/components/project/server-run-panel';
 import { ScenePreview } from '@/components/preview/scene-preview';
 import { ValidationPanel } from '@/components/project/validation-panel';
@@ -2012,6 +2013,10 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
           <span>Waiting: {batchSummary.waiting}</span>
         </div>
         {batchMessage ? <p className="mt-2 text-xs text-slate-300">{batchMessage}</p> : null}
+
+        <div className="mt-4">
+          <AgentMandatePanel projectId={draft.id} projectTitle={draft.title} />
+        </div>
 
         <div className="mt-4">
           <ServerRunPanel projectId={draft.id} onEnsureSaved={saveProject} />

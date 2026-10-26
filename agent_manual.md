@@ -6,9 +6,8 @@ Local Explainer Video Studio end-to-end through the local MCP server.
 This file is the single maintained source of truth for agent-facing behavior.
 `docs/hermes-mcp-manual.md` is kept only as a pointer to this document.
 
-Last verified: 2026-10-18
-Base commit: `5ef4a87` plus the P40.3 working-tree changes (presenter cost guard
-and scene-end timing fix).
+Last verified: 2026-10-25
+Base commit: `ba08522` plus P210.4 mandate budget enforcement.
 
 ## 1. Compatibility summary
 
@@ -19,6 +18,7 @@ the finished MP4. Presenter generation is part of that production run.
 | Function | Available to Hermes | How |
 | --- | --- | --- |
 | List/read projects, scenes, validation, plan | Yes | Read-only tools |
+| Production mandate status | Yes, read-only | `get_mandate_status`; MCP never mints or revokes |
 | Create/update project, scenes, narration, overlays | Yes | `create_project`, `update_project` |
 | Story beats to scenes | Plan/materialize yes; approve is human-session only | `plan_scene_intents`, `materialize_scene_intents`; `approve_scene_intents` is refused for the service token |
 | Reference images | Yes | `create_reference` (base64 JSON) |
@@ -133,7 +133,7 @@ text.
 
 ## 4. Tool catalog
 
-There are 26 tools: 9 read-only, 14 authoring, 3 production.
+There are 27 tools: 10 read-only, 14 authoring, 3 production.
 
 ### Read-only
 
@@ -146,6 +146,7 @@ There are 26 tools: 9 read-only, 14 authoring, 3 production.
 | `get_production_plan` | `{ projectId }` | `{ projectId, report }` with action statuses and dependencies |
 | `get_project_compositions` | `{ projectId, compositionId? }` | `{ projectId, available, latest, compositions }` |
 | `get_generation_job` | `{ projectId, attemptId }` | Current video attempt state |
+| `get_mandate_status` | `{ projectId }` | `{ projectId, live, mandate }` for the existing user-minted production mandate |
 | `list_animation_templates` | `{}` | `{ templates }` with id, destination, output, allowedParamKeys, paramsSchema, defaults |
 | `search_stock_photos` | `{ projectId, query, orientation?, providers?, limit?, mode? }` | `{ searchId, query, orientation?, cached, results, diagnostics, quota }` |
 
@@ -159,6 +160,13 @@ against the provider and persists the new state, exactly like a run's
 "status_unresolved"` and keeps the job resumable. Retry the same attempt; never
 resubmit a live provider job.
 
+`get_mandate_status` reads `GET /api/projects/{id}/mandates`. It never mints,
+revokes, or forges a mandate. `live` is true when the mandate currently
+authorizes service real/paid work (`active`, or `consumed` with `boundRunId`
+and not expired/revoked/failed). Status is resolved at read time. Missing
+mandate returns `NOT_FOUND`. Mint and revoke remain browser-session
+`POST`/`DELETE` on the same route.
+
 `search_stock_photos` discovers stock candidates through
 `GET /api/projects/{id}/stock/search`. It returns `searchId`, sanitized results
 (provider, photoId, dimensions, preview/image/source URLs, photographer,
@@ -167,8 +175,9 @@ and not downloading: it never writes a scene, never persists a stock asset, and
 never assigns `templateData.imageAssetId`. HTML slots accept local project
 asset ids from `import_asset`, not stock CDN URLs. Mock mode is locked to the
 `fake` provider. Real mode requires a current human approval of the project
-snapshot (`explainer.humanApproval`). The call may consume provider quota and
-refresh the server-side candidate cache.
+snapshot (`explainer.humanApproval`) for a browser session, or a live
+production mandate for the service token. The call may consume provider quota
+and refresh the server-side candidate cache.
 
 ### Authoring
 
@@ -265,7 +274,7 @@ stay unchanged. Timed playback uses `startSeconds` / `durationSeconds`.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `run_production` | `{ projectId, mode?, providers?, music?, force?, maxIterations?, limits? }` | `{ run, reused }` |
-| `get_run_status` | `{ runId }` | `{ run }` |
+| `get_run_status` | `{ runId }` | `{ run }` including `run.report` on terminal runs |
 | `get_run_log` | `{ runId, cursor?, limit? (<=2000) }` | `{ log }` |
 
 Provider values:
@@ -669,14 +678,30 @@ Check `reused`.
 
 Poll `get_run_status` until `run.status` is terminal: `completed`, `partial`,
 `failed`, or `unresolved`. Use `get_run_log` for per-action detail; paginate with
-`log.nextCursor` and `log.hasMore`.
+`log.nextCursor` and `log.hasMore`. Terminal snapshots include `run.report`: QC
+status (`passed` / `failed` / `partial`), MP4 download path and probe
+(codec, resolution, fps, duration, audio), scene counts, recovery attempts,
+warnings, failure causes, and mandate/budget status when available. A successful
+compose job is not enough; treat `run.report.qcStatus` as the output quality
+result. QC never starts a new paid submit. If `report.recovery.resumeSafe` is
+true, resume the same run instead of submitting again.
 
 Notes:
 
-- `mode: "real"` requires a current human approval of the project snapshot
-  (`explainer.humanApproval`) plus `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true` on
-  the app server. That includes real stock search. A service token cannot grant that approval. `update_project` cannot forge intent `status: "approved"` or
-  the human-approval record.
+- `mode: "real"` requires `PRODUCTION_RUN_ALLOW_REAL_PROVIDERS=true` on
+  the app server. A browser session also needs a current human approval of the
+  project snapshot (`explainer.humanApproval`). That includes real stock search.
+  A service token cannot grant that approval. `update_project` cannot forge intent `status: "approved"` or
+  the human-approval record. For MCP, check `get_mandate_status` first: a
+  previously user-minted live production mandate for that exact project is the
+  service-token substitute. The first accepted real `run_production` binds
+  `boundRunId`; reuse rechecks the mandate. Revoked, expired, or failed
+   mandates block new paid work. MCP never mints, revokes, or forges a mandate.
+   When a live mandate has `budgets`, those submit counts are enforced
+   server-side before every paid image, video, narration, music, or presenter
+   submit, together with the host spend cap. `maxCostUsd` is enforced only for HeyGen presenter estimates; OpenAI, FAL, and ElevenLabs costs are recorded
+   after the fact when known and never invented. Failed and unresolved submits
+   still count. Stock search is not a billed submit on this ledger.
 - Mock FFmpeg compose and `mode: "mock"` production may still be started by the
   service token without human approval.
 - Credentials are required only for modalities the run actually executes.
@@ -720,7 +745,7 @@ GET downloadPath
 ```text
 get_project                     // verify scenes, narration, presenter
 update_project                  // complete presenter object with maxCostUsd
-approve_scene_intents           // human browser session; required before real/paid execution
+approve_scene_intents           // human browser session only; service uses a live mandate instead
 get_production_plan             // confirm presenter actions are ready, not blocked
 run_production {
   mode: "real",
@@ -768,6 +793,35 @@ curl -H "Authorization: Bearer $EXPLAINER_API_TOKEN" \
   "http://localhost:3000/api/projects/PROJECT_ID/compositions/COMPOSITION_ID/file"
 ```
 
+### F. Autonomous one-project videoproductie under a user mandate
+
+The user mints a production mandate in the project workspace with
+**Let the agent finish this video** (`POST /api/projects/{id}/mandates`).
+Hermes does not mint, revoke, or wait for per-step `approve_scene_intents` /
+snapshot approval.
+
+```text
+get_mandate_status              // stop if NOT_FOUND or live=false
+create_project / get_project
+update_project                  // complete scenes, narration, visuals; skip intent approve
+import_asset / create_reference / import_studio_assets as needed
+search_stock_photos { mode: "real" }   // only with a live mandate
+select_stock_photo
+manage_project_music { mode: "real" }  // optional
+get_validation_report
+run_production { mode: "real", ... }   // binds boundRunId on first accept
+get_run_status                  // poll to terminal; reuse is allowed while live
+get_mandate_status              // if live=false, stop new paid work
+get_project_compositions
+GET downloadPath
+```
+
+If `get_mandate_status` returns `NOT_FOUND`, revoked, expired, or failed: stop
+and tell the user to mint or refresh the mandate in the UI. Do not invent
+`create_mandate` or `revoke_mandate` tools. Mock mode still needs no mandate.
+A `mandate.budget.exceeded` error means the user-set submit or known USD limit
+is spent; do not retry that paid submit.
+
 ## 9. REST-only operations
 
 These have no MCP tool:
@@ -779,6 +833,9 @@ These have no MCP tool:
   `import_studio_assets` / `POST /api/projects/{id}/studio-assets`.
 - Claiming an ownerless project with the single-use token:
   `POST /api/projects/{id}/claim`.
+- Minting or revoking a production mandate:
+  `POST` / `DELETE /api/projects/{id}/mandates` (browser user session only).
+  Status reads use `get_mandate_status`.
 - Downloading a composition file:
   `GET /api/projects/{id}/compositions/{compositionId}/file`.
 - Direct single-scene render and project compose:

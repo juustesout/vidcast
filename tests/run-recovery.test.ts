@@ -9,7 +9,9 @@ import { runProductionBatch, type ProductionRunnerResult } from '@/lib/productio
 import { reconcileInterruptedGenerations } from '@/lib/production/run-recovery';
 import { HeadlessProductionRunService, type RunServiceConfig } from '@/lib/production/run-service';
 import { FileRunStore, type PersistedRun } from '@/lib/production/run-store';
+import { createProjectMandate, writeProjectMandate, readProjectMandate } from '@/lib/storage/mandate-store';
 import type { GenerationRecord, GenerationStatus } from '@/lib/types/generation';
+import type { PresenterClipSpec } from '@/lib/types/presenter';
 import type { Project } from '@/lib/types/render';
 import type { NarrationSpec, Scene } from '@/lib/types/scene';
 
@@ -401,6 +403,68 @@ describe('reconcileInterruptedGenerations', () => {
 
     expect(result.updatedProject?.music).toMatchObject({ status: 'generated' });
   });
+
+  it('leaves a presenter clip with a provider job id for polling', () => {
+    const clip: PresenterClipSpec = {
+      sceneId: 'scene-1',
+      status: 'generating',
+      provider: 'heygen',
+      outputFormat: 'mp4',
+      audioAssetId: 'audio-1',
+      narrationSignature: 'sig',
+      duration: 2,
+      lastAttemptId: 'presenter-attempt-1',
+      attempts: [{
+        id: 'presenter-attempt-1',
+        status: 'generating',
+        provider: 'heygen',
+        providerJobId: 'job-1',
+        outputFormat: 'mp4',
+        audioAssetId: 'audio-1',
+        narrationSignature: 'sig',
+        duration: 2,
+        createdAt: '2026-01-01T00:00:00.000Z'
+      }]
+    };
+    const base = project('p', [imageScene(1, 'generated')]);
+    base.presenterClips = [clip];
+
+    const result = reconcileInterruptedGenerations(base, 'real');
+
+    expect(result.updatedProject).toBeNull();
+    expect(result.suppressedActionIds).toEqual([]);
+    expect(result.notes.some((note) => note.actionType === 'presenter_poll')).toBe(true);
+  });
+
+  it('fails an unconfirmed presenter submit without a job id and suppresses it in real mode', () => {
+    const clip: PresenterClipSpec = {
+      sceneId: 'scene-1',
+      status: 'submitting',
+      provider: 'heygen',
+      outputFormat: 'mp4',
+      audioAssetId: 'audio-1',
+      narrationSignature: 'sig',
+      duration: 2,
+      lastAttemptId: 'presenter-attempt-1',
+      attempts: [{
+        id: 'presenter-attempt-1',
+        status: 'submitting',
+        provider: 'heygen',
+        outputFormat: 'mp4',
+        audioAssetId: 'audio-1',
+        narrationSignature: 'sig',
+        duration: 2,
+        createdAt: '2026-01-01T00:00:00.000Z'
+      }]
+    };
+    const base = project('p', [imageScene(1, 'generated')]);
+    base.presenterClips = [clip];
+
+    const result = reconcileInterruptedGenerations(base, 'real');
+
+    expect(result.updatedProject?.presenterClips?.[0]).toMatchObject({ status: 'failed' });
+    expect(result.suppressedActionIds).toEqual(['scene:scene-1:presenter_submit']);
+  });
 });
 
 describe('planner resume behavior', () => {
@@ -419,6 +483,46 @@ describe('planner resume behavior', () => {
 
     expect(submit).toMatchObject({ status: 'running', execute: false });
     expect(poll).toMatchObject({ execute: true, payload: { attemptId: 'gen-v' } });
+  });
+
+  it('resumes a stored presenter job by polling and does not resubmit', () => {
+    const scene = imageScene(1, 'generated');
+    scene.narration = { text: 'hello', status: 'generated', audioAssetId: 'audio-1' };
+    const base = project('p', [scene], [{ id: 'audio-1', status: 'available' }] as unknown as Project['assets']);
+    base.presenter = {
+      enabled: true,
+      provider: 'mock',
+      outputFormat: 'mp4',
+      sceneSettings: [{ sceneId: 'scene-1', layout: 'fullscreen' }]
+    };
+    base.presenterClips = [{
+      sceneId: 'scene-1',
+      status: 'generating',
+      provider: 'mock',
+      outputFormat: 'mp4',
+      audioAssetId: 'audio-1',
+      narrationSignature: 'hello',
+      duration: 3,
+      lastAttemptId: 'presenter-attempt-1',
+      attempts: [{
+        id: 'presenter-attempt-1',
+        status: 'generating',
+        provider: 'mock',
+        providerJobId: 'job-1',
+        outputFormat: 'mp4',
+        audioAssetId: 'audio-1',
+        narrationSignature: 'hello',
+        duration: 3,
+        createdAt: '2026-01-01T00:00:00.000Z'
+      }]
+    }];
+
+    const plan = deriveProductionPlan(base, { mode: 'mock' });
+    const submit = plan.actions.find((action) => action.type === 'presenter_submit');
+    const poll = plan.actions.find((action) => action.type === 'presenter_poll');
+
+    expect(submit).toMatchObject({ status: 'current', execute: false });
+    expect(poll).toMatchObject({ execute: true, payload: { attemptId: 'presenter-attempt-1' } });
   });
 });
 
@@ -659,6 +763,41 @@ describe('headless run execution lock (cross-process dedupe)', () => {
   });
 });
 
+describe('mandate and budget recovery', () => {
+  it('records a diagnostic and resumes without new paid submits when the mandate expired', async () => {
+    const originalCwd = process.cwd();
+    const root = await tempRoot();
+    process.chdir(root);
+    try {
+      const runStore = new FileRunStore({ projectsRoot: root });
+      const persisted = createPersistedRun({ runId: 'run-expired' });
+      persisted.acceptedConfig.policy.mode = 'real';
+      persisted.acceptedConfig.policy.allowRealProviders = true;
+      await runStore.save(persisted);
+
+      await createProjectMandate({ projectId: 'project-r', issuedBy: 'user_test', ttlMs: 60_000 });
+      const bound = await readProjectMandate('project-r');
+      await writeProjectMandate({
+        ...bound!,
+        expiresAt: new Date(Date.now() - 1_000).toISOString()
+      });
+
+      const store = mutableStore(project('project-r', [imageScene(1, 'generated')]));
+      const batches: Array<{ initialFailedActionIds: string[] }> = [];
+      const service = new HeadlessProductionRunService(SERVICE_CONFIG, { store, runBatch: makeRunBatch(batches) }, { runStore });
+
+      await service.recoverRuns();
+      await waitForStatus(service, 'run-expired', ['completed']);
+
+      const log = service.getRunLog('run-expired');
+      expect(log.items.some((item) => item.event.message.includes('mandate is no longer valid'))).toBe(true);
+      expect(batches).toHaveLength(1);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+});
+
 describe('run status read-through across service instances', () => {
   it('reads a persisted run and its log without requiring local discovery', async () => {
     const root = await tempRoot();
@@ -691,6 +830,10 @@ describe('run status read-through across service instances', () => {
     const run = await observer.getRunForRead('run-complete');
     expect(run.status).toBe('completed');
     expect(run.summary.completed).toBe(1);
+    expect(run.report).toBeDefined();
+    expect(run.report?.runStatus).toBe('completed');
+    expect(run.report?.qcStatus).toBeDefined();
+    expect(run.report?.recovery.paidSubmitRequired).toBe(false);
 
     const log = await observer.getRunLogForRead('run-complete', { limit: 10 });
     expect(log.items.map((item) => item.event.code)).toEqual(['run_completed']);

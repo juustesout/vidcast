@@ -84,6 +84,12 @@ describe('agent manual', () => {
     expect(manual).toMatch(/cannot forge intent `status: "approved"`/);
     expect(manual).toMatch(/human browser session only; MCP\/service token is FORBIDDEN/);
     expect(manual).toMatch(/That includes real stock search/);
+    expect(manual).toContain('get_mandate_status');
+    expect(manual).toMatch(/live production mandate/);
+    expect(manual).toMatch(/never mints, revokes, or forges a mandate/);
+    expect(manual).toContain('Let the agent finish this video');
+    expect(manual).toContain('mandate.budget.exceeded');
+    expect(manual).toMatch(/maxCostUsd[\s\S]*enforced only for HeyGen presenter estimates/);
   });
 
   it('documents P153 proposal clarifications', () => {

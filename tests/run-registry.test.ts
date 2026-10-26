@@ -123,4 +123,40 @@ describe('in-memory run registry', () => {
     expect(message).toContain('Authorization: Key [redacted]');
     expect(message).not.toContain('fal-secret-key-123456');
   });
+
+  it('applies a QC report atomically with terminal status', () => {
+    const registry = new InMemoryRunRegistry({
+      maxEventsPerRun: 100,
+      retentionMs: 60_000,
+      maxLogPageLimit: 100
+    });
+
+    registry.createRun({ runId: 'run-qc', projectId: 'project-1', acceptedConfig });
+    registry.updateRunStatus('run-qc', 'completed', {
+      finishedAt: new Date().toISOString(),
+      report: {
+        projectId: 'project-1',
+        runId: 'run-qc',
+        generatedAt: '2026-10-21T00:00:00.000Z',
+        runStatus: 'completed',
+        qcStatus: 'failed',
+        output: null,
+        scenes: { total: 1, passed: 0, failed: 1, skipped: 0 },
+        recoveryAttempts: 0,
+        warnings: [],
+        failures: [{ code: 'qc.composition.missing', message: 'No composition.' }],
+        mandate: null,
+        recovery: {
+          paidSubmitRequired: false,
+          resumeSafe: true,
+          notes: ['Resume the existing run.']
+        }
+      }
+    });
+
+    const snapshot = registry.getRun('run-qc');
+    expect(snapshot?.status).toBe('completed');
+    expect(snapshot?.report?.qcStatus).toBe('failed');
+    expect(snapshot?.report?.runStatus).toBe('completed');
+  });
 });

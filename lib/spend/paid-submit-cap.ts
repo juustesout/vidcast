@@ -5,6 +5,12 @@ import { getPaidSpendStatePath } from '@/lib/storage/storage-paths';
 import type { RunMode } from '@/lib/production/run-types';
 import { createId } from '@/lib/utils/ids';
 import { withKeyedLock } from '@/lib/utils/keyed-mutex';
+import {
+  MandateBudgetError,
+  assertAndReserveMandateSpend,
+  finalizeMandateSpend,
+  rollbackMandateSpend
+} from './mandate-spend';
 
 export const PAID_SUBMIT_MODALITIES = ['image', 'video', 'narration', 'music', 'presenter'] as const;
 
@@ -34,11 +40,14 @@ export interface PaidSubmitReserveInput {
   modality: string;
   provider?: string;
   mode: RunMode;
+  idempotencyKey?: string;
+  estimatedUsd?: number;
 }
 
 export interface PaidSubmitReservation {
   id: string;
   counted: true;
+  projectId: string;
 }
 
 export type PaidSubmitReservationStatus = 'reserved' | 'completed' | 'failed';
@@ -631,11 +640,35 @@ export async function assertAndReservePaidSubmit(
     );
   }
   const maxProviderSubmits = providerToken ? config.maxByProvider[providerToken] : undefined;
+  const reservationId = createId('paid_submit');
+  const idempotencyKey = input.idempotencyKey?.trim() || reservationId;
+
+  let mandateReserved: { id: string; reused: boolean } | undefined;
+  try {
+    mandateReserved = await assertAndReserveMandateSpend({
+      projectId: input.projectId,
+      sceneId: input.sceneId,
+      modality: input.modality,
+      provider,
+      idempotencyKey,
+      estimatedUsd: input.estimatedUsd,
+      reservationId
+    });
+  } catch (error) {
+    if (error instanceof MandateBudgetError) {
+      throw error;
+    }
+    throw error;
+  }
+
+  if (mandateReserved?.reused) {
+    return { id: mandateReserved.id, counted: true, projectId: input.projectId };
+  }
 
   try {
     const reserved = await resolveLedger().reserve({
       entry: {
-        id: createId('paid_submit'),
+        id: reservationId,
         modality: input.modality,
         provider,
         projectId: input.projectId,
@@ -647,8 +680,11 @@ export async function assertAndReservePaidSubmit(
       maxModalitySubmits: config.maxByModality[input.modality],
       maxProviderSubmits
     });
-    return { id: reserved.id, counted: true };
+    return { id: reserved.id, counted: true, projectId: input.projectId };
   } catch (error) {
+    if (mandateReserved) {
+      await rollbackMandateSpend(input.projectId, reservationId);
+    }
     if (error instanceof PaidSubmitCapError) {
       throw error;
     }
@@ -668,9 +704,13 @@ export async function finalizePaidSubmit(
   for (let attempt = 0; attempt < FINALIZE_ATTEMPTS; attempt += 1) {
     try {
       await resolveLedger().finalize(reservation.id, status, settlement);
+      await finalizeMandateSpend(reservation.projectId, reservation.id, status, settlement);
       return;
     } catch (error) {
       if (error instanceof PaidSubmitCapError && error.code === 'paid.spend.cap.invalid') {
+        throw error;
+      }
+      if (error instanceof MandateBudgetError && error.code === 'mandate.budget.invalid') {
         throw error;
       }
     }

@@ -4,10 +4,33 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import type { ProductionQcReport } from '@/lib/production/production-qc';
 import { HeadlessProductionRunService } from '@/lib/production/run-service';
 import { runFfmpeg } from '@/lib/render/ffmpeg-executor';
 import { getFfmpegLimiterStats as getFfmpegStats, resetFfmpegLimiterForTests } from '@/lib/render/ffmpeg-limiter';
+import type { HeadlessRunSnapshot } from '@/lib/production/run-types';
 import type { Project } from '@/lib/types/render';
+
+function fakeQcReport(run: Pick<HeadlessRunSnapshot, 'runId' | 'projectId' | 'status'>): ProductionQcReport {
+  return {
+    projectId: run.projectId,
+    runId: run.runId,
+    generatedAt: '2026-10-21T00:00:00.000Z',
+    runStatus: run.status,
+    qcStatus: 'failed',
+    output: null,
+    scenes: { total: 1, passed: 0, failed: 1, skipped: 0 },
+    recoveryAttempts: 0,
+    warnings: [],
+    failures: [{ code: 'qc.composition.missing', message: 'No composition.' }],
+    mandate: null,
+    recovery: {
+      paidSubmitRequired: false,
+      resumeSafe: true,
+      notes: ['Resume the existing run to retry local render/compose. Do not submit new paid work.']
+    }
+  };
+}
 
 function createProject(id: string): Project {
   const now = new Date().toISOString();
@@ -883,5 +906,76 @@ setTimeout(() => {
     const service = new HeadlessProductionRunService();
 
     expect(() => service.getRun('missing-run')).toThrow(/lost after a process restart/i);
+  });
+
+  it('attaches a QC report before the run becomes terminal', async () => {
+    const project = createProject('project-qc-attach');
+    const qcStatuses: string[] = [];
+    let qcCalls = 0;
+
+    const service = new HeadlessProductionRunService(
+      {
+        maxConcurrentRuns: 1,
+        runner: {
+          maxIterations: 5,
+          maxActionExecutions: 5,
+          maxVideoPolls: 5,
+          limits: {
+            image_generate: 1,
+            stock_select: 1,
+            video_submit: 1,
+            video_poll: 1,
+            narration_generate: 1,
+            scene_render: 1,
+            final_compose: 1
+          }
+        },
+        registry: {
+          maxEventsPerRun: 100,
+          retentionMs: 60_000,
+          maxLogPageLimit: 100
+        },
+        policy: {
+          allowRealProviders: true,
+          defaultMode: 'mock'
+        }
+      },
+      {
+        store: {
+          async getProject(projectId: string) {
+            return projectId === project.id ? project : null;
+          }
+        },
+        runBatch: async (input) => ({
+          status: 'completed',
+          project: input.initialProject,
+          iterations: 1,
+          completedActionIds: ['project:final_compose'],
+          failedActionIds: [],
+          unresolvedActions: [],
+          events: []
+        }),
+        evaluateQc: async (input) => {
+          qcCalls += 1;
+          qcStatuses.push(input.run.status);
+          return fakeQcReport(input.run);
+        }
+      }
+    );
+
+    const started = await service.startOrReuseRun({ projectId: project.id });
+    await waitForStatus(service, started.run.runId, ['completed']);
+
+    const snapshot = service.getRun(started.run.runId);
+    expect(snapshot.status).toBe('completed');
+    expect(snapshot.report).toBeDefined();
+    expect(snapshot.report?.qcStatus).toBe('failed');
+    expect(snapshot.report?.runStatus).toBe('completed');
+    expect(snapshot.report?.recovery.paidSubmitRequired).toBe(false);
+    expect(qcCalls).toBe(1);
+    expect(qcStatuses).toEqual(['completed']);
+
+    await service.getRunForRead(started.run.runId);
+    expect(qcCalls).toBe(1);
   });
 });

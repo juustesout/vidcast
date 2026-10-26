@@ -6,6 +6,7 @@ import { buildSilentWav } from '@/lib/ai/audio/silent-wav';
 import { TextToSpeechProviderError } from '@/lib/ai/text-to-speech/provider';
 import { stampHumanApproval } from '@/lib/explainer/human-approval';
 import { generateSceneNarration, SceneNarrationGenerationError } from '@/lib/generation/narration-service';
+import { InMemoryMandateSpendLedger, setMandateSpendLedgerForTests, setMandateSpendReaderForTests } from '@/lib/spend/mandate-spend';
 import { InMemoryPaidSubmitLedger, setPaidSubmitLedgerForTests } from '@/lib/spend/paid-submit-cap';
 import type { MediaStore } from '@/lib/storage/media-store';
 import type { ProjectStore } from '@/lib/storage/project-store';
@@ -231,6 +232,8 @@ function withHumanApproval(project: Project): Project {
 afterEach(() => {
   vi.unstubAllEnvs();
   setPaidSubmitLedgerForTests(undefined);
+  setMandateSpendLedgerForTests(undefined);
+  setMandateSpendReaderForTests(undefined);
 });
 
 function enablePaidSpendCap(overrides: Record<string, string> = {}): void {
@@ -397,6 +400,35 @@ describe('narration generation service', () => {
     ).rejects.toMatchObject({
       status: 403,
       code: 'paid.spend.cap.exceeded'
+    });
+    expect(deps.synthesizeCalls()).toBe(0);
+  });
+
+  it('blocks a real narration submit when the mandate narration budget is exhausted', async () => {
+    vi.stubEnv('PRODUCTION_RUN_ALLOW_REAL_PROVIDERS', 'true');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-key');
+    enablePaidSpendCap({ PAID_SPEND_CAP_MAX_SUBMITS: '5', PAID_SPEND_CAP_MAX_NARRATION_SUBMITS: '5' });
+    setPaidSubmitLedgerForTests(new InMemoryPaidSubmitLedger());
+    setMandateSpendLedgerForTests(new InMemoryMandateSpendLedger());
+    setMandateSpendReaderForTests(async () => ({
+      mandateId: 'mandate_1',
+      projectId: 'project-1',
+      issuedBy: 'user_test',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: 'active',
+      brief: '',
+      allowedActions: ['generate_narration'],
+      budgets: { maxNarrationSubmits: 0 }
+    }));
+    const project = withHumanApproval(createProject());
+    const deps = createInMemoryDependencies(project);
+
+    await expect(
+      generateSceneNarration(project.id, 'scene-1', { regenerate: true, mode: 'real', provider: 'elevenlabs' }, narrationServiceDeps(deps))
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'mandate.budget.exceeded'
     });
     expect(deps.synthesizeCalls()).toBe(0);
   });

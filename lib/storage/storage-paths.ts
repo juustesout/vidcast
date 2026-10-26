@@ -20,6 +20,14 @@ export function getProjectClaimPath(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'claim.json');
 }
 
+export function getProjectMandatePath(projectId: string): string {
+  return path.join(getProjectRoot(projectId), 'mandate.json');
+}
+
+export function getProjectMandateSpendPath(projectId: string): string {
+  return path.join(getProjectRoot(projectId), 'mandate-spend.json');
+}
+
 export function getProjectAssetsRoot(projectId: string): string {
   return path.join(getProjectRoot(projectId), 'assets');
 }

@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { setMandateSpendLedgerForTests, setMandateSpendReaderForTests } from '@/lib/spend/mandate-spend';
 import {
   FilePaidSubmitLedger,
   InMemoryPaidSubmitLedger,
@@ -50,6 +51,8 @@ async function exitedChildPid(): Promise<number> {
 afterEach(() => {
   vi.unstubAllEnvs();
   setPaidSubmitLedgerForTests(undefined);
+  setMandateSpendLedgerForTests(undefined);
+  setMandateSpendReaderForTests(undefined);
 });
 
 describe('resolvePaidSubmitCapConfig', () => {

@@ -129,6 +129,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
       }
     }),
     getGenerationJob: async () => ({}) as never,
+    getMandateStatus: async () => ({}) as never,
     listAnimationTemplates: async () => [],
     searchStockPhotos: async () => ({
       searchId: 'stocksearch_1',
@@ -145,7 +146,7 @@ function makeApiClient(overrides: Partial<AppApiClient> = {}): AppApiClient {
 describe('read-only MCP tool definitions', () => {
   it('registers read-only tools with expected names', () => {
     const names = READ_ONLY_TOOL_DEFINITIONS.map((entry) => entry.name);
-    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions', 'get_generation_job', 'list_animation_templates', 'search_stock_photos']);
+    expect(names).toEqual(['list_projects', 'get_project', 'get_scene', 'get_validation_report', 'get_production_plan', 'get_project_compositions', 'get_generation_job', 'get_mandate_status', 'list_animation_templates', 'search_stock_photos']);
     // get_generation_job mutates state (provider poll + persist). search_stock_photos
     // may consume quota and refresh the candidate cache, so it is also not a pure read.
     const mutating = READ_ONLY_TOOL_DEFINITIONS.filter((entry) => entry.annotations.readOnlyHint !== true).map((entry) => entry.name);
@@ -668,6 +669,81 @@ describe('get_generation_job tool', () => {
     const service = createReadOnlyToolService(client);
 
     const result = await service.getGenerationJob({ projectId: 'project-1' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_ARGUMENT');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('get_mandate_status tool', () => {
+  it('is registered as a read-only tool and refuses mint or revoke', () => {
+    const entry = READ_ONLY_TOOL_DEFINITIONS.find((definition) => definition.name === 'get_mandate_status');
+    expect(entry).toBeDefined();
+    expect(entry?.annotations.readOnlyHint).toBe(true);
+    expect(entry?.description).toMatch(/never mints, revokes, or forges/i);
+    expect(entry?.description).toMatch(/GET \/api\/projects\/\{id\}\/mandates/);
+    expect(READ_ONLY_TOOL_DEFINITIONS.some((definition) => /mint|revoke/.test(definition.name))).toBe(false);
+  });
+
+  it('returns live mandate status from GET /api/projects/{id}/mandates', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          live: true,
+          mandate: {
+            mandateId: 'mandate_1',
+            projectId: 'project-1',
+            issuedBy: 'user-a',
+            issuedAt: '2026-10-25T00:00:00.000Z',
+            expiresAt: '2026-10-26T00:00:00.000Z',
+            status: 'active',
+            brief: 'Author and produce',
+            allowedActions: ['run_production']
+          }
+        }),
+        { status: 200 }
+      )
+    );
+    const client = new HttpAppApiClient({ baseUrl: 'http://127.0.0.1:5555', fetchFn: fetchMock as unknown as typeof fetch });
+    process.env.EXPLAINER_API_TOKEN = 'service-token-123';
+
+    const result = await createReadOnlyToolService(client).getMandateStatus({ projectId: 'project-1' });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe('http://127.0.0.1:5555/api/projects/project-1/mandates');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.live).toBe(true);
+      expect(result.data.projectId).toBe('project-1');
+      expect(result.data.mandate.mandateId).toBe('mandate_1');
+      expect(result.data.mandate.status).toBe('active');
+    }
+
+    delete process.env.EXPLAINER_API_TOKEN;
+  });
+
+  it('maps a missing mandate to NOT_FOUND', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ message: 'No production mandate exists for this project.', code: 'MANDATE_NOT_FOUND' }), { status: 404 })
+    );
+    const client = new HttpAppApiClient({ baseUrl: 'http://127.0.0.1:5555', fetchFn: fetchMock as unknown as typeof fetch });
+    const result = await createReadOnlyToolService(client).getMandateStatus({ projectId: 'project-1' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('NOT_FOUND');
+    }
+  });
+
+  it('rejects a missing projectId without calling the API', async () => {
+    const client = makeApiClient();
+    const spy = vi.spyOn(client, 'getMandateStatus');
+    const service = createReadOnlyToolService(client);
+
+    const result = await service.getMandateStatus({});
 
     expect(result.ok).toBe(false);
     if (!result.ok) {

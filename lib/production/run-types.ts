@@ -1,4 +1,5 @@
 import type { ProductionActionType, ProductionPlannedAction } from './production-planner';
+import type { ProductionQcReport } from './production-qc';
 import type { ProductionRunnerEvent, ProductionRunnerResultStatus } from './production-runner';
 
 export type RunMode = 'mock' | 'real';
@@ -97,6 +98,9 @@ export interface HeadlessRunSnapshot {
   failedActionIds: string[];
   unresolvedActions: ProductionPlannedAction[];
   acceptedConfig: HeadlessRunAcceptedConfig;
+  // Present on terminal runs after post-compose QC. Absent on queued/running
+  // snapshots and on runs persisted before this field existed.
+  report?: ProductionQcReport;
 }
 
 export interface HeadlessRunLogItem {

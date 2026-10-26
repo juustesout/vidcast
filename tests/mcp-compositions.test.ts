@@ -62,6 +62,7 @@ function makeApiClient(getProject: AppApiClient['getProject']): AppApiClient {
     getValidationReport: async () => ({}) as never,
     getProductionPlan: async () => ({}) as never,
     getGenerationJob: async () => ({}) as never,
+    getMandateStatus: async () => ({}) as never,
     listAnimationTemplates: async () => [],
     searchStockPhotos: async () => ({
       searchId: 'stocksearch_1',
@@ -218,11 +219,14 @@ describe('single MCP server registers all tool groups', () => {
       'get_production_plan',
       'get_project_compositions',
       'get_generation_job',
+      'get_mandate_status',
       'list_animation_templates',
       'search_stock_photos'
     ]);
     expect(authoring.names).toEqual(AUTHORING_TOOL_DEFINITIONS.map((definition) => definition.name));
     expect(production.names).toEqual(PRODUCTION_TOOL_DEFINITIONS.map((definition) => definition.name));
     expect(new Set(allNames).size).toBe(allNames.length);
+    expect(allNames).toContain('get_mandate_status');
+    expect(allNames.some((name) => name.includes('create_mandate') || name.includes('revoke_mandate'))).toBe(false);
   });
 });

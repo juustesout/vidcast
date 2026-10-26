@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import type { ProductionQcReport, ProductionQcStatus } from '@/lib/production/production-qc';
 import type { HeadlessRunLogItem, HeadlessRunSnapshot, HeadlessRunStatus } from '@/lib/production/run-types';
 import { ProductionRunTracker, startServerRunFlow } from '@/lib/client/production-run-tracker';
 import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll';
@@ -19,6 +20,32 @@ function formatRunEventTime(iso: string): string {
 function formatProviderPolicy(run: HeadlessRunSnapshot): string {
   const { policy } = run.acceptedConfig;
   return `${policy.mode} | image:${policy.providers.image} | video:${policy.providers.video} | narration:${policy.providers.narration}`;
+}
+
+function formatQcStatus(status: ProductionQcStatus): string {
+  switch (status) {
+    case 'passed':
+      return 'Passed';
+    case 'partial':
+      return 'Partial';
+    case 'failed':
+      return 'Failed';
+    default:
+      return status;
+  }
+}
+
+function qcTone(status: ProductionQcStatus): string {
+  switch (status) {
+    case 'passed':
+      return 'text-emerald-200';
+    case 'partial':
+      return 'text-amber-100';
+    case 'failed':
+      return 'text-rose-200';
+    default:
+      return 'text-slate-200';
+  }
 }
 
 function formatServerRunStatus(status: HeadlessRunStatus): string {
@@ -72,6 +99,53 @@ function statusTone(status: HeadlessRunStatus | 'idle'): string {
     default:
       return 'text-slate-200';
   }
+}
+
+function ServerRunQcCard({ report }: { report: ProductionQcReport }) {
+  const output = report.output;
+
+  return (
+    <div className="mt-3 rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 text-xs text-slate-300">
+      <p className="uppercase tracking-[0.2em] text-slate-500">Production QC</p>
+      <p className={`mt-2 ${qcTone(report.qcStatus)}`}>QC: {formatQcStatus(report.qcStatus)}</p>
+      {output ? (
+        <div className="mt-2 grid gap-1">
+          <p className="break-all">Download: {output.downloadPath}</p>
+          <p>
+            {output.codec ?? 'unknown'} {output.width ?? 0}x{output.height ?? 0} {output.fps ?? 0}fps {output.duration ?? 0}s
+            {output.hasAudio ? ` audio:${output.audioCodec ?? 'yes'}` : ' audio:none'}
+          </p>
+        </div>
+      ) : (
+        <p className="mt-2">No MP4 output.</p>
+      )}
+      <p className="mt-2">
+        Scenes passed {report.scenes.passed} / failed {report.scenes.failed} / skipped {report.scenes.skipped} of {report.scenes.total}
+      </p>
+      <p className="mt-1">Recovery attempts: {report.recoveryAttempts}</p>
+      {report.mandate ? (
+        <p className="mt-1">
+          Mandate: {report.mandate.available ? `${report.mandate.status ?? 'unknown'}${report.mandate.live ? ' live' : ''}` : 'unavailable'}
+          {typeof report.mandate.spentUsd === 'number' ? ` spent $${report.mandate.spentUsd}` : ''}
+        </p>
+      ) : null}
+      {report.warnings.map((warning) => (
+        <p key={warning} className="mt-1 text-amber-100">
+          Warning: {warning}
+        </p>
+      ))}
+      {report.failures.map((failure) => (
+        <p key={`${failure.code}:${failure.sceneId ?? ''}:${failure.message}`} className="mt-1 text-rose-100">
+          {failure.code}: {failure.message}
+        </p>
+      ))}
+      {report.recovery.notes.map((note) => (
+        <p key={note} className="mt-1 text-slate-400">
+          {note}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 function ServerRunErrorCard({ error }: { error: ProductionRunApiError | null }) {
@@ -333,6 +407,8 @@ export function ServerRunPanel({ projectId, onEnsureSaved }: ServerRunPanelProps
           </div>
         </div>
       ) : null}
+
+      {trackerState.run?.report ? <ServerRunQcCard report={trackerState.run.report} /> : null}
 
       <ServerRunErrorCard error={trackerState.lastError} />
 

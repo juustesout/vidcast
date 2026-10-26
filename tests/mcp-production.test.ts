@@ -64,6 +64,7 @@ describe('production MCP tool definitions', () => {
     const names = PRODUCTION_TOOL_DEFINITIONS.map((entry) => entry.name);
     expect(names).toEqual(['run_production', 'get_run_status', 'get_run_log']);
     expect(PRODUCTION_TOOL_DEFINITIONS.find((entry) => entry.name === 'run_production')?.annotations.readOnlyHint).toBe(false);
+    expect(PRODUCTION_TOOL_DEFINITIONS.find((entry) => entry.name === 'get_run_status')?.description).toContain('run.report');
   });
 });
 
