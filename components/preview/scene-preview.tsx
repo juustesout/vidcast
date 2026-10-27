@@ -4,6 +4,7 @@ import Image from 'next/image';
 import React, { type ReactNode } from 'react';
 
 import { deriveSceneRenderStatus, formatRenderStatusLabel } from '@/lib/render/render-status';
+import { formatTransitionLabel } from '@/lib/constants';
 import { resolveTextOverlay, toCssColor } from '@/lib/render/overlay-resolve';
 import type { Project, RenderPlan } from '@/lib/types/render';
 import type { Scene } from '@/lib/types/scene';
@@ -139,7 +140,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
       { className: 'flex flex-wrap gap-2 text-xs text-slate-300' },
       React.createElement(Chip, null, scene.type),
       React.createElement(Chip, null, scene.render.motion.preset),
-      React.createElement(Chip, null, scene.render.transition.type),
+      React.createElement(Chip, null, formatTransitionLabel(scene.render.transition.type)),
       React.createElement(Chip, null, `${effectiveDuration.toFixed(1)} sec`),
       React.createElement(Chip, null, resolvedScene?.status ?? 'unknown'),
       React.createElement(Chip, null, formatRenderStatusLabel(renderStatus.status))
@@ -324,7 +325,7 @@ export function ScenePreview({ project, scene, renderPlan, isRendering = false }
             React.createElement(SummaryRow, { label: 'Asset ID', value: assetId ?? 'None' }),
             React.createElement(SummaryRow, { label: 'Reference IDs', value: scene.referenceIds.join(', ') || 'None' }),
             React.createElement(SummaryRow, { label: 'Motion', value: scene.render.motion.preset }),
-            React.createElement(SummaryRow, { label: 'Transition', value: scene.render.transition.type }),
+            React.createElement(SummaryRow, { label: 'Transition', value: formatTransitionLabel(scene.render.transition.type) }),
             React.createElement(SummaryRow, { label: 'Ready', value: resolvedScene?.status ?? 'unknown' }),
             React.createElement(SummaryRow, { label: 'Render status', value: formatRenderStatusLabel(renderStatus.status) }),
             React.createElement(SummaryRow, { label: 'Narration asset', value: narrationAudioAsset?.filename ?? 'None' })

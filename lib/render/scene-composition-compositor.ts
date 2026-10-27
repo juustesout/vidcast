@@ -7,6 +7,7 @@ import { getProjectRoot } from '@/lib/storage/storage-paths';
 import { presenterDecodeInputArgs, probePresenterVideo, type PresenterVideoProbe } from './presenter-codec';
 import { isSafeAssetPath, sortCompositionLayers } from './scene-composition';
 import { buildLogoOverlayFilter, resolveLogoGeometry } from './logo-overlay';
+import { buildSceneFadeFilters } from './render-source';
 import type { FFmpegRuntime } from './ffmpeg-runtime';
 
 interface CompositionRenderOptions {
@@ -75,6 +76,7 @@ export function buildCompositionLayerFilters(options: {
   duration: number;
   presenterClipDuration?: number;
   presenterStartOffsetSeconds?: number;
+  fadeFilters?: string[];
   overlayFilter?: string;
 }): string[] {
   const filters: string[] = ['[0:v]format=rgba[base0]'];
@@ -123,6 +125,12 @@ export function buildCompositionLayerFilters(options: {
     filters.push(`[${baseLabel}][${preparedLabel}]overlay=${overlay}[${nextLabel}]`);
     baseLabel = nextLabel;
   });
+
+  if (options.fadeFilters && options.fadeFilters.length > 0) {
+    const fadeLabel = 'faded';
+    filters.push(`[${baseLabel}]${options.fadeFilters.join(',')}[${fadeLabel}]`);
+    baseLabel = fadeLabel;
+  }
 
   if (options.overlayFilter) {
     const textLabel = 'text';
@@ -212,6 +220,7 @@ export async function buildCompositionSceneArgs(
     duration: scene.duration,
     presenterClipDuration: composition.presenterClipDuration,
     presenterStartOffsetSeconds: composition.presenterStartOffsetSeconds,
+    fadeFilters: buildSceneFadeFilters(scene.duration, scene.transition),
     overlayFilter
   });
 

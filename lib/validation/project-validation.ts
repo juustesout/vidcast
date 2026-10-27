@@ -508,6 +508,21 @@ export function validateProject(project: Project): RenderValidationResult {
 
     if (!TRANSITION_PRESETS.includes(scene.render?.transition?.type as (typeof TRANSITION_PRESETS)[number])) {
       pushIssue(errors, 'error', 'scene.transition.invalid', `scenes.${scene.id}.render.transition.type`, 'Transition preset is not supported.');
+    } else if (scene.render?.transition?.type === 'crossfade') {
+      pushIssue(
+        warnings,
+        'warning',
+        'scene.transition.crossfade.unsupported',
+        `scenes.${scene.id}.render.transition.type`,
+        'Crossfade is not supported by the renderer; this scene renders without a scene fade.'
+      );
+    }
+
+    const transitionDuration = scene.render?.transition?.duration;
+    if (transitionDuration !== undefined && transitionDuration !== null) {
+      if (typeof transitionDuration !== 'number' || !Number.isFinite(transitionDuration) || transitionDuration <= 0) {
+        pushIssue(errors, 'error', 'scene.transition.duration.invalid', `scenes.${scene.id}.render.transition.duration`, 'Transition duration must be a positive number.');
+      }
     }
 
     if (scene.overlay && !OVERLAY_TYPES.includes(scene.overlay.type)) {

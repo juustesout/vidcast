@@ -4,7 +4,7 @@ import Image from 'next/image';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ANIMATION_TEMPLATE_IDS, type AnimationDestination, type AnimationTemplateSummary } from '@/lib/animation/types';
-import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, LOGO_OVERLAY_LIMITS, LOGO_OVERLAY_POSITIONS, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
+import { ASPECT_RATIOS, GENERATION_PROVIDERS, GENERATION_STATUSES, LOGO_OVERLAY_LIMITS, LOGO_OVERLAY_POSITIONS, MOTION_PRESETS, OVERLAY_POSITIONS, OVERLAY_STYLE_LIMITS, OVERLAY_TYPES, SCENE_TYPES, TRANSITION_PRESET_LABELS, TRANSITION_PRESETS, VIDEO_GENERATION_PROVIDERS } from '@/lib/constants';
 import { ExplainerStoryWorkspace } from '@/components/project/explainer-story-workspace';
 import { BackgroundMusicPanel } from '@/components/project/background-music-panel';
 import { HtmlStillSlotImagePicker } from '@/components/project/html-still-slot-image-picker';
@@ -2209,7 +2209,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
                 <SelectField label="Type" value={selectedScene.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, type: value as Scene['type'] }))} options={SCENE_TYPES} />
                 <SelectField label="Visual source" value={visualModeOf(selectedScene)} onChange={(value) => setVisualMode(selectedScene, value as VisualMode)} options={['asset', 'generated_image', 'generated_video', 'stock_image', 'graphic', 'html', 'text', 'blank']} />
                 <SelectField label="Motion" value={selectedScene.render.motion.preset} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, motion: { ...scene.render.motion, preset: value as Scene['render']['motion']['preset'] } } }))} options={MOTION_PRESETS} />
-                <SelectField label="Transition" value={selectedScene.render.transition.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, transition: { ...scene.render.transition, type: value as Scene['render']['transition']['type'] } } }))} options={TRANSITION_PRESETS} />
+                <SelectField label="Transition" value={selectedScene.render.transition.type} onChange={(value) => updateScene(selectedScene.id, (scene) => ({ ...scene, render: { ...scene.render, transition: { ...scene.render.transition, type: value as Scene['render']['transition']['type'] } } }))} options={TRANSITION_PRESETS} labels={TRANSITION_PRESET_LABELS} />
                 <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Overlay</p>

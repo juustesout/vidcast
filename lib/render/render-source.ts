@@ -1,4 +1,5 @@
 import type { RenderPlanScene } from '@/lib/types/render';
+import type { TransitionSpec } from '@/lib/types/scene';
 import { resolveGraphicStyle } from './graphic-style';
 
 function escapeXml(value: string): string {
@@ -249,9 +250,30 @@ export function sceneMotionToZoomPan(scene: RenderPlanScene, frameCount: number)
   }
 }
 
-export function buildSceneFadeFilters(durationSeconds: number): string[] {
-  const fadeSeconds = Math.min(0.35, Math.max(0.12, durationSeconds / 10));
-  if (durationSeconds <= fadeSeconds * 2) {
+export const SCENE_FADE_MIN_SECONDS = 0.12;
+export const SCENE_FADE_MAX_SECONDS = 0.35;
+
+export function resolveSceneFadeSeconds(durationSeconds: number, requestedDuration?: number): number {
+  const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
+  const maxByScene = safeDuration / 2;
+  if (maxByScene <= 0) {
+    return 0;
+  }
+
+  const fallback = Math.min(SCENE_FADE_MAX_SECONDS, Math.max(SCENE_FADE_MIN_SECONDS, safeDuration / 10));
+  const requested = typeof requestedDuration === 'number' && Number.isFinite(requestedDuration) && requestedDuration > 0
+    ? requestedDuration
+    : fallback;
+  return Math.min(SCENE_FADE_MAX_SECONDS, Math.max(SCENE_FADE_MIN_SECONDS, requested), maxByScene);
+}
+
+export function buildSceneFadeFilters(durationSeconds: number, transition?: TransitionSpec): string[] {
+  if (transition?.type !== 'fade') {
+    return [];
+  }
+
+  const fadeSeconds = resolveSceneFadeSeconds(durationSeconds, transition.duration);
+  if (fadeSeconds <= 0 || durationSeconds <= fadeSeconds * 2) {
     return [];
   }
 

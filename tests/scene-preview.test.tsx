@@ -122,6 +122,15 @@ describe('ScenePreview', () => {
     expect(html).toContain('cqw');
   });
 
+  it('marks an unsupported crossfade transition in the preview labels', () => {
+    const project = createImageProject();
+    project.scenes[0].render.transition = { type: 'crossfade' };
+    const renderPlan = resolveRenderPlan(project);
+    const html = renderToStaticMarkup(React.createElement(ScenePreview, { project, scene: project.scenes[0], renderPlan }));
+
+    expect(html).toContain('crossfade (unsupported)');
+  });
+
   it('previews the narration-extended duration instead of the authored duration', () => {
     const project = createImageProject();
     project.assets.find((entry) => entry.id === 'audio-1')!.duration = 5;

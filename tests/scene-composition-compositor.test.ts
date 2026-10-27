@@ -429,6 +429,51 @@ describe('composition compositor helpers', () => {
     expect(filters).not.toContain('shortest=1');
   });
 
+  it('applies scene fade filters after the layer stack but before the text overlay', () => {
+    const layer: RenderPlanCompositionLayer = {
+      id: 'studio-screen',
+      type: 'image',
+      enabled: true,
+      zIndex: 10,
+      rect: STUDIO_BIGSCREEN_RECT,
+      fit: 'contain',
+      assetPath: 'assets/studio/chart.png',
+      mediaKind: 'image'
+    };
+    const filters = buildCompositionLayerFilters({
+      layers: [{ index: 1, layer, path: layer.assetPath ?? '' }],
+      fps: 30,
+      duration: 5,
+      fadeFilters: ['fade=t=in:st=0:d=0.3', 'fade=t=out:st=4.7:d=0.3'],
+      overlayFilter: 'drawtext=text=hi'
+    });
+    const joined = filters.join(';');
+    const fadeIndex = joined.indexOf('fade=t=in:st=0:d=0.3');
+    const overlayIndex = joined.indexOf('drawtext=text=hi');
+    expect(fadeIndex).toBeGreaterThan(joined.indexOf('overlay=x='));
+    expect(fadeIndex).toBeLessThan(overlayIndex);
+    expect(joined).toContain('fade=t=out:st=4.7:d=0.3');
+  });
+
+  it('leaves the composition filter chain unchanged when no fade filters are provided', () => {
+    const layer: RenderPlanCompositionLayer = {
+      id: 'studio-screen',
+      type: 'image',
+      enabled: true,
+      zIndex: 10,
+      rect: STUDIO_BIGSCREEN_RECT,
+      fit: 'contain',
+      assetPath: 'assets/studio/chart.png',
+      mediaKind: 'image'
+    };
+    const filters = buildCompositionLayerFilters({
+      layers: [{ index: 1, layer, path: layer.assetPath ?? '' }],
+      fps: 30,
+      duration: 5
+    }).join(';');
+    expect(filters).not.toContain('fade=t=');
+  });
+
   it('rejects absolute and traversal asset paths', () => {
     expect(() => resolveSafeProjectAssetPath('project-comp-render', '../secret.png')).toThrow(/Unsafe/);
     expect(() => resolveSafeProjectAssetPath('project-comp-render', '/tmp/secret.png')).toThrow(/Unsafe/);
@@ -1683,4 +1728,34 @@ describe('composition scene renderer', () => {
   it('exposes the authored studio bigscreen rect', () => {
     expect(STUDIO_BIGSCREEN_RECT).toEqual({ x: 293, y: 98, width: 1346, height: 761 });
   });
+
+  it('applies the scene fade to the composed output for fade scenes only', async () => {
+    const composition = createStudioComposition({
+      canvas: { width: WIDTH, height: HEIGHT },
+      backgroundAssetId: 'studio_back',
+      backgroundLocalPath: 'assets/studio/studio_back.png',
+      deskEnabled: false,
+      bigscreenEnabled: false
+    });
+    composition.layers = composition.layers.filter((layer) => layer.type !== 'presenter');
+
+    const fadePlan = resolveRenderPlan(makeProject([
+      makeScene(composition, { render: { motion: { preset: 'none' }, transition: { type: 'fade', duration: 0.3 } } })
+    ]));
+    const nonePlan = resolveRenderPlan(makeProject([
+      makeScene(composition, { render: { motion: { preset: 'none' }, transition: { type: 'none' } } })
+    ]));
+
+    const fade = await renderPlan(fadePlan, 'composition-fade');
+    const none = await renderPlan(nonePlan, 'composition-none');
+    expect(fade.result.status).toBe('completed');
+    expect(none.result.status).toBe('completed');
+
+    const fadeHead = await samplePixel(fade.outputPath, 8, 8, 0.05);
+    const fadeMiddle = await samplePixel(fade.outputPath, 8, 8, 0.5);
+    const noneHead = await samplePixel(none.outputPath, 8, 8, 0.05);
+    expect(fadeMiddle[2]).toBeGreaterThan(120);
+    expect(noneHead[2]).toBeGreaterThan(120);
+    expect(fadeHead[2]).toBeLessThan(noneHead[2] * 0.5);
+  }, 120_000);
 });

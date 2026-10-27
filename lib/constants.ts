@@ -19,6 +19,16 @@ export const MOTION_PRESETS: MotionPreset[] = [
 
 export const TRANSITION_PRESETS: TransitionPreset[] = ['none', 'fade', 'crossfade'];
 
+export const TRANSITION_PRESET_LABELS: Record<TransitionPreset, string> = {
+  none: 'none',
+  fade: 'fade',
+  crossfade: 'crossfade (unsupported)'
+};
+
+export function formatTransitionLabel(type: TransitionPreset): string {
+  return TRANSITION_PRESET_LABELS[type] ?? type;
+}
+
 export const OVERLAY_TYPES: OverlayType[] = ['none', 'text', 'title', 'subtitle', 'callout', 'statistic', 'quote'];
 
 export const OVERLAY_POSITIONS: OverlayPosition[] = ['top', 'center', 'bottom'];

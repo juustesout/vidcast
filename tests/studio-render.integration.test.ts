@@ -26,12 +26,16 @@ async function ffmpeg(args: string[]): Promise<void> {
   await runFfmpeg(runtime.ffmpegPath, args, { timeoutMs: 60_000 }, 'scene_render');
 }
 
-async function samplePixel(filePath: string, x: number, y: number): Promise<[number, number, number]> {
+async function samplePixel(filePath: string, x: number, y: number, time = 0.8): Promise<[number, number, number]> {
+  return samplePixelAt(filePath, x, y, time);
+}
+
+async function samplePixelAt(filePath: string, x: number, y: number, time: number): Promise<[number, number, number]> {
   const output = path.join(tempRoot, `pixel-${Date.now()}-${Math.random().toString(16).slice(2)}.rgb`);
   await ffmpeg([
     '-y',
     '-ss',
-    '0.8',
+    String(time),
     '-i',
     filePath,
     '-frames:v',
@@ -48,7 +52,7 @@ async function samplePixel(filePath: string, x: number, y: number): Promise<[num
   return [bytes[0], bytes[1], bytes[2]];
 }
 
-function plan(source: RenderPlanScene['source']): RenderPlan {
+function plan(source: RenderPlanScene['source'], transition: RenderPlanScene['transition'] = { type: 'none' }): RenderPlan {
   return {
     projectId: 'project-studio-render',
     title: 'Studio Render',
@@ -74,7 +78,7 @@ function plan(source: RenderPlanScene['source']): RenderPlan {
         status: 'renderable',
         source,
         motion: { preset: 'none' },
-        transition: { type: 'none' },
+        transition,
         overlay: { type: 'none' },
         referenceIds: [],
         issues: []
@@ -183,6 +187,44 @@ describe('studio overlay rendering (ffmpeg integration)', () => {
 
     const screen = await samplePixel(output, 250, 160);
     expect(screen[0]).toBeGreaterThan(180);
+  }, 120000);
+
+  it('fades the framed still source while leaving the studio chrome opaque', async () => {
+    const output = await render(
+      plan(
+        { kind: 'image', assetPath: redStill, assetType: 'image', width: WIDTH, height: HEIGHT },
+        { type: 'fade', duration: 0.3 }
+      ),
+      'studio-still-fade'
+    );
+
+    const screenHead = await samplePixelAt(output, 250, 160, 0.02);
+    const screenMiddle = await samplePixelAt(output, 250, 160, DURATION / 2);
+    const frameHead = await samplePixelAt(output, 600, 200, 0.02);
+    const frameMiddle = await samplePixelAt(output, 600, 200, DURATION / 2);
+
+    expect(screenMiddle[0]).toBeGreaterThan(180);
+    expect(screenHead[0]).toBeLessThan(screenMiddle[0] * 0.5);
+    expect(frameHead[0]).toBeLessThan(60);
+    expect(frameMiddle[0]).toBeLessThan(60);
+  }, 120000);
+
+  it('fades a framed video source without touching the studio chrome', async () => {
+    const output = await render(
+      plan(
+        { kind: 'video', assetPath: redVideo, assetType: 'video', width: WIDTH, height: HEIGHT },
+        { type: 'fade', duration: 0.3 }
+      ),
+      'studio-video-fade'
+    );
+
+    const screenHead = await samplePixelAt(output, 250, 160, 0.02);
+    const screenMiddle = await samplePixelAt(output, 250, 160, DURATION / 2);
+    const frameMiddle = await samplePixelAt(output, 600, 200, DURATION / 2);
+
+    expect(screenMiddle[0]).toBeGreaterThan(180);
+    expect(screenHead[0]).toBeLessThan(screenMiddle[0] * 0.5);
+    expect(frameMiddle[0]).toBeLessThan(60);
   }, 120000);
 
   it('applies the same studio layer to a video source', async () => {

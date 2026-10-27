@@ -281,13 +281,13 @@ function buildStudioStillArgs(
   const inputArgs = [...logoInputArgs(studioPath, options.sceneFps)];
   const parts: string[] = [];
   let currentLabel: string;
+  const fadeFilters = buildSceneFadeFilters(scene.duration, scene.transition);
 
   if (sourcePath === 'color=black') {
-    parts.push('[0:v]null[base]');
+    parts.push(`[0:v]${[...fadeFilters, 'null'].join(',')}[base]`);
     currentLabel = 'base';
   } else {
     const zoomPan = sceneMotionToZoomPan(scene, frameCount);
-    const fadeFilters = buildSceneFadeFilters(scene.duration);
     const fitFilter = buildVideoScaleFilter(contentWidth, contentHeight, options.fit ?? DEFAULT_RENDER_FIT);
     const padFilter = `pad=${options.sceneWidth}:${options.sceneHeight}:${studio.screen.x}:${studio.screen.y}:color=black`;
     parts.push(`[0:v]${[fitFilter, `zoompan=${zoomPan}:d=${frameCount}:s=${contentWidth}x${contentHeight}:fps=${options.sceneFps}`, ...fadeFilters, padFilter].join(',')}[pre]`);
@@ -358,7 +358,7 @@ function buildStudioVideoArgs(
   const contentHeight = studio.screen.height;
   const inputDuration = sourceDuration(scene);
   const extraDuration = Math.max(0, scene.duration - inputDuration);
-  const fadeFilters = buildSceneFadeFilters(scene.duration);
+  const fadeFilters = buildSceneFadeFilters(scene.duration, scene.transition);
   const videoFilters = [
     `trim=duration=${scene.duration}`,
     'setpts=PTS-STARTPTS',
@@ -427,7 +427,7 @@ function buildStillArgs(
 
   const frameCount = Math.max(1, Math.round(scene.duration * options.sceneFps));
   const zoomPan = sceneMotionToZoomPan(scene, frameCount);
-  const fadeFilters = buildSceneFadeFilters(scene.duration);
+  const fadeFilters = buildSceneFadeFilters(scene.duration, scene.transition);
   // Normalize the still source to the canvas using the same scale policy as the
   // video path (cover = center-crop, contain = letterbox). For sources already
   // rasterized to the canvas size this is a no-op; for a mismatched still image
@@ -449,7 +449,8 @@ function buildStillArgs(
   if (sourcePath === 'color=black') {
     const background = '#020617'.replace('#', '0x');
     if (logo) {
-      const complex = `[0:v]${overlayFilter ?? 'null'}[base];${buildLogoOverlayFilter(logo.geometry, '1:v', 'base', 'logoout')};[logoout]format=yuv420p[v]`;
+      const baseFilters = [...fadeFilters, overlayFilter ?? 'null'];
+      const complex = `[0:v]${baseFilters.join(',')}[base];${buildLogoOverlayFilter(logo.geometry, '1:v', 'base', 'logoout')};[logoout]format=yuv420p[v]`;
       return [
         '-y',
         '-f',
@@ -482,8 +483,9 @@ function buildStillArgs(
       '-t',
       String(scene.duration)
     ];
-    if (overlayFilter) {
-      args.push('-vf', overlayFilter);
+    const blackFilters = [...fadeFilters, ...(overlayFilter ? [overlayFilter] : [])];
+    if (blackFilters.length > 0) {
+      args.push('-vf', blackFilters.join(','));
     }
     args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', options.outputPath);
     return args;
@@ -551,7 +553,7 @@ function buildVideoArgs(
 
   const inputDuration = sourceDuration(scene);
   const extraDuration = Math.max(0, scene.duration - inputDuration);
-  const fadeFilters = buildSceneFadeFilters(scene.duration);
+  const fadeFilters = buildSceneFadeFilters(scene.duration, scene.transition);
   const videoFilters = [
     `trim=duration=${scene.duration}`,
     'setpts=PTS-STARTPTS',
