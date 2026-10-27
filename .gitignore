@@ -10,3 +10,4 @@
 /motion-canvas/dist/
 *.tsbuildinfo
 
+/untracked/
