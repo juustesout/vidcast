@@ -12,8 +12,11 @@ import { ProductionWorkflow } from '@/components/project/production-workflow';
 import { AgentMandatePanel } from '@/components/project/agent-mandate-panel';
 import { ServerRunPanel } from '@/components/project/server-run-panel';
 import { ScenePreview } from '@/components/preview/scene-preview';
+import { ProgramBar } from '@/components/project/program-bar';
+import { SceneLint } from '@/components/project/scene-lint';
 import { ValidationPanel } from '@/components/project/validation-panel';
 import { ReferencesPanel } from '@/components/project/references-panel';
+import { WorkspaceTopbar } from '@/components/project/workspace-topbar';
 import { EmptyPanel, Field, InfoMiniCard, SelectField, TabButton } from '@/components/project/workspace-controls';
 import { createProjectCompositionRequest, createSceneNarrationRequest, createSceneRenderRequest } from '@/lib/client/render-client';
 import { followServerRunFlow, ProductionRunTracker, startServerRunFlow } from '@/lib/client/production-run-tracker';
@@ -35,6 +38,10 @@ import {
   STUDIO_PRESENTER_PIP_SCALE
 } from '@/lib/render/scene-composition';
 import { resolveRenderPlan } from '@/lib/render/scene-resolver';
+import { deriveSaveStatus } from '@/lib/workspace/save-status';
+import { resolveNeighborSceneId } from '@/lib/workspace/scene-navigation';
+import { resolveSceneThumbUrl, sceneThumbPlaceholder } from '@/lib/workspace/scene-thumb';
+import { buildWorkspaceTimeline, resolveTimeToScene } from '@/lib/workspace/timeline';
 import { createId } from '@/lib/utils/ids';
 import { isHidden, subscribeToVisibility } from '@/lib/client/visibility-poll';
 import { joinProjectAssetUrl, joinProjectReferenceUrl } from '@/lib/utils/project-files';
@@ -566,6 +573,7 @@ function attachedAnimationLayer(scene: Scene): { destination: AnimationDestinati
 
 export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   const [draft, setDraft] = useState<Project>(() => cloneProject(project));
+  const [savedSnapshot, setSavedSnapshot] = useState<Project>(() => cloneProject(project));
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('story');
   const [selectedSceneId, setSelectedSceneId] = useState(project.scenes[0]?.id ?? '');
   const [selectedAssetId, setSelectedAssetId] = useState('');
@@ -624,12 +632,18 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     () => draft.scenes.find((scene) => scene.id === selectedSceneId) ?? draft.scenes[0] ?? null,
     [draft.scenes, selectedSceneId]
   );
+  const orderedScenes = useMemo(
+    () => draft.scenes.slice().sort((left, right) => left.order - right.order),
+    [draft.scenes]
+  );
 
   const selectedAsset = useMemo(() => draft.assets.find((asset) => asset.id === selectedAssetId) ?? null, [draft.assets, selectedAssetId]);
   const selectedReference = useMemo(() => draft.references.find((reference) => reference.id === selectedReferenceId) ?? null, [draft.references, selectedReferenceId]);
 
   const validation = validateProject(draft);
   const renderPlan = resolveRenderPlan(draft);
+  const workspaceTimeline = useMemo(() => buildWorkspaceTimeline(renderPlan), [renderPlan]);
+  const saveStatus = useMemo(() => deriveSaveStatus(draft, savedSnapshot), [draft, savedSnapshot]);
   const generationTasks = deriveGenerationTasks(draft);
   const compositionReadiness = useMemo(() => deriveCompositionReadiness(draft, renderPlan, renderingSceneId ? [renderingSceneId] : []), [draft, renderPlan, renderingSceneId]);
   const finalCompositionStatus = useMemo(() => deriveCompositionArtifactStatus(draft, renderPlan), [draft, renderPlan]);
@@ -677,6 +691,28 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     [selectedScene]
   );
   const selectedSceneRenderStatus = useMemo(() => selectedScene ? deriveSceneRenderStatus(draft, selectedScene, renderPlan, { isRendering: renderingSceneId === selectedScene.id }) : null, [draft, selectedScene, renderPlan, renderingSceneId]);
+  const sceneLintItems = useMemo(
+    () =>
+      orderedScenes.map((scene) => {
+        const sceneStatus = deriveSceneRenderStatus(draft, scene, renderPlan, { isRendering: renderingSceneId === scene.id });
+        const planScene = renderPlan.scenes.find((entry) => entry.sceneId === scene.id);
+        const duration = planScene?.duration ?? scene.duration;
+        return {
+          sceneId: scene.id,
+          order: scene.order,
+          type: scene.type,
+          durationLabel: `${duration.toFixed(1)}s`,
+          statusLabel: formatRenderStatusLabel(sceneStatus.status),
+          selected: selectedScene?.id === scene.id,
+          thumbnailUrl: resolveSceneThumbUrl(draft, scene),
+          placeholder: sceneThumbPlaceholder(scene)
+        };
+      }),
+    [draft, orderedScenes, renderPlan, renderingSceneId, selectedScene]
+  );
+  const orderedSceneIds = useMemo(() => orderedScenes.map((scene) => scene.id), [orderedScenes]);
+  const previousSceneId = resolveNeighborSceneId(orderedSceneIds, selectedScene?.id, -1);
+  const nextSceneId = resolveNeighborSceneId(orderedSceneIds, selectedScene?.id, 1);
   const activeVideoAttemptIds = useMemo(() => {
     return draft.scenes
       .flatMap((scene) => {
@@ -1106,9 +1142,9 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       return false;
     }
 
-    if (body.project) {
-      setDraft(body.project);
-    }
+    const nextProject = body.project ?? draft;
+    setDraft(nextProject);
+    setSavedSnapshot(cloneProject(nextProject));
     setSaveMessage('Project saved locally.');
     return true;
   }
@@ -1122,6 +1158,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     }
 
     setDraft(body.project);
+    setSavedSnapshot(cloneProject(body.project));
     return body.project;
   }
 
@@ -1573,6 +1610,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
           const body = (await response.json().catch(() => ({}))) as { project?: Project; message?: string };
           if (response.ok && body.project) {
             setDraft(body.project);
+            setSavedSnapshot(cloneProject(body.project));
           } else if (!response.ok) {
             setGenerationMessage(body.message || 'Could not refresh project state.');
           }
@@ -1865,7 +1903,13 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
   return (
     <div className="space-y-6">
       <header className="studio-panel rounded-[28px] p-4 shadow-panel">
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+        <WorkspaceTopbar
+          title={draft.title}
+          saveStatus={saveStatus}
+          saveError={saveStatus === 'unsaved' && saveMessage.length > 0 && saveMessage !== 'Project saved locally.' ? saveMessage : undefined}
+          onSave={() => void saveProject()}
+        />
+        <div className="mt-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="space-y-2">
             <p className="font-mono text-[10px] uppercase tracking-[0.35em] text-slate-500">Project editor</p>
             <input
@@ -1919,7 +1963,7 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
               Open Final Video
             </button>
           ) : null}
-          {saveMessage ? <span className="self-center text-sm text-emerald-300">{saveMessage}</span> : null}
+          {saveMessage && saveStatus === 'saved' ? <span className="self-center text-sm text-emerald-300">{saveMessage}</span> : null}
           {renderMessage ? <span className="self-center text-sm text-slate-300">{renderMessage}</span> : null}
           {narrationMessage ? <span className="self-center text-sm text-slate-300">{narrationMessage}</span> : null}
           <span className="self-center text-sm text-slate-300">{hasNarrationAudioInProject ? 'Composition includes narration audio where available.' : 'Composition will be silent unless scene narration audio is linked.'}</span>
@@ -2161,34 +2205,42 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
       ) : null}
 
       {activeTab === 'scenes' ? (
-        <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)_400px]">
-          <aside className="studio-panel rounded-[28px] p-4 shadow-panel xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)] xl:overflow-auto studio-scrollbar">
-            <div className="space-y-2">
-              {draft.scenes
-                .slice()
-                .sort((a, b) => a.order - b.order)
-                .map((scene) => {
-                  const sceneStatus = deriveSceneRenderStatus(draft, scene, renderPlan, { isRendering: renderingSceneId === scene.id });
-                  return (
-                  <button
-                    key={scene.id}
-                    type="button"
-                    onClick={() => setSelectedSceneId(scene.id)}
-                    className={`w-full rounded-3xl border px-4 py-3 text-left transition ${selectedScene?.id === scene.id ? 'border-amber-300/50 bg-amber-200/10' : 'border-slate-700/70 bg-slate-950/30 hover:border-slate-500/80 hover:bg-slate-900/60'}`}
-                  >
-                    <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-slate-500">Scene {String(scene.order).padStart(2, '0')}</p>
-                    <h3 className="mt-1 text-sm font-semibold text-white">{scene.type.toUpperCase()}</h3>
-                    <p className="mt-1 text-xs text-slate-400">{scene.render.motion.preset}</p>
-                    <p className="mt-1 text-xs text-slate-300">{formatRenderStatusLabel(sceneStatus.status)}</p>
-                  </button>
-                  );
-                })}
-            </div>
-          </aside>
-
-          <section className="studio-panel rounded-[28px] p-4 shadow-panel xl:min-h-[calc(100vh-3rem)]">
-            {selectedScene ? <ScenePreview project={draft} scene={selectedScene} renderPlan={renderPlan} isRendering={renderingSceneId === selectedScene.id} /> : <EmptyPanel message="No scene selected." />}
-          </section>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
+          <div className="space-y-4">
+            <section className="studio-panel rounded-[28px] p-4 shadow-panel">
+              {selectedScene ? <ScenePreview project={draft} scene={selectedScene} renderPlan={renderPlan} isRendering={renderingSceneId === selectedScene.id} /> : <EmptyPanel message="No scene selected." />}
+            </section>
+            <section className="studio-panel rounded-[28px] p-4 shadow-panel">
+              <SceneLint
+                items={sceneLintItems}
+                onSelect={setSelectedSceneId}
+                onPrevious={() => {
+                  if (previousSceneId) {
+                    setSelectedSceneId(previousSceneId);
+                  }
+                }}
+                onNext={() => {
+                  if (nextSceneId) {
+                    setSelectedSceneId(nextSceneId);
+                  }
+                }}
+                canGoPrevious={Boolean(previousSceneId)}
+                canGoNext={Boolean(nextSceneId)}
+              />
+            </section>
+            <ProgramBar
+              timeline={workspaceTimeline}
+              selectedSceneId={selectedScene?.id}
+              compositionStatus={finalCompositionStatus.status}
+              compositionReason={finalCompositionStatus.reasons[0]}
+              onSeek={(time) => {
+                const hit = resolveTimeToScene(workspaceTimeline, time);
+                if (hit) {
+                  setSelectedSceneId(hit.sceneId);
+                }
+              }}
+            />
+          </div>
 
           <aside className="studio-panel rounded-[28px] p-4 shadow-panel xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)] xl:overflow-auto studio-scrollbar">
             {selectedScene ? (
