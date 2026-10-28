@@ -157,7 +157,16 @@ function normalizeLegacyVisual(scene: LegacyScene, project: Partial<Project>): V
     fingerprint?: string;
   } | undefined;
   const assetId = legacyVisual?.assetId ?? scene.assetIds?.[0];
-  const referenceIds = scene.referenceIds ?? [];
+  // `scene.referenceIds` is the author-facing selection; `generation.referenceIds`
+  // is the per-attempt snapshot the generation services prefer. They are
+  // distinct fields and must round-trip independently: overwriting the snapshot
+  // with the scene list silently dropped keyframe references (and any
+  // generation-only reference) on the first save. Legacy projects without a
+  // generation snapshot keep the historical scene-level fallback.
+  const sceneReferenceIds = scene.referenceIds ?? [];
+  const referenceIds = Array.isArray(legacyVisual?.generation?.referenceIds)
+    ? legacyVisual.generation.referenceIds
+    : sceneReferenceIds;
   const prompt = legacyVisual?.visualPrompt ?? legacyVisual?.generation?.prompt ?? '';
   const negativePrompt = legacyVisual?.negativePrompt ?? legacyVisual?.generation?.negativePrompt;
   const aspectRatio = project.aspectRatio ?? DEFAULT_RENDER_SETTINGS.aspectRatio;

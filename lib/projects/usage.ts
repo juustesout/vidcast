@@ -41,8 +41,35 @@ export function getAssetUsage(project: Project, assetId: string): string[] {
   return sceneUsage;
 }
 
+/**
+ * True when a scene consumes `referenceId` as a generation input.
+ *
+ * The scene-level list, the per-attempt generation snapshot and the keyframe
+ * designations are distinct fields. The generation services prefer the snapshot
+ * and fall back to the scene list, while a keyframe id can be the only remaining
+ * pointer after a partial update. All of them count as usage so deleting a
+ * reference can never leave a dangling generation input behind.
+ */
+function sceneUsesReference(scene: Project['scenes'][number], referenceId: string): boolean {
+  if (scene.referenceIds.includes(referenceId)) {
+    return true;
+  }
+
+  const visual = scene.visual;
+  if (!visual || (visual.kind !== 'generated_image' && visual.kind !== 'generated_video')) {
+    return false;
+  }
+
+  const generation = visual.generation;
+  return (
+    (generation.referenceIds ?? []).includes(referenceId) ||
+    generation.startFrameReferenceId === referenceId ||
+    generation.endFrameReferenceId === referenceId
+  );
+}
+
 export function getReferenceUsage(project: Project, referenceId: string): string[] {
   return project.scenes
-    .filter((scene) => scene.referenceIds.includes(referenceId))
+    .filter((scene) => sceneUsesReference(scene, referenceId))
     .map((scene) => scene.id);
 }

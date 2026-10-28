@@ -39,7 +39,18 @@ function sha256(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 }
 
-function visualFingerprint(visual: VisualSpec | undefined): unknown {
+function effectiveReferenceIds(visual: VisualSpec, sceneReferenceIds: string[]): string[] {
+  if (visual.kind !== 'generated_image' && visual.kind !== 'generated_video') {
+    return [];
+  }
+  // Mirrors the generation services: the per-attempt snapshot wins when it is
+  // non-empty, otherwise the scene list is the fallback. Approval must cover the
+  // set that will actually be sent to the provider, not just the authored list.
+  const generationReferenceIds = visual.generation?.referenceIds ?? [];
+  return generationReferenceIds.length > 0 ? generationReferenceIds : sceneReferenceIds;
+}
+
+function visualFingerprint(visual: VisualSpec | undefined, sceneReferenceIds: string[]): unknown {
   if (!visual) {
     return null;
   }
@@ -55,15 +66,24 @@ function visualFingerprint(visual: VisualSpec | undefined): unknown {
       return {
         kind: 'generated_image',
         prompt: visual.generation?.prompt ?? '',
+        negativePrompt: visual.generation?.negativePrompt ?? null,
         model: visual.generation?.model ?? null,
-        provider: visual.generation?.provider ?? null
+        provider: visual.generation?.provider ?? null,
+        referenceIds: effectiveReferenceIds(visual, sceneReferenceIds)
       };
     case 'generated_video':
       return {
         kind: 'generated_video',
         prompt: visual.generation?.prompt ?? '',
+        negativePrompt: visual.generation?.negativePrompt ?? null,
         model: visual.generation?.model ?? null,
-        provider: visual.generation?.provider ?? null
+        provider: visual.generation?.provider ?? null,
+        referenceIds: effectiveReferenceIds(visual, sceneReferenceIds),
+        // Keyframes select which reference seeds the first/last frame, so a
+        // changed designation is a different production input even when the
+        // reference set itself is unchanged.
+        startFrameReferenceId: visual.generation?.startFrameReferenceId ?? null,
+        endFrameReferenceId: visual.generation?.endFrameReferenceId ?? null
       };
     case 'stock_image':
       return {
@@ -124,7 +144,7 @@ function sceneFingerprint(scene: Scene): unknown {
     narrationText: scene.narration?.text ?? '',
     narrationVoiceId: scene.narration?.voiceId ?? null,
     narrationModel: scene.narration?.model ?? null,
-    visual: visualFingerprint(scene.visual)
+    visual: visualFingerprint(scene.visual, scene.referenceIds)
   };
 }
 
