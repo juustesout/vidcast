@@ -4,7 +4,7 @@ import Image from 'next/image';
 import { useRef, useState } from 'react';
 
 import { EmptyPanel, Field } from '@/components/project/workspace-controls';
-import { getReferenceUsage } from '@/lib/projects/usage';
+import { getReferenceAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
 import type { Project } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import { joinProjectReferenceUrl } from '@/lib/utils/project-files';
@@ -17,6 +17,7 @@ interface ReferencesPanelProps {
   selectedReferenceId: string;
   onSelectReference: (referenceId: string) => void;
   onNavigateScene: (sceneId: string) => void;
+  onNavigateAsset?: (assetId: string) => void;
   newReferenceName: string;
   newReferenceDescription: string;
   newReferenceTags: string;
@@ -37,6 +38,7 @@ export function ReferencesPanel({
   selectedReferenceId,
   onSelectReference,
   onNavigateScene,
+  onNavigateAsset,
   newReferenceName,
   newReferenceDescription,
   newReferenceTags,
@@ -78,6 +80,8 @@ export function ReferencesPanel({
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {references.map((reference) => {
             const usage = getReferenceUsage(project, reference.id);
+            const assetUsage = getReferenceAssetUsage(project, reference.id);
+            const assetSuffix = assetUsage.length > 0 ? ` • ${assetUsage.length} asset(s)` : '';
             return (
               <button
                 key={reference.id}
@@ -90,7 +94,7 @@ export function ReferencesPanel({
                 </div>
                 <p className="mt-2 truncate text-sm font-semibold text-white">{reference.name}</p>
                 <p className="text-xs text-slate-400 line-clamp-2">{reference.description}</p>
-                <p className="text-xs text-slate-400">{reference.tags.join(', ') || 'No tags'} • used by {usage.length}</p>
+                <p className="text-xs text-slate-400">{reference.tags.join(', ') || 'No tags'} • used by {usage.length}{assetSuffix}</p>
               </button>
             );
           })}
@@ -103,6 +107,7 @@ export function ReferencesPanel({
             project={project}
             reference={selectedReference}
             onNavigateScene={onNavigateScene}
+            onNavigateAsset={onNavigateAsset}
             onSave={(fields) => onSaveReferenceDetails(selectedReference, fields)}
             onDelete={onDeleteReference}
           />
@@ -119,12 +124,14 @@ function ReferenceDetailCard({
   project,
   reference,
   onNavigateScene,
+  onNavigateAsset,
   onSave,
   onDelete
 }: {
   project: Project;
   reference: ReferenceImage;
   onNavigateScene: (sceneId: string) => void;
+  onNavigateAsset?: (assetId: string) => void;
   onSave: (fields: { name: string; description: string; tags: string[] }) => void;
   onDelete: () => void;
 }): JSX.Element {
@@ -133,6 +140,7 @@ function ReferenceDetailCard({
   const [tags, setTags] = useState(reference.tags.join(', '));
 
   const usage = getReferenceUsage(project, reference.id);
+  const assetUsage = getReferenceAssetUsage(project, reference.id);
 
   return (
     <div className="space-y-3">
@@ -162,6 +170,33 @@ function ReferenceDetailCard({
             );
           })}
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-700/70 bg-slate-950/35 p-3">
+        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Used by generated assets</p>
+        {assetUsage.length === 0 ? (
+          <p className="mt-2 text-xs text-slate-400">No generated asset records this reference.</p>
+        ) : (
+          <div className="mt-2 space-y-2">
+            {assetUsage.map((assetId) => {
+              const asset = project.assets.find((entry) => entry.id === assetId);
+              const label = asset ? `${asset.filename} (${asset.type})` : assetId;
+              return (
+                <button
+                  key={assetId}
+                  type="button"
+                  onClick={() => onNavigateAsset?.(assetId)}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950/40 px-3 py-2 text-left text-sm text-slate-200"
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {assetUsage.length > 0 ? (
+          <p className="mt-2 text-xs text-amber-200/80">Unbind or delete these assets before deleting this reference.</p>
+        ) : null}
       </div>
 
       <div className="flex gap-2">

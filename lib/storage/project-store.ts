@@ -8,7 +8,7 @@ import type { Project, RenderValidationResult } from '@/lib/types/render';
 import type { ReferenceImage } from '@/lib/types/reference';
 import type { Scene } from '@/lib/types/scene';
 import { normalizeProject } from '@/lib/projects/normalize-project';
-import { getAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
+import { getAssetUsage, getReferenceAssetUsage, getReferenceUsage } from '@/lib/projects/usage';
 import { validateProject } from '@/lib/validation/project-validation';
 import { mediaStore } from '@/lib/storage/media-store';
 import { withKeyedLock } from '@/lib/utils/keyed-mutex';
@@ -680,6 +680,19 @@ export interface CreateProjectWithClaimResult {
   claimToken: string;
 }
 
+/**
+ * Usage report for a reference deletion attempt.
+ *
+ * `usageSceneIds` keeps its historical meaning: scenes that consume the
+ * reference as a generation input. `usageAssetIds` lists generated assets whose
+ * provenance trace still points at the reference. Any non-empty list blocks the
+ * deletion so a trace can never dangle.
+ */
+export interface ReferenceDeletionUsage {
+  usageSceneIds: string[];
+  usageAssetIds: string[];
+}
+
 export interface ProjectStore {
   listProjects(ownerId?: string): Promise<ProjectSummary[]>;
   getProject(id: string): Promise<Project | null>;
@@ -694,7 +707,7 @@ export interface ProjectStore {
   importAsset(projectId: string, file: File): Promise<Asset>;
   importReference(projectId: string, file: File, name: string, description: string, tags: string[]): Promise<ReferenceImage>;
   deleteAsset(projectId: string, assetId: string): Promise<{ usageSceneIds: string[] }>;
-  deleteReference(projectId: string, referenceId: string): Promise<{ usageSceneIds: string[] }>;
+  deleteReference(projectId: string, referenceId: string): Promise<ReferenceDeletionUsage>;
   updateReference(projectId: string, referenceId: string, patch: { name?: string; description?: string; tags?: string[] }): Promise<ReferenceImage>;
 }
 
@@ -917,25 +930,30 @@ class JsonProjectStore implements ProjectStore {
     return { usageSceneIds: [] };
   }
 
-  async deleteReference(projectId: string, referenceId: string): Promise<{ usageSceneIds: string[] }> {
+  async deleteReference(projectId: string, referenceId: string): Promise<ReferenceDeletionUsage> {
     const project = await this.getProject(projectId);
     if (!project) {
       throw new Error(`Project ${projectId} not found.`);
     }
 
+    // Both checks run before anything is touched on disk. Assets are checked
+    // too because `asset.generation.referenceIds` is a hard validation input:
+    // deleting the reference first would leave a dangling trace that makes the
+    // whole project unsavable.
     const usageSceneIds = getReferenceUsage(project, referenceId);
-    if (usageSceneIds.length > 0) {
-      return { usageSceneIds };
+    const usageAssetIds = getReferenceAssetUsage(project, referenceId);
+    if (usageSceneIds.length > 0 || usageAssetIds.length > 0) {
+      return { usageSceneIds, usageAssetIds };
     }
 
     const reference = project.references.find((entry) => entry.id === referenceId);
     if (!reference) {
-      return { usageSceneIds: [] };
+      return { usageSceneIds: [], usageAssetIds: [] };
     }
 
     await mediaStore.deleteReferenceFile(projectId, reference);
     await this.mutateProject(projectId, (current) => ({ ...current, references: current.references.filter((entry) => entry.id !== referenceId) }));
-    return { usageSceneIds: [] };
+    return { usageSceneIds: [], usageAssetIds: [] };
   }
 
   async updateReference(projectId: string, referenceId: string, patch: { name?: string; description?: string; tags?: string[] }): Promise<ReferenceImage> {

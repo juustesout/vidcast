@@ -1886,8 +1886,17 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
     }
 
     const response = await fetch(`/api/projects/${draft.id}/references/${selectedReference.id}`, { method: 'DELETE' });
-    const body = (await response.json().catch(() => ({}))) as { message?: string; usageSceneIds?: string[] };
+    const body = (await response.json().catch(() => ({}))) as { message?: string; usageSceneIds?: string[]; usageAssetIds?: string[] };
     if (!response.ok) {
+      const assetUsage = body.usageAssetIds ?? [];
+      if (assetUsage.length > 0) {
+        const labels = assetUsage.map((assetId) => {
+          const asset = draft.assets.find((entry) => entry.id === assetId);
+          return asset ? `${asset.filename} (${asset.type})` : assetId;
+        });
+        setReferenceMessage(`This reference is still recorded by generated asset(s): ${labels.join(', ')}. Unbind or delete those assets first.`);
+        return;
+      }
       setReferenceMessage(body.message || 'Could not delete reference.');
       return;
     }
@@ -4503,6 +4512,10 @@ export function ProjectWorkspace({ project }: ProjectWorkspaceProps) {
           onNavigateScene={(sceneId) => {
             setSelectedSceneId(sceneId);
             setActiveTab('scenes');
+          }}
+          onNavigateAsset={(assetId) => {
+            setSelectedAssetId(assetId);
+            setActiveTab('assets');
           }}
           newReferenceName={newReferenceName}
           newReferenceDescription={newReferenceDescription}

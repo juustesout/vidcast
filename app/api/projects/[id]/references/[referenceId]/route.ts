@@ -2,10 +2,26 @@ import { NextResponse } from 'next/server';
 
 import { AccessControlError, requireProjectAccess } from '@/lib/security/access-control';
 import { toAccessControlResponse } from '@/lib/security/http-response';
-import { projectStore } from '@/lib/storage/project-store';
+import { projectStore, type ReferenceDeletionUsage } from '@/lib/storage/project-store';
 
 interface RouteContext {
   params: Promise<{ id: string; referenceId: string }>;
+}
+
+function describeBlockingUsage(usage: ReferenceDeletionUsage): string {
+  const parts: string[] = [];
+  if (usage.usageSceneIds.length > 0) {
+    parts.push(`${usage.usageSceneIds.length} scene(s)`);
+  }
+  if (usage.usageAssetIds.length > 0) {
+    parts.push(`${usage.usageAssetIds.length} generated asset(s)`);
+  }
+
+  const target = parts.join(' and ');
+  if (usage.usageAssetIds.length > 0) {
+    return `This reference is used by ${target}. Unbind or delete those assets first, then delete the reference.`;
+  }
+  return `This reference is used by ${target}. Remove it from those scenes before deleting.`;
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
@@ -48,11 +64,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
   try {
     const result = await projectStore.deleteReference(id, referenceId);
-    if (result.usageSceneIds.length > 0) {
+    if (result.usageSceneIds.length > 0 || result.usageAssetIds.length > 0) {
       return NextResponse.json(
         {
-          message: `This reference is used by ${result.usageSceneIds.length} scene(s). Remove it from those scenes before deleting.`,
-          usageSceneIds: result.usageSceneIds
+          message: describeBlockingUsage(result),
+          usageSceneIds: result.usageSceneIds,
+          usageAssetIds: result.usageAssetIds
         },
         { status: 409 }
       );

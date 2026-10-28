@@ -73,3 +73,19 @@ export function getReferenceUsage(project: Project, referenceId: string): string
     .filter((scene) => sceneUsesReference(scene, referenceId))
     .map((scene) => scene.id);
 }
+
+/**
+ * Ids of generated assets that record `referenceId` as a provenance input.
+ *
+ * `asset.generation.referenceIds` is written once when the asset is created and
+ * is never mutated afterwards. It is not a scene input any more, but it is still
+ * a hard validation input: `validateProject` rejects a project whose asset trace
+ * points at a reference that no longer exists. Counting it as usage keeps a
+ * reference from being deleted while an existing asset still claims it, so the
+ * project can never be left in that invalid state by the delete path.
+ */
+export function getReferenceAssetUsage(project: Project, referenceId: string): string[] {
+  return project.assets
+    .filter((asset) => (asset.generation?.referenceIds ?? []).includes(referenceId))
+    .map((asset) => asset.id);
+}

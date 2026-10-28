@@ -277,7 +277,7 @@ describe('P406 reference deletion protection', () => {
     }));
 
     const result = await projectStore.deleteReference(project.id, 'unused');
-    expect(result).toEqual({ usageSceneIds: [] });
+    expect(result).toEqual({ usageSceneIds: [], usageAssetIds: [] });
 
     const reloaded = await projectStore.getProject(project.id);
     expect(reloaded?.references).toEqual([]);
